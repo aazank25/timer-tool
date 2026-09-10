@@ -1,0 +1,80 @@
+{
+  "name": "focusdesk",
+  "private": true,
+  "version": "0.1.0",
+  "description": "FocusDesk as a menu-bar app",
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "payload": "node scripts/build.mjs",
+    "start": "npm run payload && electron .",
+    "dist:mac": "npm run payload && electron-builder --mac",
+    "dist:win": "npm run payload && electron-builder --win",
+    "dist:linux": "npm run payload && electron-builder --linux",
+    "pack": "npm run payload && electron-builder --dir",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1"
+  },
+  "devDependencies": {
+    "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.2"
+  },
+  "build": {
+    "appId": "com.focusdesk.app",
+    "productName": "FocusDesk",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.mjs",
+      "dist/**/*",
+      "web/**/*",
+      "assets/**/*",
+      "package.json",
+      "!node_modules/better-sqlite3/deps/**",
+      "!node_modules/better-sqlite3/src/**",
+      "!node_modules/better-sqlite3/build/Release/obj.target/**"
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**"
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.png",
+      "darkModeSupport": true,
+      "notarize": false
+    },
+    "dmg": {
+      "title": "FocusDesk"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "build/icon.png",
+      "category": "Utility",
+      "executableName": "focusdesk"
+    }
+  },
+  "author": "FocusDesk",
+  "repository": "https://github.com/aazank25/timer-tool"
+}

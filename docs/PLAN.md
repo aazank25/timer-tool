@@ -200,20 +200,40 @@ Worth doing only if the ICS lag annoys you.
 The sync layer is already provider-shaped (`calendar_events.provider`), so this
 is a new adapter beside the ICS one, not a rewrite.
 
-### Phase 6 — make it feel like an app
+### Phase 6 — a real desktop app. Done.
 
-Today it runs as a local web app on `http://127.0.0.1:4317`. To make it a real
-desktop citizen:
+`npm run desktop:mac` produces a `.dmg`. The app carries the whole stack: the
+Electron main process starts the Express server in-process on an ephemeral
+loopback port and points a window at it.
 
-- **Tray/menu-bar item showing the live countdown** — the single biggest
-  quality-of-life win. A timer you can't see is a timer you forget to stop.
-- **Global hotkey** to start/pause and to log an interruption.
-- **Launch at login**, native notifications, window state.
+- **Menu-bar countdown.** The server owns the clock, so the tray polls it every
+  five seconds and interpolates in between rather than keeping its own count.
+  Its menu pauses, resumes, logs an interruption, or opens the window.
+- **Closing the window parks the app in the menu bar** and the block keeps
+  running; quitting is explicit.
+- **Global hotkeys:** Cmd+Shift+F to show, Cmd+Shift+Space to pause/resume.
+- **Launch at login**, off by default, toggled from the menu bar.
+- **Data in `~/Library/Application Support/FocusDesk/data`**, so reinstalling
+  or rebuilding never touches your history.
+- Window uses the hidden-inset title bar, with the app's own top bar as the
+  drag handle. The client learns it is inside the shell from a `?desktop=1`
+  flag, so the browser build is unchanged.
 
-**Tauri vs Electron:** Tauri gives a ~10MB binary and a proper tray, at the cost
-of a Rust toolchain. Electron is JS-only and instantly familiar, at ~120MB.
-Recommendation: **Tauri**, because a tray timer is the whole point and the
-frontend is already a plain static bundle it can host unchanged.
+**Electron, not Tauri — reversing the earlier recommendation.** The plan
+originally called for Tauri on size grounds. That was the wrong read once the
+packaging was actually worked through: the server is Node with a native SQLite
+module, and Tauri has no Node runtime, so it would have to ship the server as a
+separately compiled sidecar binary with its own native-module story. Electron
+*is* a Node runtime, so the server runs inside the app with no sidecar at all,
+and `electron-builder install-app-deps` rebuilds better-sqlite3 against
+Electron's ABI as a normal build step. The cost is bundle size (~190MB
+installed) — the right trade for a personal tool that has to be reliable.
+
+**How the payload is assembled** (`desktop/scripts/build.mjs`): esbuild bundles
+the server into one `dist/server.mjs` with only `better-sqlite3` left external,
+so the packaged app carries no `node_modules` tree beyond that one native
+module. Icons are generated at build time by a small PNG encoder, so no binary
+assets sit in git.
 
 ### Later, if wanted
 
@@ -298,5 +318,8 @@ Answers change what gets built next; none of them block what already works.
    API return AI meeting-note transcripts?
 3. **Breaks.** Do you want enforced Pomodoro breaks, or just the focus blocks?
    Everything is in place; the loop is deliberately not opinionated yet.
+4. **Auto-update.** Worth wiring (electron-updater against GitHub releases) or
+   is rebuilding by hand fine? Only matters once more than one machine runs it.
 
-Settled: Google Calendar, macOS, and Notion context as the next phase.
+Settled: Google Calendar, macOS, a real desktop app (shipped), and Notion
+context as the next phase.
