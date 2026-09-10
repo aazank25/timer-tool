@@ -52,6 +52,7 @@ export const keys = {
   day: (day: string) => ['stats', 'day', day] as const,
   range: (from: string, to: string) => ['stats', 'range', from, to] as const,
   plan: (day: string) => ['plan', day] as const,
+  timers: ['timers'] as const,
   settings: ['settings'] as const,
   calendarSources: ['calendar', 'sources'] as const,
   calendarEvents: (from: string, to: string) => ['calendar', 'events', from, to] as const,
@@ -63,6 +64,7 @@ function invalidateTimeline(qc: QueryClient) {
   void qc.invalidateQueries({ queryKey: ['stats'] });
   void qc.invalidateQueries({ queryKey: ['plan'] });
   void qc.invalidateQueries({ queryKey: ['projects'] });
+  void qc.invalidateQueries({ queryKey: ['timers'] });
   void qc.invalidateQueries({ queryKey: ['calendar', 'events'] });
 }
 
@@ -99,6 +101,19 @@ export function usePlan(day: string | undefined) {
     queryFn: () => api.listPlan(day as string),
     enabled: !!day,
   });
+}
+
+export function useTimers() {
+  return useQuery({ queryKey: keys.timers, queryFn: () => api.listTimers(), staleTime: 30_000 });
+}
+
+export function useTimerActions() {
+  const qc = useQueryClient();
+  const onDone = () => void qc.invalidateQueries({ queryKey: ['timers'] });
+  return {
+    save: useMutation({ mutationFn: api.saveTimer, onSuccess: onDone }),
+    unsave: useMutation({ mutationFn: api.unsaveTimer, onSuccess: onDone }),
+  };
 }
 
 export function useSettings() {

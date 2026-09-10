@@ -17,6 +17,7 @@ Four concepts, and no more:
 | **Project** | An overarching thing you're pushing on — *RCM Dashboard*, *Auth Pricing Model*. Long-lived, colour-coded, optional weekly hour target. |
 | **Block** | One stretch of focused work. Belongs to at most one project, titled with **what you actually did** ("Competitor demo teardown — Waystar"), rated 1–5 afterwards. |
 | **Plan item** | A block you intend to do today. One click turns it into a running block. |
+| **Saved timer** | A project + task pair you start with one click. Derived from what you repeat; pinning only holds one at the top. |
 | **Context item** | Something from outside — a meeting, a Notion page, a transcript — attached to a project or a block. |
 
 ### Why the title is written twice
@@ -72,6 +73,10 @@ reporting splits a block across the hours it really covered — 10:15 + 50m land
   archive (history is never deleted; hard-delete only detaches).
 - Timer: start with project + title + intent + length; pause/resume, +5 min,
   log an interruption without stopping the clock, complete, discard.
+- **Saved timers** — the one-click grid, borrowed from Timery. Rather than
+  making you curate a list, it is derived from the project+title pairs you
+  actually repeat (completed blocks, ranked by frequency then recency), with an
+  explicit pin to hold one at the top. Zero setup, useful on day two.
 - Finish dialog: rate 1–5 with the number keys, rewrite the title, add notes.
 - Manual logging for work done away from the timer.
 - Editing after the fact: retitle, reassign project, re-rate, fix the minutes,
@@ -84,6 +89,8 @@ reporting splits a block across the hours it really covered — 10:15 + 50m land
 - Settings: block lengths, breaks, daily target, timezone, day-start hour,
   theme.
 - Light and dark, keyboard-friendly, no horizontal scroll down to 400px.
+- Sidebar shell with the running block pinned to a bar on every screen, a
+  per-day composition bar, and entry rows carrying duration and time range.
 
 **Phase 2 — day planning.** Done.
 
