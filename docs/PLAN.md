@@ -1,0 +1,266 @@
+# FocusDesk — plan
+
+A local-first deep-work timer that answers three questions at the end of a day:
+**what did I work on, how long, and how focused was I?**
+
+Everything lives on your laptop in one SQLite file. Nothing is sent anywhere
+unless you explicitly connect a calendar feed.
+
+---
+
+## 1. The model
+
+Four concepts, and no more:
+
+| Concept | What it is |
+|---|---|
+| **Project** | An overarching thing you're pushing on — *RCM Dashboard*, *Auth Pricing Model*. Long-lived, colour-coded, optional weekly hour target. |
+| **Block** | One stretch of focused work. Belongs to at most one project, titled with **what you actually did** ("Competitor demo teardown — Waystar"), rated 1–5 afterwards. |
+| **Plan item** | A block you intend to do today. One click turns it into a running block. |
+| **Context item** | Something from outside — a meeting, a Notion page, a transcript — attached to a project or a block. |
+
+### Why the title is written twice
+
+You name a block *before* you start ("what am I working on") and can rewrite it
+*after* ("what I actually did"). Those are rarely the same sentence, and the
+second one is the one worth reading back in a month. The optional **intent**
+field holds the "what does done look like" note from the start of the block.
+
+### Focus: two numbers, not one
+
+- **Focus rating (1–5)** — what you report when the block ends. You know best.
+- **Focus score (0–100)** — a derived blend, so a block you cut short or spent
+  fielding interruptions can't score like one you rode out:
+
+  ```
+  score = 100 × (0.60 × (rating−1)/4          # self-report leads
+               + 0.25 × min(1, worked/planned) # did you ride it out?
+               + 0.15 × 1/(1 + interruptions/2))
+  ```
+
+  Null until rated. Tunable in `server/src/lib/sessions.ts` — the weights are a
+  starting point, not a truth.
+
+### The clock is server-side
+
+Every run and pause is stored as a segment row (`session_segments`). Elapsed
+time is the sum of those segments, so **closing the lid, refreshing, or
+restarting the process loses nothing**, and paused time is never counted as
+focus. The browser only interpolates between polls so the countdown ticks.
+
+Two consequences worth knowing:
+- At most one block is live at a time, enforced by a partial unique index in
+  SQLite — not just by the UI.
+- If the timer ran on while you walked away, the finish dialog offers to trim
+  the block to its planned length, and any logged block's minutes stay editable
+  afterwards.
+
+### Days, not midnights
+
+A "day" is resolved in your timezone with a configurable **day-start hour**
+(default 04:00), so a 1am push counts toward the day it felt like. Hour-of-day
+reporting splits a block across the hours it really covered — 10:15 + 50m lands
+45m in hour 10 and 5m in hour 11.
+
+---
+
+## 2. What is built
+
+**Phase 1 — the core loop.** Done.
+
+- Projects: CRUD, colour from a validated 8-slot palette, weekly targets,
+  archive (history is never deleted; hard-delete only detaches).
+- Timer: start with project + title + intent + length; pause/resume, +5 min,
+  log an interruption without stopping the clock, complete, discard.
+- Finish dialog: rate 1–5 with the number keys, rewrite the title, add notes.
+- Manual logging for work done away from the timer.
+- Editing after the fact: retitle, reassign project, re-rate, fix the minutes,
+  reschedule, delete.
+- Today: hero total, daily-target meter, avg rating, focus score,
+  interruptions, longest unbroken run, day timeline, time-by-project,
+  time-by-hour, full block log.
+- Review: 7/30/90-day windows, per-day columns, per-project bars and table,
+  best-hours chart.
+- Settings: block lengths, breaks, daily target, timezone, day-start hour,
+  theme.
+- Light and dark, keyboard-friendly, no horizontal scroll down to 400px.
+
+**Phase 2 — day planning.** Done.
+
+Plan blocks for any day, check them off, start one with a click; a started plan
+item is marked done when its block completes and shows actual vs planned.
+
+**Phase 3 — calendar, without OAuth.** Done.
+
+Both Google Calendar and Outlook publish a **private read-only ICS feed**. Paste
+that URL and FocusDesk syncs it — no cloud project, no consent screen, no write
+access. Recurring meetings are expanded (`RRULE`), cancelled instances honoured
+(`EXDATE`), and moved instances respected.
+
+- Attribute a meeting to a project once and **later instances of the same
+  meeting inherit it** on the next sync; a hand-made attribution always beats
+  an inherited guess.
+- "Log as time spent" turns a meeting into a logged block.
+- "Add to plan" turns a meeting into a plan item.
+- Feed URLs are bearer secrets: stored locally, never returned to the browser
+  (the UI sees only a label and a hostname).
+
+> **Known limit:** a published ICS feed can lag the real calendar — Google in
+> particular refreshes the secret address lazily, sometimes by hours. Fine for
+> "what did today look like", not good enough for "start my 2pm now". Phase 5
+> fixes this with a real API integration.
+
+---
+
+## 3. Roadmap
+
+### Phase 4 — Notion context
+
+The goal: on any day or project, see the meeting notes and transcripts that
+explain what was going on.
+
+**Auth.** A Notion *internal integration* token (notion.so/my-integrations),
+then share the specific databases with it. One secret, no OAuth dance — same
+posture as the calendar feed.
+
+**Two sync targets, both configured by database ID:**
+
+1. **Projects database** → map Notion pages to FocusDesk projects. Store
+   `notion_page_id` on `projects` (the `notion_url` column already exists), so a
+   project card links straight into Notion.
+2. **Meeting-notes / transcript database** → for each page, pull title, URL,
+   date, and the first ~500 words into `context_items` (table already shipped).
+   Attribution, in order of confidence: an explicit relation to a project page →
+   a matching calendar event on the same day → fuzzy title match → unassigned.
+
+**New surface:**
+
+```
+GET  /api/notion/config          what's connected
+PUT  /api/notion/config          token + database ids
+POST /api/notion/sync            pull a window of pages
+GET  /api/context?day=&projectId= what's attached
+```
+
+**In the UI:** a "Context" card on Today listing the day's notes; recent notes
+on each project card; and in the finish dialog, a "pull from Notion" affordance
+that offers today's notes for that project as a starting point for your block
+notes.
+
+**Effort:** ~1 focused day. The schema and the attribution hooks are already in
+place; this is a client, a sync job and two cards.
+
+### Phase 5 — real calendar APIs (optional)
+
+Worth doing only if the ICS lag annoys you.
+
+- **Google Calendar** — OAuth 2.0 loopback flow (client type "Desktop app"),
+  scope `calendar.readonly`, refresh token in the local DB. Buys near-real-time
+  sync, your RSVP status, and private event detail. Costs: you create a Google
+  Cloud project and an OAuth client once.
+- **Outlook / Microsoft 365** — Graph `Calendars.Read` via the device-code flow.
+
+The sync layer is already provider-shaped (`calendar_events.provider`), so this
+is a new adapter beside the ICS one, not a rewrite.
+
+### Phase 6 — make it feel like an app
+
+Today it runs as a local web app on `http://127.0.0.1:4317`. To make it a real
+desktop citizen:
+
+- **Tray/menu-bar item showing the live countdown** — the single biggest
+  quality-of-life win. A timer you can't see is a timer you forget to stop.
+- **Global hotkey** to start/pause and to log an interruption.
+- **Launch at login**, native notifications, window state.
+
+**Tauri vs Electron:** Tauri gives a ~10MB binary and a proper tray, at the cost
+of a Rust toolchain. Electron is JS-only and instantly familiar, at ~120MB.
+Recommendation: **Tauri**, because a tray timer is the whole point and the
+frontend is already a plain static bundle it can host unchanged.
+
+### Later, if wanted
+
+- Break timer with auto-suggested short/long breaks (the settings already exist).
+- Weekly review email or a Monday "here's where last week went" summary.
+- Idle detection — notice the machine was locked and offer to trim the block.
+- CSV / JSON export.
+- Sync across machines. This is the one feature that breaks the local-first
+  promise; a synced SQLite file (Litestream, iCloud/Dropbox folder) is a much
+  smaller change than a server.
+
+---
+
+## 4. Data model
+
+```
+projects          id, name, color, description, weekly_target_minutes,
+                  notion_url, archived, timestamps
+
+sessions          id, project_id→projects, title, intent, kind(focus|break),
+                  planned_minutes, started_at, ended_at, local_day,
+                  active_seconds, interruptions, focus_rating(1-5), notes,
+                  status(running|paused|completed|abandoned),
+                  calendar_event_id, timestamps
+                  · partial unique index: at most one running/paused row
+
+session_segments  id, session_id→sessions, started_at, ended_at
+                  · an open row means the clock is ticking
+
+plan_items        id, plan_day, position, project_id, title, planned_minutes,
+                  calendar_event_id, session_id→sessions, done, timestamps
+
+calendar_events   id("provider:uid:start"), provider, calendar_id, title,
+                  description, location, starts_at, ends_at, all_day,
+                  attendees(json), local_day, project_id, raw, synced_at
+
+context_items     id, source(notion|calendar|manual), external_id, title, url,
+                  snippet, occurred_at, project_id, session_id, raw, created_at
+
+settings          key, value
+```
+
+Migrations are append-only in `server/src/db.ts` — never edit a shipped one.
+The phase-4/5 tables ship in the initial schema so the shape is stable before
+the integrations land.
+
+---
+
+## 5. Stack, and why
+
+| Piece | Choice | Reason |
+|---|---|---|
+| Storage | SQLite (`better-sqlite3`) | One file you can copy, back up and query with any tool. Prebuilt binaries, so no compiler needed. |
+| Server | Express + Zod on `127.0.0.1` | Loopback-only and single-user, so no auth to build. Needed anyway to own the clock and hold integration secrets. |
+| Client | React + Vite + Tailwind v4 | Static bundle; a desktop shell can host it unchanged in phase 6. |
+| Data fetching | TanStack Query | Cache invalidation across five screens for free. |
+| Charts | Hand-rolled CSS/SVG | No chart library. Every mark follows one validated palette and spec. |
+
+**No accounts, no cloud, no telemetry.** The server binds to loopback and is
+unauthenticated *because* it binds to loopback — do not expose the port.
+
+### Colour
+
+Projects pick from a fixed 8-slot categorical palette, each slot carrying its
+own light and dark step. The order is a colour-vision-deficiency safety
+mechanism, not decoration, and it is machine-validated (worst adjacent CVD
+ΔE 9.1 light / 8.4 dark; normal-vision ΔE 19.6 / 19.3). Three light steps sit
+under 3:1 on the light surface, so every coloured mark in the app is paired with
+a text label and every chart offers a values table — identity is never carried
+by hue alone.
+
+---
+
+## 6. Open decisions
+
+Answers change what gets built next; none of them block what already works.
+
+1. **Which calendar?** Google, Outlook, or both. ICS covers both today; phase 5
+   needs the choice.
+2. **Notion shape.** Do meeting notes live in one database with a date property?
+   Is there a Projects database to map onto? A pointer to the real databases
+   turns phase 4 from guesswork into wiring.
+3. **How native?** Is the browser tab acceptable, or is a tray countdown the
+   thing that makes this stick? (My read: phase 6 is what makes it a habit.)
+4. **Windows or macOS** — packaging and global hotkeys differ.
+5. **Breaks.** Do you want enforced Pomodoro breaks, or just the focus blocks?
+   Everything is in place; the loop is deliberately not opinionated yet.
