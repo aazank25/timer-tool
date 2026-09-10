@@ -10,7 +10,52 @@ reviewable instead of a blur.
 Everything lives in one SQLite file on your machine. The server binds to
 loopback only. Nothing leaves the laptop unless you connect a calendar feed.
 
-## Run it
+## Install it as a real app
+
+One command builds a proper desktop app — a dock icon, a menu-bar countdown,
+launch at login, and no terminal or browser tab in sight:
+
+```bash
+npm install
+npm run desktop:mac      # or desktop:win / desktop:linux
+```
+
+The installer lands in `desktop/release/`. On macOS you get two disk images —
+take **`FocusDesk-0.1.0-arm64.dmg`** on any Apple Silicon Mac (M1 and later)
+and the plain `x64` one on an Intel Mac. Open it, drag FocusDesk to
+Applications, done.
+
+To run it without packaging, for a quick look: `npm run desktop`.
+
+### What you get
+
+- **A menu-bar countdown.** The remaining time sits in the menu bar; its menu
+  pauses, resumes, logs an interruption or opens the window.
+- **Closing the window doesn't stop the clock** — the app parks in the menu bar
+  and keeps counting. Quit properly from the menu-bar item or ⌘Q.
+- **Global hotkeys.** ⌘⇧F shows the window; ⌘⇧Space pauses or resumes the
+  running block from anywhere.
+- **Launch at login**, off by default — the menu-bar item has the toggle.
+- **Offline.** The whole thing runs inside the app; nothing needs a network
+  except a calendar sync you set up yourself.
+
+### First launch on macOS
+
+An app you build yourself opens normally. If you move the `.dmg` between
+machines, macOS quarantines it and shows "FocusDesk cannot be opened" — then
+**right-click the app → Open** once, and it is trusted from then on. If it
+still refuses (which happens to unsigned Apple Silicon builds), re-sign it
+locally:
+
+```bash
+codesign --force --deep --sign - /Applications/FocusDesk.app
+```
+
+Building with an Apple Developer certificate in your keychain signs it
+properly and skips all of that. To force an unsigned build:
+`CSC_IDENTITY_AUTO_DISCOVERY=false npm run desktop:mac`.
+
+## Run it in a browser instead
 
 ```bash
 npm install
@@ -31,9 +76,20 @@ nothing to compile.
 
 ## Where your data lives
 
-`./data/focusdesk.sqlite` — a plain SQLite file. Copy it to back it up, open it
-with any SQLite tool, delete it to start over. Override the location with
-`FOCUSDESK_DATA_DIR`; the port with `FOCUSDESK_PORT`.
+One plain SQLite file. Copy it to back it up, open it with any SQLite tool,
+delete it to start over.
+
+| How you run it | Location |
+|---|---|
+| Desktop app (macOS) | `~/Library/Application Support/FocusDesk/data/focusdesk.sqlite` |
+| Desktop app (Windows) | `%APPDATA%\FocusDesk\data\focusdesk.sqlite` |
+| From the repo | `./data/focusdesk.sqlite` |
+
+The menu-bar item's **Reveal data folder** opens it. Override the location with
+`FOCUSDESK_DATA_DIR`, and the browser port with `FOCUSDESK_PORT`.
+
+Because the app keeps its data in Application Support, rebuilding or
+reinstalling it never touches your history.
 
 ## The loop
 
@@ -78,15 +134,18 @@ Note that a published ICS feed can lag the real calendar by hours; see
 
 ```
 server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
+  src/app.ts    boots the API and client on a port; embedded by the desktop app
   src/lib/      sessions (timer), stats (rollups), calendar (ICS), time, settings
   src/routes/   projects, sessions, timers, plan, stats, settings, calendar
   test/         timer accounting, day boundaries, rollups, ICS parsing
 web/      React + Vite + Tailwind. Focus · Today · Projects · Review · Settings
+desktop/  Electron shell: menu-bar countdown, hotkeys, packaging
+  main.mjs      window, tray, shortcuts; starts the server in-process
+  scripts/      icon generator and payload bundler (no binaries in git)
 docs/     PLAN.md — the model, what's built, and what's next
 ```
 
 ## What's next
 
-Notion context (meeting notes and transcripts attached to projects and days),
-real calendar APIs, and a tray/menu-bar countdown. See
-[docs/PLAN.md](docs/PLAN.md).
+Notion context — meeting notes and transcripts attached to projects and days —
+then real calendar APIs. See [docs/PLAN.md](docs/PLAN.md).

@@ -44,6 +44,14 @@ const Icon = {
   ),
 };
 
+/**
+ * The Electron shell loads the client with ?desktop=1. It hides the native
+ * title bar, so the rail needs room for the traffic lights and the top bar
+ * has to be draggable.
+ */
+const IS_DESKTOP =
+  typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('desktop');
+
 const TABS = [
   { to: '/', label: 'Focus', icon: Icon.focus },
   { to: '/today', label: 'Today', icon: Icon.today },
@@ -78,8 +86,8 @@ export default function App() {
 function Sidebar() {
   return (
     <aside
-      className="sticky top-0 flex h-dvh w-14 shrink-0 flex-col bg-plane px-2 py-3
-        lg:w-52 lg:px-3"
+      className={`sticky top-0 flex h-dvh w-14 shrink-0 flex-col bg-plane px-2 pb-3
+        lg:w-52 lg:px-3 ${IS_DESKTOP ? 'drag-region pt-9' : 'pt-3'}`}
     >
       <div className="mb-4 flex items-center gap-2 px-1 lg:px-2">
         <span
@@ -133,7 +141,10 @@ function LiveBar({ dark }: { dark: boolean }) {
 
   if (!session) {
     return (
-      <div className="sticky top-0 z-40 border-b border-hairline bg-plane/85 backdrop-blur">
+      <div
+        className={`sticky top-0 z-40 border-b border-hairline bg-plane/85 backdrop-blur
+          ${IS_DESKTOP ? 'drag-region' : ''}`}
+      >
         <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-3 px-4 py-2.5 sm:px-6">
           <span className="text-xs text-muted">Nothing running</span>
           <Button size="sm" variant="primary" onClick={() => navigate('/')}>
@@ -149,7 +160,10 @@ function LiveBar({ dark }: { dark: boolean }) {
   const paused = session.status === 'paused';
 
   return (
-    <div className="sticky top-0 z-40 border-b border-hairline bg-plane/85 backdrop-blur">
+    <div
+      className={`sticky top-0 z-40 border-b border-hairline bg-plane/85 backdrop-blur
+        ${IS_DESKTOP ? 'drag-region' : ''}`}
+    >
       <div className="mx-auto flex w-full max-w-6xl items-center gap-3 px-4 py-2 sm:px-6">
         <button
           type="button"

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+web/
+release/
+assets/
+build/
