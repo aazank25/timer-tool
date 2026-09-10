@@ -37,14 +37,19 @@ with any SQLite tool, delete it to start over. Override the location with
 
 ## The loop
 
-1. **Focus** — pick a project, say what you're working on, pick a length, start.
-   Pause, add 5 minutes, or log an interruption without stopping the clock.
+1. **Focus** — start one of your saved timers with a single click, or name a new
+   block: project, what you're working on, a length. Pause, add 5 minutes, or
+   log an interruption without stopping the clock.
 2. **Finish** — rate the block 1–5 (number keys), rewrite the title to what you
    actually did, add notes.
 3. **Today** — the shape of the day: timeline, time per project, time per hour,
    daily target, and the full block log (click any row to fix it).
 4. **Review** — 7/30/90 days: where the time went, and which hours you actually
    focus in.
+
+**Saved timers** are the fast path. The list builds itself from the
+project + task pairs you keep returning to, so it is useful on day two without
+anyone curating it; pin one to hold it at the top.
 
 The clock is owned by the server and stored as run/pause segments, so a
 refresh, a closed lid or a restart loses nothing, and paused time is never
@@ -74,7 +79,7 @@ Note that a published ICS feed can lag the real calendar by hours; see
 ```
 server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
   src/lib/      sessions (timer), stats (rollups), calendar (ICS), time, settings
-  src/routes/   projects, sessions, plan, stats, settings, calendar
+  src/routes/   projects, sessions, timers, plan, stats, settings, calendar
   test/         timer accounting, day boundaries, rollups, ICS parsing
 web/      React + Vite + Tailwind. Focus · Today · Projects · Review · Settings
 docs/     PLAN.md — the model, what's built, and what's next

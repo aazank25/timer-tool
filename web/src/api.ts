@@ -55,6 +55,19 @@ export interface PlanItem {
   done: boolean;
 }
 
+export interface SavedTimer {
+  id: number | null;
+  projectId: number | null;
+  projectName: string | null;
+  projectColor: string | null;
+  title: string;
+  plannedMinutes: number | null;
+  pinned: boolean;
+  useCount: number;
+  totalSeconds: number;
+  lastUsedAt: string | null;
+}
+
 export interface ProjectSlice {
   projectId: number | null;
   name: string;
@@ -211,6 +224,11 @@ export const api = {
   updateSession: (id: number, body: Record<string, unknown>) =>
     request<Session>('PATCH', `/sessions/${id}`, body),
   deleteSession: (id: number) => request<{ deleted: number }>('DELETE', `/sessions/${id}`),
+
+  listTimers: (limit = 18) => request<SavedTimer[]>('GET', `/timers${qs({ limit })}`),
+  saveTimer: (body: { projectId?: number | null; title: string; plannedMinutes?: number | null }) =>
+    request<SavedTimer[]>('POST', '/timers', body),
+  unsaveTimer: (id: number) => request<SavedTimer[]>('DELETE', `/timers/${id}`),
 
   listPlan: (day: string) => request<PlanItem[]>('GET', `/plan${qs({ day })}`),
   createPlanItem: (body: {

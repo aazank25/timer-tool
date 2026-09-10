@@ -26,7 +26,7 @@ export function Card({
 }) {
   return (
     <section
-      className={`rounded-xl border border-hairline bg-surface p-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)] ${className}`}
+      className={`rounded-2xl border border-hairline bg-surface p-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)] ${className}`}
     >
       {(title || action) && (
         <header className="mb-3 flex items-start justify-between gap-3">
@@ -157,7 +157,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={`relative w-full ${width} rounded-xl border border-hairline bg-surface p-5 shadow-xl`}
+        className={`relative w-full ${width} rounded-2xl border border-hairline bg-surface p-5 shadow-xl`}
       >
         <h2 id={titleId} className="mb-4 text-base font-semibold text-ink">
           {title}

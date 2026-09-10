@@ -134,6 +134,25 @@ const migrations: Migration[] = [
     );
     `,
   },
+  {
+    id: 2,
+    name: 'saved timers',
+    up: `
+    -- A pinned project+title pair you can start with one click. The frequent
+    -- combos are derived from history instead; this table is only the ones
+    -- you have chosen to keep at the top.
+    CREATE TABLE saved_timers (
+      id              INTEGER PRIMARY KEY,
+      project_id      INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+      title           TEXT    NOT NULL,
+      planned_minutes INTEGER,
+      position        INTEGER NOT NULL DEFAULT 0,
+      created_at      TEXT    NOT NULL
+    );
+    CREATE UNIQUE INDEX saved_timers_unique
+      ON saved_timers(COALESCE(project_id, -1), title);
+    `,
+  },
 ];
 
 export const DEFAULT_SETTINGS: Record<string, string> = {

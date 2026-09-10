@@ -1,14 +1,8 @@
 import { useState } from 'react';
 import type { CalendarEvent, PlanItem, Session } from '../api';
-import {
-  BarsByName,
-  Columns,
-  Hero,
-  Meter,
-  RatingDots,
-  ScoreChip,
-  StatTile,
-} from '../components/charts';
+import { BarsByName, Columns, Hero, StatTile } from '../components/charts';
+import { DayBar } from '../components/DayBar';
+import { EntryRow } from '../components/EntryRow';
 import { DayTimeline } from '../components/DayTimeline';
 import { ProjectPicker } from '../components/pickers';
 import { Button, Card, Empty, Field, inputBase, inputClass, Modal, Swatch } from '../components/ui';
@@ -74,11 +68,20 @@ export function TodayPage({ dark }: { dark: boolean }) {
                 }
               />
               <div className="space-y-3">
-                <Meter
-                  value={stats.focusSeconds}
-                  max={stats.targetMinutes * 60}
-                  label="Daily target"
-                />
+                <div>
+                  <div className="mb-1.5 flex items-baseline justify-between text-xs">
+                    <span className="text-ink-2">Daily target</span>
+                    <span className="tabular text-muted">
+                      {duration(stats.focusSeconds)} / {duration(stats.targetMinutes * 60)}
+                    </span>
+                  </div>
+                  <DayBar
+                    slices={stats.byProject}
+                    dark={dark}
+                    height={8}
+                    targetSeconds={stats.targetMinutes * 60}
+                  />
+                </div>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   <StatTile
                     label="Avg focus"
@@ -402,56 +405,14 @@ function SessionLog({
   }
 
   return (
-    <Card title="Block log" subtitle="Click a row to fix the title, project or rating">
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[640px] text-left text-xs">
-          <thead className="text-muted">
-            <tr>
-              <th className="py-1.5 pr-3 font-medium">Started</th>
-              <th className="py-1.5 pr-3 font-medium">What</th>
-              <th className="py-1.5 pr-3 font-medium">Project</th>
-              <th className="py-1.5 pr-3 text-right font-medium">Time</th>
-              <th className="py-1.5 pr-3 font-medium">Focus</th>
-              <th className="py-1.5 font-medium">Score</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sessions.map((s) => (
-              <tr
-                key={s.id}
-                onClick={() => setEditing(s)}
-                className="cursor-pointer border-t border-hairline hover:bg-raised"
-              >
-                <td className="tabular py-2 pr-3 text-muted">{timeOfDay(s.startedAt)}</td>
-                <td className="py-2 pr-3 text-ink">
-                  <div className="max-w-xs truncate">{s.title}</div>
-                  {s.notes && <div className="max-w-xs truncate text-muted">{s.notes}</div>}
-                  {s.status === 'abandoned' && (
-                    <span className="text-[10px] uppercase tracking-wide text-critical">
-                      discarded
-                    </span>
-                  )}
-                </td>
-                <td className="py-2 pr-3">
-                  <span className="flex items-center gap-1.5 text-ink-2">
-                    <Swatch color={seriesColor(s.projectColor, dark)} />
-                    <span className="max-w-32 truncate">{s.projectName ?? 'Unassigned'}</span>
-                  </span>
-                </td>
-                <td className="tabular py-2 pr-3 text-right text-ink-2">
-                  {duration(s.elapsedSeconds)}
-                </td>
-                <td className="py-2 pr-3">
-                  <RatingDots rating={s.focusRating} />
-                </td>
-                <td className="py-2">
-                  <ScoreChip score={s.focusScore} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+    <Card title="Block log" subtitle="Click any block to fix its title, project, rating or minutes">
+      <ul className="-mx-1 space-y-0.5">
+        {sessions.map((s) => (
+          <li key={s.id}>
+            <EntryRow session={s} dark={dark} onClick={() => setEditing(s)} />
+          </li>
+        ))}
+      </ul>
 
       {editing && (
         <EditSessionDialog

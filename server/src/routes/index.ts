@@ -8,6 +8,7 @@ import { projectsRouter } from './projects.js';
 import { sessionsRouter } from './sessions.js';
 import { settingsRouter } from './settings.js';
 import { statsRouter } from './stats.js';
+import { timersRouter } from './timers.js';
 
 export const apiRouter = Router();
 
@@ -33,6 +34,7 @@ apiRouter.get(
 apiRouter.use('/projects', projectsRouter);
 apiRouter.use('/sessions', sessionsRouter);
 apiRouter.use('/plan', planRouter);
+apiRouter.use('/timers', timersRouter);
 apiRouter.use('/stats', statsRouter);
 apiRouter.use('/settings', settingsRouter);
 apiRouter.use('/calendar', calendarRouter);

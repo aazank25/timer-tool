@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
-import type { PlanItem, Session } from '../api';
-import { RatingDots, ScoreChip } from '../components/charts';
+import type { PlanItem, SavedTimer, Session } from '../api';
+import { DayBar } from '../components/DayBar';
+import { EntryRow } from '../components/EntryRow';
+import { SavedTimers } from '../components/SavedTimers';
 import { DurationPicker, ProjectPicker, RatingPicker } from '../components/pickers';
 import { TimerRing } from '../components/TimerRing';
 import { Button, Card, Empty, Field, inputClass, Modal, Swatch } from '../components/ui';
@@ -13,6 +15,8 @@ import {
   useProjects,
   useSessionActions,
   useSettings,
+  useTimerActions,
+  useTimers,
   useToday,
 } from '../hooks';
 import { clock, duration, timeOfDay } from '../lib/format';
@@ -26,7 +30,9 @@ export function FocusPage({ dark }: { dark: boolean }) {
   const { data: plan = [] } = usePlan(today?.today);
   const { data: stats } = useDayStats(today?.today);
   const { data: settings } = useSettings();
+  const { data: timers = [] } = useTimers();
   const actions = useSessionActions();
+  const timerActions = useTimerActions();
   const [finishing, setFinishing] = useState(false);
 
   const defaultMinutes = Number(settings?.focus_minutes ?? 45);
@@ -36,19 +42,46 @@ export function FocusPage({ dark }: { dark: boolean }) {
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
       <div className="space-y-4">
         {live.session ? (
           <LiveBlock live={live} dark={dark} onFinish={() => setFinishing(true)} />
         ) : (
-          <StartBlock
-            projects={projects}
-            defaultMinutes={defaultMinutes}
-            dark={dark}
-            pending={actions.start.isPending}
-            error={actions.start.error?.message}
-            onStart={(input) => actions.start.mutate(input)}
-          />
+          <>
+            <Card
+              title="Pick up where you left off"
+              subtitle="One click starts it. The list builds itself from what you repeat."
+            >
+              <SavedTimers
+                timers={timers.slice(0, 8)}
+                dark={dark}
+                disabled={!!live.session || actions.start.isPending}
+                onStart={(timer: SavedTimer) =>
+                  actions.start.mutate({
+                    projectId: timer.projectId,
+                    title: timer.title,
+                    plannedMinutes: timer.plannedMinutes ?? defaultMinutes,
+                  })
+                }
+                onPin={(timer: SavedTimer) =>
+                  timerActions.save.mutate({
+                    projectId: timer.projectId,
+                    title: timer.title,
+                    plannedMinutes: timer.plannedMinutes,
+                  })
+                }
+                onUnpin={(id: number) => timerActions.unsave.mutate(id)}
+              />
+            </Card>
+            <StartBlock
+              projects={projects}
+              defaultMinutes={defaultMinutes}
+              dark={dark}
+              pending={actions.start.isPending}
+              error={actions.start.error?.message}
+              onStart={(input) => actions.start.mutate(input)}
+            />
+          </>
         )}
 
         {live.session && (
@@ -77,7 +110,13 @@ export function FocusPage({ dark }: { dark: boolean }) {
           }
         >
           {stats && stats.byProject.length > 0 ? (
-            <ul className="space-y-1.5 text-xs">
+            <>
+              <DayBar
+                slices={stats.byProject}
+                dark={dark}
+                targetSeconds={stats.targetMinutes * 60}
+              />
+              <ul className="mt-3 space-y-1.5 text-xs">
               {stats.byProject.slice(0, 5).map((p) => (
                 <li key={p.projectId ?? 'none'} className="flex items-center justify-between gap-2">
                   <span className="flex min-w-0 items-center gap-1.5">
@@ -86,8 +125,9 @@ export function FocusPage({ dark }: { dark: boolean }) {
                   </span>
                   <span className="tabular shrink-0 text-ink-2">{duration(p.seconds)}</span>
                 </li>
-              ))}
-            </ul>
+                ))}
+              </ul>
+            </>
           ) : (
             <Empty>Nothing logged yet today.</Empty>
           )}
@@ -479,21 +519,10 @@ function RecentBlocks({ sessions, dark }: { sessions: Session[]; dark: boolean }
   return (
     <Card title="Last few blocks">
       {done.length ? (
-        <ul className="space-y-2.5">
+        <ul className="-mx-1 space-y-0.5">
           {done.map((s) => (
-            <li key={s.id} className="text-xs">
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="truncate text-ink">{s.title}</span>
-                <span className="tabular shrink-0 text-ink-2">{duration(s.elapsedSeconds)}</span>
-              </div>
-              <div className="mt-0.5 flex items-center gap-2">
-                <span className="flex items-center gap-1.5 text-muted">
-                  <Swatch color={seriesColor(s.projectColor, dark)} />
-                  <span className="truncate">{s.projectName ?? 'Unassigned'}</span>
-                </span>
-                <RatingDots rating={s.focusRating} />
-                <ScoreChip score={s.focusScore} />
-              </div>
+            <li key={s.id}>
+              <EntryRow session={s} dark={dark} compact />
             </li>
           ))}
         </ul>
