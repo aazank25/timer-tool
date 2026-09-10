@@ -123,15 +123,45 @@ explain what was going on.
 then share the specific databases with it. One secret, no OAuth dance — same
 posture as the calendar feed.
 
-**Two sync targets, both configured by database ID:**
+**The target database (confirmed).** The workspace already has a *Meeting
+Notes* database — data source `collection://adcb70f5-305f-4cc6-bd5d-3dd8a47e0633`
+— with the properties phase 4 needs:
 
-1. **Projects database** → map Notion pages to FocusDesk projects. Store
-   `notion_page_id` on `projects` (the `notion_url` column already exists), so a
-   project card links straight into Notion.
-2. **Meeting-notes / transcript database** → for each page, pull title, URL,
-   date, and the first ~500 words into `context_items` (table already shipped).
-   Attribution, in order of confidence: an explicit relation to a project page →
-   a matching calendar event on the same day → fuzzy title match → unassigned.
+| Property | Type | Use |
+|---|---|---|
+| `Name` | title | context item title |
+| `Event time` | date | which day the note belongs to |
+| `Attended` | people | who was there; helps match a calendar event |
+| `Last Edited Time` | timestamp | incremental sync cursor |
+| `ID` | unique id | stable `external_id` |
+
+Pages carry an *Agenda* / *Meeting Notes* / *To-Do* body, where the Meeting
+Notes section is a Notion AI meeting-note block holding a summary and, when
+recording ran, a transcript.
+
+**Sync design.**
+
+1. Query the database filtered on `Event time` within the sync window, ordered
+   by `Last Edited Time` so re-syncs are incremental.
+2. Upsert each page into `context_items` as `source='notion'`,
+   `external_id=<page id>`, `occurred_at=<Event time>`, plus a snippet from the
+   summary. The unique index on `(source, external_id)` makes this idempotent.
+3. Attribute to a project in descending order of confidence: a calendar event
+   on the same day already attributed to a project (attendee overlap breaks
+   ties) → fuzzy title match against project names → unassigned. A hand-made
+   attribution always wins, exactly as it does for calendar events.
+
+**One thing to verify before building.** Transcripts live inside Notion's AI
+meeting-note block. Standard blocks (agenda, to-dos, plain summary text) come
+back over the public REST API; whether that block's transcript body does is
+untested and needs one call with a real token. If it doesn't, the fallback is
+the summary text plus a deep link into the page — still enough to answer "what
+was going on that day", just without the full transcript body. Worth settling
+first, because it decides whether transcript search is on the table.
+
+**Also worth wiring:** a *Projects* database, if one exists, mapped onto
+FocusDesk projects via the `notion_url` column that already ships, so a project
+card links straight into Notion.
 
 **New surface:**
 
@@ -254,13 +284,12 @@ by hue alone.
 
 Answers change what gets built next; none of them block what already works.
 
-1. **Which calendar?** Google, Outlook, or both. ICS covers both today; phase 5
-   needs the choice.
-2. **Notion shape.** Do meeting notes live in one database with a date property?
-   Is there a Projects database to map onto? A pointer to the real databases
-   turns phase 4 from guesswork into wiring.
-3. **How native?** Is the browser tab acceptable, or is a tray countdown the
-   thing that makes this stick? (My read: phase 6 is what makes it a habit.)
-4. **Windows or macOS** — packaging and global hotkeys differ.
-5. **Breaks.** Do you want enforced Pomodoro breaks, or just the focus blocks?
+1. ~~Which calendar?~~ **Google.** The secret iCal address works today; phase 5
+   would move it to `calendar.readonly` OAuth.
+2. **Notion shape.** The *Meeting Notes* database is mapped (see phase 4).
+   Still open: is there a **Projects** database to map onto, and does the public
+   API return AI meeting-note transcripts?
+3. **Breaks.** Do you want enforced Pomodoro breaks, or just the focus blocks?
    Everything is in place; the loop is deliberately not opinionated yet.
+
+Settled: Google Calendar, macOS, and Notion context as the next phase.
