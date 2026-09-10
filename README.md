@@ -20,6 +20,10 @@ npm install
 npm run desktop:mac      # or desktop:win / desktop:linux
 ```
 
+Needs **Node 22 or newer** (`node -v`). Nothing gets compiled: SQLite arrives as
+a prebuilt Node-API binary, which is why no Xcode, Python or build toolchain is
+required and why the same binary works under both Node and Electron.
+
 The installer lands in `desktop/release/`. On macOS you get two disk images —
 take **`FocusDesk-0.1.0-arm64.dmg`** on any Apple Silicon Mac (M1 and later)
 and the plain `x64` one on an Intel Mac. Open it, drag FocusDesk to
@@ -71,8 +75,8 @@ npm run dev        # api on :4317, UI on http://localhost:5173
 
 Other scripts: `npm test` (server suite), `npm run typecheck`.
 
-Requires Node 20.11+. `better-sqlite3` ships prebuilt binaries, so there is
-nothing to compile.
+Requires Node 22+. `better-sqlite3` ships prebuilt Node-API binaries for every
+platform, so there is nothing to compile and no toolchain to install.
 
 ## Where your data lives
 

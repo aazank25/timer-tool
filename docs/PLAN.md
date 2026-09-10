@@ -224,10 +224,21 @@ originally called for Tauri on size grounds. That was the wrong read once the
 packaging was actually worked through: the server is Node with a native SQLite
 module, and Tauri has no Node runtime, so it would have to ship the server as a
 separately compiled sidecar binary with its own native-module story. Electron
-*is* a Node runtime, so the server runs inside the app with no sidecar at all,
-and `electron-builder install-app-deps` rebuilds better-sqlite3 against
-Electron's ABI as a normal build step. The cost is bundle size (~190MB
-installed) — the right trade for a personal tool that has to be reliable.
+*is* a Node runtime, so the server runs inside the app with no sidecar at all.
+The cost is bundle size (~190MB installed) — the right trade for a personal
+tool that has to be reliable.
+
+**Why SQLite is a Node-API build.** better-sqlite3 11 shipped
+version-specific binaries and compiled from source whenever one was missing.
+That broke twice over: on Node 26 its C++ reaches for V8 APIs that were removed
+(`GetPrototype`, `Context::GetIsolate`, `PropertyCallbackInfo::This`), and even
+where it did compile, a binary built for the system Node is the wrong binary for
+Electron — so the desktop build depended on a second rebuild step landing in the
+right order, which it did not. Version 13 is Node-API based and ships a prebuilt
+`.node` per platform inside the package, so one binary satisfies every Node
+version *and* Electron, nothing compiles at install time, and no toolchain is
+needed. The build therefore sets `npmRebuild: false`: rebuilding from source
+would discard a working prebuilt binary for no gain. Node 22+ is the floor.
 
 **How the payload is assembled** (`desktop/scripts/build.mjs`): esbuild bundles
 the server into one `dist/server.mjs` with only `better-sqlite3` left external,

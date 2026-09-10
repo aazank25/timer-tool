@@ -11,14 +11,13 @@
     "dist:mac": "npm run payload && electron-builder --mac",
     "dist:win": "npm run payload && electron-builder --win",
     "dist:linux": "npm run payload && electron-builder --linux",
-    "pack": "npm run payload && electron-builder --dir",
-    "postinstall": "electron-builder install-app-deps"
+    "pack": "npm run payload && electron-builder --dir"
   },
   "dependencies": {
-    "better-sqlite3": "^11.8.1"
+    "better-sqlite3": "^13.0.3"
   },
   "devDependencies": {
-    "electron": "^33.3.1",
+    "electron": "^38.0.0",
     "electron-builder": "^25.1.8",
     "esbuild": "^0.24.2"
   },
@@ -73,7 +72,8 @@
       "icon": "build/icon.png",
       "category": "Utility",
       "executableName": "focusdesk"
-    }
+    },
+    "npmRebuild": false
   },
   "author": "FocusDesk",
   "repository": "https://github.com/aazank25/timer-tool"
