@@ -1,3 +1,4 @@
+import path from 'node:path';
 import Database from 'better-sqlite3';
 import { dbPath } from './lib/config.js';
 import { hostTimeZone } from './lib/time.js';
@@ -14,7 +15,7 @@ type Migration = { id: number; name: string; up: string };
  * Phase-2..4 tables (calendar_events, context_items, plan_items) ship in the
  * initial schema so the shape is stable before the integrations land.
  */
-const migrations: Migration[] = [
+export const migrations: Migration[] = [
   {
     id: 1,
     name: 'initial schema',
@@ -153,6 +154,28 @@ const migrations: Migration[] = [
       ON saved_timers(COALESCE(project_id, -1), title);
     `,
   },
+  {
+    id: 3,
+    name: 'stopwatch mode',
+    up: `
+    -- No planned length means a stopwatch. That null is the whole signal: a
+    -- separate mode column would be a second source of truth to keep in step.
+    ALTER TABLE sessions ALTER COLUMN planned_minutes DROP NOT NULL;
+
+    -- A guess to compare the actual against. Display only: nothing computes
+    -- from it, so it can never move a score or a countdown.
+    ALTER TABLE sessions ADD COLUMN estimated_minutes INTEGER
+      CHECK (estimated_minutes IS NULL OR estimated_minutes BETWEEN 1 AND 480);
+
+    -- Everything pinned before this was a fixed-length block.
+    ALTER TABLE saved_timers ADD COLUMN mode TEXT NOT NULL DEFAULT 'pomodoro'
+      CHECK (mode IN ('pomodoro','stopwatch'));
+
+    -- The saved-timer list looks up each pair's latest completed block. This
+    -- makes that a seek rather than a rescan of the project's whole history.
+    CREATE INDEX sessions_pair_recent ON sessions(project_id, title, started_at);
+    `,
+  },
 ];
 
 export const DEFAULT_SETTINGS: Record<string, string> = {
@@ -163,21 +186,63 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   blocks_before_long_break: '3',
   daily_target_minutes: '300',
   autostart_breaks: 'false',
+  /** What a new block is when the caller does not say: 'stopwatch' or 'pomodoro'. */
+  default_timer_mode: 'stopwatch',
   /** Day rolls over at this local hour, so a 1am block counts as the day before. */
   day_start_hour: '4',
 };
 
-function runMigrations(): void {
-  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (
+/**
+ * Snapshot the database beside itself before a migration rewrites it. An
+ * existing database holds history that cannot be regenerated, so it gets a
+ * restore point; a fresh install (nothing applied yet) has nothing to lose.
+ *
+ * VACUUM INTO rather than copying the file: in WAL mode the main file alone is
+ * not the database. If another connection holds a read open (a DB browser, a
+ * second instance) the checkpoint cannot finish folding the WAL in, and a copy
+ * taken then is torn: "database disk image is malformed". VACUUM INTO reads one
+ * consistent snapshot and writes a single self-contained file whatever else is
+ * connected. It refuses to run inside a transaction or over an existing file,
+ * so it must stay ahead of the per-migration transactions and the name carries
+ * the milliseconds. A failure throws: better to refuse to start than to
+ * migrate with nothing to go back to.
+ */
+export function backupBeforeMigrating(
+  conn: Database.Database,
+  file: string,
+  appliedCount: number,
+  firstPendingId: number,
+): string | null {
+  if (appliedCount === 0) return null;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backup = path.join(
+    path.dirname(file),
+    `focusdesk.backup-before-${firstPendingId}-${stamp}.sqlite`,
+  );
+  conn.prepare('VACUUM INTO ?').run(backup);
+  return backup;
+}
+
+/** Takes the connection and file as arguments so tests can migrate a scratch database. */
+export function runMigrations(conn: Database.Database = db, file: string = dbPath()): void {
+  conn.exec(`CREATE TABLE IF NOT EXISTS _migrations (
     id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
   const applied = new Set<number>(
-    db.prepare('SELECT id FROM _migrations').all().map((r) => (r as { id: number }).id),
+    conn
+      .prepare('SELECT id FROM _migrations')
+      .all()
+      .map((r) => (r as { id: number }).id),
   );
-  const mark = db.prepare('INSERT INTO _migrations (id, name, applied_at) VALUES (?, ?, ?)');
-  for (const m of migrations) {
-    if (applied.has(m.id)) continue;
-    db.transaction(() => {
-      db.exec(m.up);
+  const mark = conn.prepare('INSERT INTO _migrations (id, name, applied_at) VALUES (?, ?, ?)');
+  const pending = migrations.filter((m) => !applied.has(m.id));
+  const [first] = pending;
+  if (first) {
+    const backup = backupBeforeMigrating(conn, file, applied.size, first.id);
+    if (backup) console.log(`[db] backed up to ${backup} before migrating`);
+  }
+  for (const m of pending) {
+    conn.transaction(() => {
+      conn.exec(m.up);
       mark.run(m.id, m.name, new Date().toISOString());
     })();
     console.log(`[db] applied migration ${m.id}: ${m.name}`);

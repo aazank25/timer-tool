@@ -9,7 +9,7 @@ export function duration(seconds: number, opts: { zero?: string } = {}): string 
   return `${h}h ${m}m`;
 }
 
-/** Countdown form: 44:59, or 1:04:59 once it passes an hour. */
+/** Clock form, for a countdown or a count-up: 44:59, or 1:04:59 once it passes an hour. */
 export function clock(seconds: number): string {
   const total = Math.max(0, Math.round(seconds));
   const h = Math.floor(total / 3600);

@@ -12,7 +12,7 @@ loopback only. Nothing leaves the laptop unless you connect a calendar feed.
 
 ## Install it as a real app
 
-One command builds a proper desktop app — a dock icon, a menu-bar countdown,
+One command builds a proper desktop app — a dock icon, a menu-bar clock,
 launch at login, and no terminal or browser tab in sight:
 
 ```bash
@@ -33,8 +33,9 @@ To run it without packaging, for a quick look: `npm run desktop`.
 
 ### What you get
 
-- **A menu-bar countdown.** The remaining time sits in the menu bar; its menu
-  pauses, resumes, logs an interruption or opens the window.
+- **A menu-bar clock.** The elapsed time sits in the menu bar (the remaining
+  time, for a Pomodoro); its menu pauses, resumes, logs an interruption or opens
+  the window.
 - **Closing the window doesn't stop the clock** — the app parks in the menu bar
   and keeps counting. Quit properly from the menu-bar item or ⌘Q.
 - **Global hotkeys.** ⌘⇧F shows the window; ⌘⇧Space pauses or resumes the
@@ -80,8 +81,20 @@ platform, so there is nothing to compile and no toolchain to install.
 
 ## Where your data lives
 
-One plain SQLite file. Copy it to back it up, open it with any SQLite tool,
-delete it to start over.
+One plain SQLite file. Open it with any SQLite tool, or delete it to start over.
+
+To back it up, **quit FocusDesk first** (menu bar → Quit FocusDesk), then copy
+the file. While the app is running, recent changes sit in a `-wal` file beside
+it, so a plain copy can be incomplete or unreadable. To back up without
+quitting, let SQLite take a consistent snapshot:
+
+```bash
+sqlite3 ~/Library/Application\ Support/FocusDesk/data/focusdesk.sqlite \
+  "VACUUM INTO '$HOME/Desktop/focusdesk-backup.sqlite'"
+```
+
+The app takes the same kind of snapshot itself before any upgrade changes the
+database's format, leaving `focusdesk.backup-before-…sqlite` files beside it.
 
 | How you run it | Location |
 |---|---|
@@ -98,8 +111,10 @@ reinstalling it never touches your history.
 ## The loop
 
 1. **Focus** — start one of your saved timers with a single click, or name a new
-   block: project, what you're working on, a length. Pause, add 5 minutes, or
-   log an interruption without stopping the clock.
+   block: project, what you're working on, and optionally a guess at how long
+   it will take. It runs as a stopwatch until you stop it; pick Pomodoro for a
+   fixed-length countdown instead. Pause, add 5 minutes to a Pomodoro, or log
+   an interruption without stopping the clock.
 2. **Finish** — rate the block 1–5 (number keys), rewrite the title to what you
    actually did, add notes.
 3. **Today** — the shape of the day: timeline, time per project, time per hour,
@@ -141,9 +156,10 @@ server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
   src/app.ts    boots the API and client on a port; embedded by the desktop app
   src/lib/      sessions (timer), stats (rollups), calendar (ICS), time, settings
   src/routes/   projects, sessions, timers, plan, stats, settings, calendar
-  test/         timer accounting, day boundaries, rollups, ICS parsing
+  test/         timer accounting, stopwatch, saved-timer mode, day boundaries,
+                rollups, ICS parsing, migration and backup
 web/      React + Vite + Tailwind. Focus · Today · Projects · Review · Settings
-desktop/  Electron shell: menu-bar countdown, hotkeys, packaging
+desktop/  Electron shell: menu-bar clock, hotkeys, packaging
   main.mjs      window, tray, shortcuts; starts the server in-process
   scripts/      icon generator and payload bundler (no binaries in git)
 docs/     PLAN.md — the model, what's built, and what's next

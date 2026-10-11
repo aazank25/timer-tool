@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { Project } from '../api';
+import type { Project, TimerMode } from '../api';
 import { nextColor, seriesColor } from '../lib/palette';
 import { useProjectActions } from '../hooks';
 import { Button, inputBase, inputClass, Swatch } from './ui';
@@ -166,6 +166,7 @@ export function DurationPicker({
           key={m}
           size="sm"
           variant={value === m ? 'primary' : 'default'}
+          aria-pressed={value === m}
           onClick={() => onChange(m)}
         >
           {m}m
@@ -174,9 +175,108 @@ export function DurationPicker({
       <Button
         size="sm"
         variant={DURATION_PRESETS.includes(value) ? 'default' : 'primary'}
+        aria-pressed={!DURATION_PRESETS.includes(value)}
         onClick={() => setCustom(true)}
       >
         {DURATION_PRESETS.includes(value) ? 'Custom' : `${value}m`}
+      </Button>
+    </div>
+  );
+}
+
+const MODES: { value: TimerMode; label: string }[] = [
+  { value: 'stopwatch', label: 'Stopwatch' },
+  { value: 'pomodoro', label: 'Pomodoro' },
+];
+
+/** Count up until you stop, or count down a fixed length. */
+export function ModePicker({
+  value,
+  onChange,
+}: {
+  value: TimerMode;
+  onChange: (mode: TimerMode) => void;
+}) {
+  return (
+    <div className="flex gap-1.5" role="group" aria-label="Timer mode">
+      {MODES.map((m) => (
+        <Button
+          key={m.value}
+          size="sm"
+          variant={value === m.value ? 'primary' : 'default'}
+          aria-pressed={value === m.value}
+          onClick={() => onChange(m.value)}
+        >
+          {m.label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+export const ESTIMATE_PRESETS = [15, 30, 45, 60, 90];
+
+/** A guess at how long the work will take. Optional, and never a countdown. */
+export function EstimatePicker({
+  value,
+  onChange,
+}: {
+  value: number | null;
+  onChange: (minutes: number | null) => void;
+}) {
+  const [custom, setCustom] = useState(false);
+  if (custom) {
+    return (
+      <div className="flex items-center gap-2">
+        <input
+          type="number"
+          min={1}
+          max={480}
+          autoFocus
+          className={`${inputBase} w-24`}
+          value={value ?? ''}
+          onChange={(e) =>
+            onChange(
+              e.target.value ? Math.max(1, Math.min(480, Number(e.target.value) || 1)) : null,
+            )
+          }
+        />
+        <span className="text-xs text-muted">minutes</span>
+        <Button variant="ghost" size="sm" onClick={() => setCustom(false)}>
+          Presets
+        </Button>
+      </div>
+    );
+  }
+  const preset = value != null && ESTIMATE_PRESETS.includes(value);
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      <Button
+        size="sm"
+        variant={value == null ? 'primary' : 'default'}
+        aria-pressed={value == null}
+        onClick={() => onChange(null)}
+      >
+        None
+      </Button>
+      {ESTIMATE_PRESETS.map((m) => (
+        <Button
+          key={m}
+          size="sm"
+          variant={value === m ? 'primary' : 'default'}
+          aria-pressed={value === m}
+          onClick={() => onChange(m)}
+        >
+          {m}m
+        </Button>
+      ))}
+      <Button
+        size="sm"
+        variant={value == null || preset ? 'default' : 'primary'}
+        aria-pressed={value != null && !preset}
+        onClick={() => setCustom(true)}
+      >
+        {value == null || preset ? 'Custom' : `${value}m`}
       </Button>
     </div>
   );

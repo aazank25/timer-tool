@@ -156,7 +156,10 @@ function LiveBar({ dark }: { dark: boolean }) {
   }
 
   const color = seriesColor(session.projectColor, dark);
-  const over = live.overrunSeconds > 0;
+  // A stopwatch has no planned time to run past, so it is never "over".
+  const stopwatch = session.mode === 'stopwatch';
+  const overrun = live.overrunSeconds ?? 0;
+  const over = overrun > 0;
   const paused = session.status === 'paused';
 
   return (
@@ -181,7 +184,10 @@ function LiveBar({ dark }: { dark: boolean }) {
             <span className="block truncate text-[11px] text-muted">
               {session.projectName ?? 'No project'}
               {paused && ' · paused'}
-              {over && ` · ${duration(live.overrunSeconds)} over`}
+              {over && ` · ${duration(overrun)} over`}
+              {stopwatch &&
+                session.estimatedMinutes != null &&
+                ` · est. ${session.estimatedMinutes}m`}
             </span>
           </span>
         </button>
@@ -189,7 +195,11 @@ function LiveBar({ dark }: { dark: boolean }) {
         <span
           className={`tabular shrink-0 text-lg font-semibold ${over ? 'text-warning' : 'text-ink'}`}
         >
-          {over ? `+${clock(live.overrunSeconds)}` : clock(live.remainingSeconds)}
+          {stopwatch
+            ? clock(live.elapsedSeconds)
+            : over
+              ? `+${clock(overrun)}`
+              : clock(live.remainingSeconds ?? 0)}
         </span>
 
         {paused ? (

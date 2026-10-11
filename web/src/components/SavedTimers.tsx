@@ -11,6 +11,7 @@ export function SavedTimers({
   timers,
   dark,
   disabled,
+  loading = false,
   onStart,
   onPin,
   onUnpin,
@@ -18,6 +19,8 @@ export function SavedTimers({
   timers: SavedTimer[];
   dark: boolean;
   disabled: boolean;
+  /** A pomodoro with no saved length falls back to the settings, so a start waits for them. */
+  loading?: boolean;
   onStart: (timer: SavedTimer) => void;
   onPin: (timer: SavedTimer) => void;
   onUnpin: (id: number) => void;
@@ -39,7 +42,7 @@ export function SavedTimers({
           <li key={`${timer.projectId ?? 'none'}:${timer.title}`} className="group relative">
             <button
               type="button"
-              disabled={disabled}
+              disabled={disabled || loading}
               onClick={() => onStart(timer)}
               title={disabled ? 'Finish the block you are on first' : `Start "${timer.title}"`}
               className="flex w-full items-center gap-3 rounded-xl border border-hairline bg-surface
@@ -67,7 +70,11 @@ export function SavedTimers({
                   />
                   <span className="truncate">{timer.projectName ?? 'No project'}</span>
                   <span className="tabular shrink-0">
-                    {timer.plannedMinutes ? `· ${timer.plannedMinutes}m` : ''}
+                    {timer.mode === 'stopwatch'
+                      ? '· stopwatch'
+                      : timer.plannedMinutes
+                        ? `· ${timer.plannedMinutes}m`
+                        : ''}
                     {timer.useCount > 1 ? ` · ${timer.useCount}×` : ''}
                   </span>
                 </span>

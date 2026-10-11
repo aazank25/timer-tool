@@ -15,6 +15,7 @@ const schema = z
     blocks_before_long_break: z.coerce.number().int().min(1).max(12),
     daily_target_minutes: z.coerce.number().int().min(0).max(1440),
     autostart_breaks: z.union([z.boolean(), z.enum(['true', 'false'])]),
+    default_timer_mode: z.enum(['stopwatch', 'pomodoro']),
     day_start_hour: z.coerce.number().int().min(0).max(12),
   })
   .partial();

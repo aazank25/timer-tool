@@ -14,6 +14,9 @@ export interface Project {
 
 export type SessionStatus = 'running' | 'paused' | 'completed' | 'abandoned';
 
+/** A pomodoro counts down a fixed length; a stopwatch just counts up until you stop it. */
+export type TimerMode = 'stopwatch' | 'pomodoro';
+
 export interface Session {
   id: number;
   projectId: number | null;
@@ -22,14 +25,18 @@ export interface Session {
   title: string;
   intent: string | null;
   kind: 'focus' | 'break';
-  plannedMinutes: number;
-  plannedSeconds: number;
+  mode: TimerMode;
+  /** The planned fields are null for a stopwatch: it has no length to count down from. */
+  plannedMinutes: number | null;
+  plannedSeconds: number | null;
+  /** A guess to compare against. Display only; it never feeds a score or a countdown. */
+  estimatedMinutes: number | null;
   startedAt: string;
   endedAt: string | null;
   day: string;
   elapsedSeconds: number;
-  remainingSeconds: number;
-  overrunSeconds: number;
+  remainingSeconds: number | null;
+  overrunSeconds: number | null;
   interruptions: number;
   focusRating: number | null;
   focusScore: number | null;
@@ -61,6 +68,8 @@ export interface SavedTimer {
   projectName: string | null;
   projectColor: string | null;
   title: string;
+  mode: TimerMode;
+  /** Always null for a stopwatch: it has no length to start with. */
   plannedMinutes: number | null;
   pinned: boolean;
   useCount: number;
@@ -198,7 +207,9 @@ export const api = {
     projectId?: number | null;
     title: string;
     intent?: string | null;
+    mode?: TimerMode;
     plannedMinutes?: number;
+    estimatedMinutes?: number | null;
     kind?: 'focus' | 'break';
     planItemId?: number | null;
     calendarEventId?: string | null;
@@ -226,8 +237,12 @@ export const api = {
   deleteSession: (id: number) => request<{ deleted: number }>('DELETE', `/sessions/${id}`),
 
   listTimers: (limit = 18) => request<SavedTimer[]>('GET', `/timers${qs({ limit })}`),
-  saveTimer: (body: { projectId?: number | null; title: string; plannedMinutes?: number | null }) =>
-    request<SavedTimer[]>('POST', '/timers', body),
+  saveTimer: (body: {
+    projectId?: number | null;
+    title: string;
+    plannedMinutes?: number | null;
+    mode?: TimerMode;
+  }) => request<SavedTimer[]>('POST', '/timers', body),
   unsaveTimer: (id: number) => request<SavedTimer[]>('DELETE', `/timers/${id}`),
 
   listPlan: (day: string) => request<PlanItem[]>('GET', `/plan${qs({ day })}`),

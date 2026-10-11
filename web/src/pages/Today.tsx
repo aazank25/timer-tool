@@ -453,7 +453,12 @@ function EditSessionDialog({
   const [projectId, setProjectId] = useState(session.projectId);
   const [rating, setRating] = useState(session.focusRating);
   const [notes, setNotes] = useState(session.notes ?? '');
-  const [minutes, setMinutes] = useState(Math.round(session.elapsedSeconds / 60));
+  // The field is seeded rounded to a whole minute, so the time is only sent
+  // when it was edited. Comparing with the exact seconds would call nearly every
+  // block changed, and a title-only edit would rewrite its time to the nearest
+  // minute and flatten its pause history into one span.
+  const initialMinutes = Math.round(session.elapsedSeconds / 60);
+  const [minutes, setMinutes] = useState(initialMinutes);
 
   return (
     <Modal open onClose={onClose} title="Edit block">
@@ -523,9 +528,7 @@ function EditSessionDialog({
                   projectId,
                   focusRating: rating,
                   notes: notes.trim() || null,
-                  ...(minutes * 60 !== session.elapsedSeconds
-                    ? { activeSeconds: minutes * 60 }
-                    : {}),
+                  ...(minutes !== initialMinutes ? { activeSeconds: minutes * 60 } : {}),
                 })
               }
             >

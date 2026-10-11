@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { api, type Session } from './api';
+import { clock } from './lib/format';
 
 /* ------------------------------------------------------------------ theme */
 
@@ -33,7 +34,7 @@ export function useTheme(): [Theme, (t: Theme) => void, boolean] {
 
 /* ------------------------------------------------------------------- tick */
 
-/** Re-render on an interval so a countdown moves without refetching. */
+/** Re-render on an interval so a countdown or a count-up moves without refetching. */
 export function useTick(ms = 1000): number {
   const [, setN] = useState(0);
   useEffect(() => {
@@ -138,8 +139,9 @@ export interface LiveSession {
   session: Session | null;
   /** Elapsed seconds, interpolated between server polls. */
   elapsedSeconds: number;
-  remainingSeconds: number;
-  overrunSeconds: number;
+  /** Both null for a stopwatch: with no planned length there is nothing to count down from. */
+  remainingSeconds: number | null;
+  overrunSeconds: number | null;
   isRunning: boolean;
 }
 
@@ -167,11 +169,12 @@ export function useLiveSession(): LiveSession & { isLoading: boolean } {
     return Math.round(session.elapsedSeconds + drift);
   }, [session, isRunning, now, query.dataUpdatedAt]);
 
+  const planned = session?.plannedSeconds ?? null;
   return {
     session,
     elapsedSeconds,
-    remainingSeconds: session ? Math.max(0, session.plannedSeconds - elapsedSeconds) : 0,
-    overrunSeconds: session ? Math.max(0, elapsedSeconds - session.plannedSeconds) : 0,
+    remainingSeconds: planned == null ? null : Math.max(0, planned - elapsedSeconds),
+    overrunSeconds: planned == null ? null : Math.max(0, elapsedSeconds - planned),
     isRunning,
     isLoading: query.isLoading,
   };
@@ -267,17 +270,23 @@ export function usePlanActions() {
 /* ------------------------------------------------------------ notification */
 
 /**
- * Tell the user once, when the planned time is up. The block keeps running —
- * overrun is real work and gets counted — this just stops it going unnoticed.
+ * Keep the tab title showing the clock, and for a pomodoro tell the user once
+ * when the planned time is up. The block keeps running — overrun is real work
+ * and gets counted — this just stops it going unnoticed. A stopwatch has no
+ * end to announce, so it only ever updates the title and never notifies.
  */
 export function useBlockEndAlert(live: LiveSession): void {
   const alerted = useRef<number | null>(null);
   const baseTitle = useRef(document.title);
 
   useEffect(() => {
-    const { session, isRunning, remainingSeconds, overrunSeconds } = live;
+    const { session, isRunning, elapsedSeconds, remainingSeconds, overrunSeconds } = live;
     if (!session || !isRunning) {
       document.title = baseTitle.current;
+      return;
+    }
+    if (remainingSeconds == null || overrunSeconds == null) {
+      document.title = `${clock(elapsedSeconds)} · ${session.title}`;
       return;
     }
     document.title =

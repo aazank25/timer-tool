@@ -15,7 +15,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const isMac = process.platform === 'darwin';
 
 /** Two copies would fight over the same database file. */
-if (!app.requestSingleInstanceLock()) app.quit();
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) app.quit();
 
 /**
  * Data lives beside the app, not beside the source checkout, so it survives
@@ -72,6 +73,9 @@ function createWindow() {
 }
 
 function showWindow() {
+  // A second launch during startup can ask for the window before the server
+  // is up. The first copy opens it itself once the server is ready.
+  if (!server) return;
   if (!win) createWindow();
   if (isMac) void app.dock?.show();
   win.show();
@@ -89,8 +93,9 @@ async function api(pathname, method = 'GET') {
 /* ----------------------------------------------------------------- tray */
 
 /**
- * The menu-bar countdown. The server owns the clock, so this polls it every
- * few seconds and interpolates in between rather than keeping its own count.
+ * The menu-bar clock: a countdown for a pomodoro, a count-up for a stopwatch.
+ * The server owns the clock, so this polls it every few seconds and
+ * interpolates in between rather than keeping its own count.
  */
 const live = { session: null, elapsedAtPoll: 0, polledAt: 0 };
 
@@ -125,7 +130,7 @@ function formatClock(seconds) {
 }
 
 /**
- * The countdown text changes every second; the menu only changes when the
+ * The clock text changes every second; the menu only changes when the
  * block does. Rebuilding the menu on every tick is wasted work — and on some
  * platforms the toolkit complains about it.
  */
@@ -141,10 +146,21 @@ function renderTitle() {
     return;
   }
 
-  const remaining = s.plannedSeconds - elapsedNow();
-  const label = remaining >= 0 ? formatClock(remaining) : `+${formatClock(-remaining)}`;
+  // A stopwatch has no planned time, so there is nothing to count down to and
+  // nothing to run over: the menu bar just counts up, unsigned.
+  const stopwatch = s.plannedSeconds == null;
+  let label;
+  if (stopwatch) {
+    label = formatClock(elapsedNow());
+  } else {
+    const remaining = s.plannedSeconds - elapsedNow();
+    label = remaining >= 0 ? formatClock(remaining) : `+${formatClock(-remaining)}`;
+  }
   if (isMac) tray.setTitle(s.status === 'paused' ? `|| ${label}` : ` ${label}`);
-  tray.setToolTip(`${s.title}\n${s.projectName ?? 'No project'} - ${label}`);
+  const project = s.projectName ?? 'No project';
+  tray.setToolTip(
+    stopwatch ? `${s.title}\n${project} · stopwatch ${label}` : `${s.title}\n${project} - ${label}`,
+  );
 }
 
 function renderMenu() {
@@ -225,6 +241,9 @@ function createTray() {
 /* ----------------------------------------------------------------- boot */
 
 app.whenReady().then(async () => {
+  // The copy that lost the lock is already quitting; starting a server here
+  // would open the same database the running copy has.
+  if (!gotLock) return;
   try {
     // Imported only now, so the env vars above are already in place when the
     // database file is opened at module load.

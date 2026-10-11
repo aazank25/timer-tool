@@ -59,6 +59,11 @@ export function EntryRow({
       <span className="shrink-0 text-right">
         <span className="tabular block text-sm font-semibold text-ink">
           {duration(session.elapsedSeconds)}
+          {session.estimatedMinutes != null && (
+            <span className="ml-1.5 text-[11px] font-normal text-muted">
+              est. {session.estimatedMinutes}m
+            </span>
+          )}
         </span>
         {!compact && (
           <span className="tabular mt-0.5 block text-[11px] text-muted">

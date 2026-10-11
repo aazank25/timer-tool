@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import type { PlanItem, SavedTimer, Session } from '../api';
+import type { PlanItem, SavedTimer, Session, TimerMode } from '../api';
 import { DayBar } from '../components/DayBar';
 import { EntryRow } from '../components/EntryRow';
 import { SavedTimers } from '../components/SavedTimers';
-import { DurationPicker, ProjectPicker, RatingPicker } from '../components/pickers';
+import {
+  DurationPicker,
+  EstimatePicker,
+  ModePicker,
+  ProjectPicker,
+  RatingPicker,
+} from '../components/pickers';
 import { TimerRing } from '../components/TimerRing';
 import { Button, Card, Empty, Field, inputClass, Modal, Swatch } from '../components/ui';
 import {
@@ -29,13 +35,20 @@ export function FocusPage({ dark }: { dark: boolean }) {
   const { data: projects = [] } = useProjects();
   const { data: plan = [] } = usePlan(today?.today);
   const { data: stats } = useDayStats(today?.today);
-  const { data: settings } = useSettings();
+  const { data: settings, isPending: settingsPending } = useSettings();
   const { data: timers = [] } = useTimers();
   const actions = useSessionActions();
   const timerActions = useTimerActions();
   const [finishing, setFinishing] = useState(false);
 
   const defaultMinutes = Number(settings?.focus_minutes ?? 45);
+  const defaultMode: TimerMode =
+    settings?.default_timer_mode === 'pomodoro' ? 'pomodoro' : 'stopwatch';
+  // Every way of starting a block picks a mode and a length, and the defaults
+  // for both live in the settings. Until those arrive any start is a guess, so
+  // all of them wait. If the request fails the factory defaults stand in, so a
+  // broken settings endpoint cannot lock the page out of starting anything.
+  const settingsReady = !settingsPending;
 
   if (live.isLoading) {
     return <p className="text-sm text-muted">Loading…</p>;
@@ -56,11 +69,17 @@ export function FocusPage({ dark }: { dark: boolean }) {
                 timers={timers.slice(0, 8)}
                 dark={dark}
                 disabled={!!live.session || actions.start.isPending}
+                loading={!settingsReady}
                 onStart={(timer: SavedTimer) =>
+                  // Start it the way it was saved. Only a pomodoro has a length
+                  // to fall back to; a stopwatch given one would stop being one.
                   actions.start.mutate({
                     projectId: timer.projectId,
                     title: timer.title,
-                    plannedMinutes: timer.plannedMinutes ?? defaultMinutes,
+                    mode: timer.mode,
+                    ...(timer.mode === 'pomodoro'
+                      ? { plannedMinutes: timer.plannedMinutes ?? defaultMinutes }
+                      : {}),
                   })
                 }
                 onPin={(timer: SavedTimer) =>
@@ -68,6 +87,7 @@ export function FocusPage({ dark }: { dark: boolean }) {
                     projectId: timer.projectId,
                     title: timer.title,
                     plannedMinutes: timer.plannedMinutes,
+                    mode: timer.mode,
                   })
                 }
                 onUnpin={(id: number) => timerActions.unsave.mutate(id)}
@@ -76,6 +96,8 @@ export function FocusPage({ dark }: { dark: boolean }) {
             <StartBlock
               projects={projects}
               defaultMinutes={defaultMinutes}
+              defaultMode={defaultMode}
+              settingsReady={settingsReady}
               dark={dark}
               pending={actions.start.isPending}
               error={actions.start.error?.message}
@@ -138,14 +160,16 @@ export function FocusPage({ dark }: { dark: boolean }) {
             plan={plan}
             dark={dark}
             disabled={!!live.session}
-            onStart={(item) =>
-              actions.start.mutate({
-                projectId: item.projectId,
-                title: item.title,
-                plannedMinutes: item.plannedMinutes,
-                planItemId: item.id,
-              })
-            }
+            loading={!settingsReady}
+            onStart={(item) => {
+              const base = { projectId: item.projectId, title: item.title, planItemId: item.id };
+              // The plan's length is a guess when the default is a stopwatch.
+              actions.start.mutate(
+                defaultMode === 'stopwatch'
+                  ? { ...base, mode: 'stopwatch', estimatedMinutes: item.plannedMinutes }
+                  : { ...base, mode: 'pomodoro', plannedMinutes: item.plannedMinutes },
+              );
+            }}
           />
         </Card>
 
@@ -160,6 +184,8 @@ export function FocusPage({ dark }: { dark: boolean }) {
 function StartBlock({
   projects,
   defaultMinutes,
+  defaultMode,
+  settingsReady,
   dark,
   pending,
   error,
@@ -167,6 +193,9 @@ function StartBlock({
 }: {
   projects: { id: number; name: string; color: string }[];
   defaultMinutes: number;
+  defaultMode: TimerMode;
+  /** False until the settings have settled: the two defaults above are only a guess before then. */
+  settingsReady: boolean;
   dark: boolean;
   pending: boolean;
   error?: string;
@@ -174,20 +203,43 @@ function StartBlock({
     projectId: number | null;
     title: string;
     intent: string | null;
-    plannedMinutes: number;
+    mode: TimerMode;
+    plannedMinutes?: number;
+    estimatedMinutes?: number | null;
   }) => void;
 }) {
-  const [projectId, setProjectId] = useState<number | null>(projects[0]?.id ?? null);
+  // Undefined until the person picks: it follows the project worked on most
+  // recently. Null is an explicit "No project" and has to stick, so nothing
+  // may fill it back in.
+  const [projectPick, setProjectPick] = useState<number | null | undefined>(undefined);
+  const projectId = projectPick === undefined ? (projects[0]?.id ?? null) : projectPick;
   const [title, setTitle] = useState('');
   const [intent, setIntent] = useState('');
-  const [minutes, setMinutes] = useState(defaultMinutes);
+  // Only what the person picked on this form is state. The mode and length are
+  // read from the settings on every render, so a default that arrives late is
+  // never copied in after the fact and never overwrites a pick.
+  const [modeOverride, setModeOverride] = useState<TimerMode | null>(null);
+  const [minutesOverride, setMinutesOverride] = useState<number | null>(null);
+  const [estimate, setEstimate] = useState<number | null>(null);
+  const mode = modeOverride ?? defaultMode;
+  const minutes = minutesOverride ?? defaultMinutes;
 
-  useEffect(() => setMinutes(defaultMinutes), [defaultMinutes]);
-  useEffect(() => {
-    if (projectId === null && projects.length) setProjectId(projects[0]!.id);
-  }, [projects, projectId]);
+  // One gate for Enter and the button: nothing starts on a guessed default.
+  const canStart = settingsReady && title.trim().length > 0 && !pending;
+  const stopwatch = mode === 'stopwatch';
 
-  const canStart = title.trim().length > 0 && !pending;
+  // One path for Enter and the button, so they can never send different things.
+  function start() {
+    // Only a pomodoro ever notifies, so a stopwatch has no reason to ask.
+    if (!stopwatch) requestNotificationPermission();
+    onStart({
+      projectId,
+      title: title.trim(),
+      intent: intent.trim() || null,
+      mode,
+      ...(stopwatch ? { estimatedMinutes: estimate } : { plannedMinutes: minutes }),
+    });
+  }
 
   return (
     <Card title="Start a block" subtitle="One thing at a time. Name it now, rate it after.">
@@ -200,15 +252,7 @@ function StartBlock({
             autoFocus
             onChange={(e) => setTitle(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && canStart) {
-                requestNotificationPermission();
-                onStart({
-                  projectId,
-                  title: title.trim(),
-                  intent: intent.trim() || null,
-                  plannedMinutes: minutes,
-                });
-              }
+              if (e.key === 'Enter' && canStart) start();
             }}
           />
         </Field>
@@ -217,14 +261,35 @@ function StartBlock({
           <ProjectPicker
             projects={projects as never}
             value={projectId}
-            onChange={setProjectId}
+            onChange={setProjectPick}
             dark={dark}
           />
         </Field>
 
-        <Field label="Length">
-          <DurationPicker value={minutes} onChange={setMinutes} />
-        </Field>
+        {settingsReady ? (
+          <>
+            <Field label="Timer" group>
+              <ModePicker value={mode} onChange={setModeOverride} />
+            </Field>
+
+            {stopwatch ? (
+              <Field
+                label="Estimate (optional)"
+                hint="A guess, not a countdown. Review shows estimate against actual."
+                group
+              >
+                <EstimatePicker value={estimate} onChange={setEstimate} />
+              </Field>
+            ) : (
+              <Field label="Length" group>
+                <DurationPicker value={minutes} onChange={setMinutesOverride} />
+              </Field>
+            )}
+          </>
+        ) : (
+          // The default mode is unknown until the settings arrive, so neither can show as picked.
+          <p className="text-xs text-muted">Loading your timer defaults…</p>
+        )}
 
         <Field label="Intent (optional)" hint="What does done look like? Useful when you review.">
           <input
@@ -237,22 +302,8 @@ function StartBlock({
 
         {error && <p className="text-xs text-critical">{error}</p>}
 
-        <Button
-          variant="primary"
-          size="lg"
-          className="w-full"
-          disabled={!canStart}
-          onClick={() => {
-            requestNotificationPermission();
-            onStart({
-              projectId,
-              title: title.trim(),
-              intent: intent.trim() || null,
-              plannedMinutes: minutes,
-            });
-          }}
-        >
-          Start {minutes}-minute block
+        <Button variant="primary" size="lg" className="w-full" disabled={!canStart} onClick={start}>
+          {!settingsReady ? 'Start' : stopwatch ? 'Start timer' : `Start ${minutes}-minute block`}
         </Button>
       </div>
     </Card>
@@ -273,6 +324,10 @@ function LiveBlock({
   const actions = useSessionActions();
   const session = live.session!;
   const color = seriesColor(session.projectColor, dark);
+  const stopwatch = session.mode === 'stopwatch';
+  const estimateSeconds = session.estimatedMinutes == null ? null : session.estimatedMinutes * 60;
+  // The figure beside "Worked": the plan for a pomodoro, the guess for a stopwatch.
+  const target = stopwatch ? session.estimatedMinutes : session.plannedMinutes;
 
   return (
     <Card>
@@ -289,6 +344,7 @@ function LiveBlock({
         <TimerRing
           elapsedSeconds={live.elapsedSeconds}
           plannedSeconds={session.plannedSeconds}
+          estimatedSeconds={estimateSeconds}
           paused={session.status === 'paused'}
           color={color}
         />
@@ -299,8 +355,10 @@ function LiveBlock({
             <dd className="tabular mt-0.5 text-sm text-ink">{clock(live.elapsedSeconds)}</dd>
           </div>
           <div>
-            <dt className="text-muted">Planned</dt>
-            <dd className="tabular mt-0.5 text-sm text-ink">{session.plannedMinutes}m</dd>
+            <dt className="text-muted">{stopwatch ? 'Estimate' : 'Planned'}</dt>
+            <dd className="tabular mt-0.5 text-sm text-ink">
+              {target != null ? `${target}m` : '—'}
+            </dd>
           </div>
           <div>
             <dt className="text-muted">Started</dt>
@@ -320,9 +378,11 @@ function LiveBlock({
               Resume
             </Button>
           )}
-          <Button onClick={() => actions.extend.mutate({ id: session.id, minutes: 5 })}>
-            +5 min
-          </Button>
+          {!stopwatch && (
+            <Button onClick={() => actions.extend.mutate({ id: session.id, minutes: 5 })}>
+              +5 min
+            </Button>
+          )}
           <Button
             onClick={() => actions.interrupt.mutate(session.id)}
             title="Log a distraction without stopping the clock"
@@ -337,10 +397,17 @@ function LiveBlock({
           </Button>
         </div>
 
-        {live.overrunSeconds > 0 && (
+        {live.overrunSeconds != null && live.overrunSeconds > 0 && (
           <p className="text-xs text-warning">
             {duration(live.overrunSeconds)} past the planned {session.plannedMinutes}m — still
             counting.
+          </p>
+        )}
+        {/* A stopwatch never runs "over", so an estimate is passed quietly, not flagged. */}
+        {stopwatch && estimateSeconds != null && live.elapsedSeconds > estimateSeconds && (
+          <p className="text-xs text-muted">
+            {duration(live.elapsedSeconds - estimateSeconds)} past your {session.estimatedMinutes}m
+            estimate
           </p>
         )}
       </div>
@@ -385,6 +452,14 @@ function FinishDialog({
     setTrim(false);
   }, [open, session.id, session.title]);
 
+  // The draft above survives a close; the trim box must not. It is a verdict on
+  // the clock as it stood when the dialog opened, and "Keep working" says that
+  // verdict was wrong. Left ticked, it would trim hours of later work down to
+  // the plan. `open` is a plain boolean, so this does not re-run on the tick.
+  useEffect(() => {
+    if (open) setTrim(false);
+  }, [open]);
+
   // Rate with the number keys; the dialog is the only thing focused.
   useEffect(() => {
     if (!open) return;
@@ -397,7 +472,15 @@ function FinishDialog({
   }, [open]);
 
   // A block that ran to twice its length usually means the timer was left on.
-  const looksUnattended = elapsedSeconds > session.plannedSeconds * 2;
+  // Its length is the plan for a pomodoro and the estimate for a stopwatch. A
+  // stopwatch with no estimate has nothing to trim *to*, so it never offers one:
+  // any figure would be invented, and trimming to it destroys the real time.
+  const trimTo =
+    session.plannedSeconds ?? (session.estimatedMinutes ? session.estimatedMinutes * 60 : null);
+  const looksUnattended = trimTo != null && trimTo > 0 && elapsedSeconds > trimTo * 2;
+  const trimMinutes = trimTo == null ? 0 : Math.round(trimTo / 60);
+  const yardstick =
+    session.plannedSeconds != null ? 'the planned block' : `your ${trimMinutes}m estimate`;
 
   return (
     <Modal open={open} onClose={onClose} title="How did that block go?">
@@ -414,7 +497,7 @@ function FinishDialog({
           />
         </Field>
 
-        <Field label="Focus level" hint="Press 1–5.">
+        <Field label="Focus level" hint="Press 1–5." group>
           <RatingPicker value={rating} onChange={setRating} />
         </Field>
 
@@ -439,8 +522,7 @@ function FinishDialog({
                 className="mt-0.5"
               />
               <span>
-                That's more than double the planned block. Trim it to{' '}
-                {session.plannedMinutes}m instead?
+                That's more than double {yardstick}. Trim it to {trimMinutes}m instead?
               </span>
             </label>
           )}
@@ -457,7 +539,8 @@ function FinishDialog({
                 focusRating: rating,
                 notes: notes.trim() || null,
                 title: title.trim() || session.title,
-                ...(trim ? { activeSeconds: session.plannedSeconds } : {}),
+                // Only while the offer is on screen, and never a zero or empty length.
+                ...(trim && looksUnattended && trimTo ? { activeSeconds: trimTo } : {}),
               })
             }
           >
@@ -475,11 +558,15 @@ function PlanQuickStart({
   plan,
   dark,
   disabled,
+  loading,
   onStart,
 }: {
   plan: PlanItem[];
   dark: boolean;
+  /** A block is already running. */
   disabled: boolean;
+  /** Starting one branches on the default timer, so it waits for the settings. */
+  loading: boolean;
   onStart: (item: PlanItem) => void;
 }) {
   const open = plan.filter((p) => !p.done);
@@ -498,7 +585,7 @@ function PlanQuickStart({
         <li key={item.id}>
           <button
             type="button"
-            disabled={disabled}
+            disabled={disabled || loading}
             onClick={() => onStart(item)}
             className="flex w-full items-center justify-between gap-2 rounded-lg border
               border-hairline bg-raised px-2.5 py-2 text-left text-xs transition-colors

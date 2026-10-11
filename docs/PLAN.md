@@ -39,6 +39,10 @@ field holds the "what does done look like" note from the start of the block.
                + 0.15 × 1/(1 + interruptions/2))
   ```
 
+  A stopwatch block has no planned length to fall short of — you stopped when
+  you were done — so its completion term is 1. An estimate never enters the
+  score; it is a guess, shown beside the actual.
+
   Null until rated. Tunable in `server/src/lib/sessions.ts` — the weights are a
   starting point, not a truth.
 
@@ -47,14 +51,15 @@ field holds the "what does done look like" note from the start of the block.
 Every run and pause is stored as a segment row (`session_segments`). Elapsed
 time is the sum of those segments, so **closing the lid, refreshing, or
 restarting the process loses nothing**, and paused time is never counted as
-focus. The browser only interpolates between polls so the countdown ticks.
+focus. The browser only interpolates between polls so the clock ticks — down for
+a Pomodoro, up for a stopwatch.
 
 Two consequences worth knowing:
 - At most one block is live at a time, enforced by a partial unique index in
   SQLite — not just by the UI.
 - If the timer ran on while you walked away, the finish dialog offers to trim
-  the block to its planned length, and any logged block's minutes stay editable
-  afterwards.
+  a Pomodoro to its planned length (a stopwatch to its estimate, if it has one),
+  and any logged block's minutes stay editable afterwards.
 
 ### Days, not midnights
 
@@ -71,8 +76,10 @@ reporting splits a block across the hours it really covered — 10:15 + 50m land
 
 - Projects: CRUD, colour from a validated 8-slot palette, weekly targets,
   archive (history is never deleted; hard-delete only detaches).
-- Timer: start with project + title + intent + length; pause/resume, +5 min,
-  log an interruption without stopping the clock, complete, discard.
+- Timer: start with project + title + intent. It is a **stopwatch** by default —
+  count up, stop when you are done, with an optional estimate shown against the
+  actual — or a fixed-length **Pomodoro** that counts down. Pause/resume, +5 min
+  (Pomodoro), log an interruption without stopping the clock, complete, discard.
 - **Saved timers** — the one-click grid, borrowed from Timery. Rather than
   making you curate a list, it is derived from the project+title pairs you
   actually repeat (completed blocks, ranked by frequency then recency), with an
@@ -86,8 +93,8 @@ reporting splits a block across the hours it really covered — 10:15 + 50m land
   time-by-hour, full block log.
 - Review: 7/30/90-day windows, per-day columns, per-project bars and table,
   best-hours chart.
-- Settings: block lengths, breaks, daily target, timezone, day-start hour,
-  theme.
+- Settings: default timer (stopwatch or Pomodoro), Pomodoro length, breaks,
+  daily target, timezone, day-start hour, theme.
 - Light and dark, keyboard-friendly, no horizontal scroll down to 400px.
 - Sidebar shell with the running block pinned to a bar on every screen, a
   per-day composition bar, and entry rows carrying duration and time range.
@@ -206,9 +213,10 @@ is a new adapter beside the ICS one, not a rewrite.
 Electron main process starts the Express server in-process on an ephemeral
 loopback port and points a window at it.
 
-- **Menu-bar countdown.** The server owns the clock, so the tray polls it every
-  five seconds and interpolates in between rather than keeping its own count.
-  Its menu pauses, resumes, logs an interruption, or opens the window.
+- **Menu-bar clock.** A stopwatch counts up there and a Pomodoro counts down.
+  The server owns the clock, so the tray polls it every five seconds and
+  interpolates in between rather than keeping its own count. Its menu pauses,
+  resumes, logs an interruption, or opens the window.
 - **Closing the window parks the app in the menu bar** and the block keeps
   running; quitting is explicit.
 - **Global hotkeys:** Cmd+Shift+F to show, Cmd+Shift+Space to pause/resume.
@@ -265,7 +273,8 @@ projects          id, name, color, description, weekly_target_minutes,
                   notion_url, archived, timestamps
 
 sessions          id, project_id→projects, title, intent, kind(focus|break),
-                  planned_minutes, started_at, ended_at, local_day,
+                  planned_minutes (NULL = stopwatch), estimated_minutes
+                  (display only), started_at, ended_at, local_day,
                   active_seconds, interruptions, focus_rating(1-5), notes,
                   status(running|paused|completed|abandoned),
                   calendar_event_id, timestamps
@@ -289,7 +298,11 @@ settings          key, value
 
 Migrations are append-only in `server/src/db.ts` — never edit a shipped one.
 The phase-4/5 tables ship in the initial schema so the shape is stable before
-the integrations land.
+the integrations land. Before applying a migration to an existing database,
+it is snapshotted beside itself with `VACUUM INTO` as
+`focusdesk.backup-before-<migration id>-<timestamp>.sqlite` — a raw copy of a
+WAL database can be torn while anything else holds it open. A fresh install
+has nothing to lose and takes no backup.
 
 ---
 

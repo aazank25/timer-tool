@@ -23,12 +23,16 @@ export const sessionsRouter = Router();
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const rating = z.number().int().min(1).max(5);
+/** A guess, not a plan: it is shown next to the actual and never counted. */
+const estimate = z.number().int().min(1).max(8 * 60).nullish();
 
 const startSchema = z.object({
   projectId: z.number().int().positive().nullish(),
   title: z.string().trim().min(1).max(300),
   intent: z.string().max(2000).nullish(),
+  mode: z.enum(['stopwatch', 'pomodoro']).optional(),
   plannedMinutes: z.number().int().min(1).max(8 * 60).optional(),
+  estimatedMinutes: estimate,
   kind: z.enum(['focus', 'break']).optional(),
   planItemId: z.number().int().positive().nullish(),
   calendarEventId: z.string().max(300).nullish(),
@@ -39,7 +43,9 @@ const stopSchema = z.object({
   notes: z.string().max(20_000).nullish(),
   title: z.string().trim().min(1).max(300).optional(),
   projectId: z.number().int().positive().nullish(),
-  activeSeconds: z.number().int().min(0).max(24 * 3600).optional(),
+  // At least a second: zero would log an empty block and collapse its segments
+  // into a zero-length span.
+  activeSeconds: z.number().int().min(1).max(24 * 3600).optional(),
 });
 
 const manualSchema = z.object({
@@ -61,6 +67,7 @@ const patchSchema = z.object({
   interruptions: z.number().int().min(0).max(999).optional(),
   activeSeconds: z.number().int().min(0).max(24 * 3600).optional(),
   plannedMinutes: z.number().int().min(1).max(8 * 60).optional(),
+  estimatedMinutes: estimate,
 });
 
 /** The block currently on the clock, if any. */
@@ -160,11 +167,13 @@ sessionsRouter.patch(
     const id = intParam(req.params.id, 'session id');
     const body = parse(patchSchema, req.body);
     const row = getSessionRow(id);
-    if (body.activeSeconds !== undefined) {
-      if (row.status === 'running') {
-        throw badRequest('Pause or stop the block before rewriting its elapsed time');
-      }
-      overwriteActiveSeconds(id, body.activeSeconds);
+    // Giving a stopwatch a plan here would quietly turn it into a fixed-length
+    // block. Checked before anything is written so a bad request changes nothing.
+    if (row.planned_minutes == null && body.plannedMinutes !== undefined) {
+      throw badRequest('Stopwatch blocks have no planned length to change');
+    }
+    if (body.activeSeconds !== undefined && row.status === 'running') {
+      throw badRequest('Pause or stop the block before rewriting its elapsed time');
     }
     const map: Record<string, unknown> = {
       title: body.title,
@@ -174,6 +183,7 @@ sessionsRouter.patch(
       notes: body.notes,
       interruptions: body.interruptions,
       planned_minutes: body.plannedMinutes,
+      estimated_minutes: body.estimatedMinutes,
     };
     const sets: string[] = [];
     const args: unknown[] = [];
@@ -182,11 +192,16 @@ sessionsRouter.patch(
       sets.push(`${col} = ?`);
       args.push(val);
     }
-    if (sets.length) {
-      sets.push('updated_at = ?');
-      args.push(nowIso(), id);
-      db.prepare(`UPDATE sessions SET ${sets.join(', ')} WHERE id = ?`).run(...args);
-    }
+    // One transaction, so a request that fails partway (a project that does not
+    // exist, say) cannot leave the block with its time rewritten and nothing else.
+    db.transaction(() => {
+      if (body.activeSeconds !== undefined) overwriteActiveSeconds(id, body.activeSeconds);
+      if (sets.length) {
+        sets.push('updated_at = ?');
+        args.push(nowIso(), id);
+        db.prepare(`UPDATE sessions SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+      }
+    })();
     return toView(getSessionRow(id));
   }),
 );

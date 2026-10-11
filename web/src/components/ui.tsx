@@ -87,12 +87,37 @@ export function Button({
 export function Field({
   label,
   hint,
+  group = false,
   children,
 }: {
   label: string;
   hint?: string;
+  /**
+   * Set when the children are a row of buttons rather than one input. A
+   * <label> lends its name and its clicks to the first control inside it, so
+   * around buttons it renames the first one and turns a click on the caption
+   * into a click on that button. A labelled group does neither.
+   */
+  group?: boolean;
   children: ReactNode;
 }) {
+  const labelId = useId();
+  if (group) {
+    const hintId = `${labelId}-hint`;
+    return (
+      <div role="group" aria-labelledby={labelId} aria-describedby={hint ? hintId : undefined}>
+        <span id={labelId} className="mb-1 block text-xs font-medium text-ink-2">
+          {label}
+        </span>
+        {children}
+        {hint && (
+          <span id={hintId} className="mt-1 block text-[11px] text-muted">
+            {hint}
+          </span>
+        )}
+      </div>
+    );
+  }
   return (
     <label className="block">
       <span className="mb-1 block text-xs font-medium text-ink-2">{label}</span>

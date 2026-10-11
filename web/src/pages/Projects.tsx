@@ -224,6 +224,7 @@ function ProjectDialog({
         <Field
           label="Colour"
           hint="Fixed, validated set — each keeps its own step in light and dark."
+          group
         >
           <div className="flex flex-wrap gap-1.5">
             {SLOTS.map((slot) => (

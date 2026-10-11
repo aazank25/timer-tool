@@ -1,9 +1,12 @@
 import { db } from '../db.js';
-import { conflict, notFound } from './http.js';
-import { dayStartHour, getNumber, tz } from './settings.js';
+import { badRequest, conflict, notFound } from './http.js';
+import { dayStartHour, getNumber, getSetting, tz } from './settings.js';
 import { focusDay, nowIso, secondsBetween } from './time.js';
 
 export type SessionStatus = 'running' | 'paused' | 'completed' | 'abandoned';
+
+/** A pomodoro counts down a fixed length; a stopwatch just counts up until you stop it. */
+export type TimerMode = 'stopwatch' | 'pomodoro';
 
 export interface SessionRow {
   id: number;
@@ -11,7 +14,9 @@ export interface SessionRow {
   title: string;
   intent: string | null;
   kind: 'focus' | 'break';
-  planned_minutes: number;
+  /** NULL is the stopwatch signal. There is deliberately no mode column to disagree with it. */
+  planned_minutes: number | null;
+  estimated_minutes: number | null;
   started_at: string;
   ended_at: string | null;
   local_day: string;
@@ -35,14 +40,18 @@ export interface SessionView {
   title: string;
   intent: string | null;
   kind: 'focus' | 'break';
-  plannedMinutes: number;
-  plannedSeconds: number;
+  mode: TimerMode;
+  /** The planned fields are null for a stopwatch: it has no length to count down from. */
+  plannedMinutes: number | null;
+  plannedSeconds: number | null;
+  /** A guess to compare against. Display only; it never feeds a score or a countdown. */
+  estimatedMinutes: number | null;
   startedAt: string;
   endedAt: string | null;
   day: string;
   elapsedSeconds: number;
-  remainingSeconds: number;
-  overrunSeconds: number;
+  remainingSeconds: number | null;
+  overrunSeconds: number | null;
   interruptions: number;
   focusRating: number | null;
   focusScore: number | null;
@@ -61,18 +70,24 @@ const SELECT = `
  * Self-report leads (you know best), but a block you cut short or spent
  * fielding interruptions cannot score as highly as one you rode out.
  *   60% self rating · 25% share of the planned block actually worked · 15% interruption decay
+ * A stopwatch block has no plan to fall short of — you stopped when you were
+ * done, so it counts as complete. (An estimate is a guess, not a plan, and
+ * never feeds in.)
  * Null until the block has been rated.
  */
 export function focusScore(s: {
   focus_rating: number | null;
   active_seconds: number;
-  planned_minutes: number;
+  planned_minutes: number | null;
   interruptions: number;
 }): number | null {
   if (s.focus_rating == null) return null;
   const rating = (s.focus_rating - 1) / 4;
-  const planned = Math.max(1, s.planned_minutes * 60);
-  const completion = Math.min(1, s.active_seconds / planned);
+  let completion = 1;
+  if (s.planned_minutes != null) {
+    const planned = Math.max(1, s.planned_minutes * 60);
+    completion = Math.min(1, s.active_seconds / planned);
+  }
   const calm = 1 / (1 + s.interruptions / 2);
   return Math.round(100 * (0.6 * rating + 0.25 * completion + 0.15 * calm));
 }
@@ -89,7 +104,7 @@ export function toView(row: SessionRow): SessionView {
   // active_seconds is flushed on every pause/stop, so it is authoritative for
   // anything that is not currently ticking.
   const elapsed = row.status === 'running' ? segmentSeconds(row.id) : row.active_seconds;
-  const plannedSeconds = row.planned_minutes * 60;
+  const plannedSeconds = row.planned_minutes == null ? null : row.planned_minutes * 60;
   return {
     id: row.id,
     projectId: row.project_id,
@@ -98,14 +113,16 @@ export function toView(row: SessionRow): SessionView {
     title: row.title,
     intent: row.intent,
     kind: row.kind,
+    mode: plannedSeconds == null ? 'stopwatch' : 'pomodoro',
     plannedMinutes: row.planned_minutes,
     plannedSeconds,
+    estimatedMinutes: row.estimated_minutes,
     startedAt: row.started_at,
     endedAt: row.ended_at,
     day: row.local_day,
     elapsedSeconds: elapsed,
-    remainingSeconds: Math.max(0, plannedSeconds - elapsed),
-    overrunSeconds: Math.max(0, elapsed - plannedSeconds),
+    remainingSeconds: plannedSeconds == null ? null : Math.max(0, plannedSeconds - elapsed),
+    overrunSeconds: plannedSeconds == null ? null : Math.max(0, elapsed - plannedSeconds),
     interruptions: row.interruptions,
     focusRating: row.focus_rating,
     focusScore: focusScore({ ...row, active_seconds: elapsed }),
@@ -132,13 +149,28 @@ export interface StartInput {
   projectId?: number | null;
   title: string;
   intent?: string | null;
+  /**
+   * Left out, `plannedMinutes` alone still means a countdown of that length
+   * (every caller that predates stopwatch relies on it), and a break is always
+   * a countdown; with none of those, the `default_timer_mode` setting decides.
+   * Asking for a stopwatch and a length together is a contradiction and is
+   * refused.
+   */
+  mode?: TimerMode;
   plannedMinutes?: number;
+  /** A guess to compare against when you review; never a countdown. */
+  estimatedMinutes?: number | null;
   kind?: 'focus' | 'break';
   planItemId?: number | null;
   calendarEventId?: string | null;
 }
 
 export function startSession(input: StartInput): SessionView {
+  // Wrong whatever is on the clock, so refused before looking at it. PATCH
+  // answers 400 to the same contradiction rather than quietly dropping the plan.
+  if (input.mode === 'stopwatch' && input.plannedMinutes != null) {
+    throw badRequest('A stopwatch has no planned length');
+  }
   const live = liveSessionRow();
   if (live) {
     throw conflict(
@@ -149,15 +181,21 @@ export function startSession(input: StartInput): SessionView {
   const kind = input.kind ?? 'focus';
   const defaultMinutes =
     kind === 'break' ? getNumber('short_break_minutes', 10) : getNumber('focus_minutes', 45);
-  const planned = input.plannedMinutes ?? defaultMinutes;
+  const fallbackMode: TimerMode =
+    getSetting('default_timer_mode') === 'pomodoro' ? 'pomodoro' : 'stopwatch';
+  // A break is a rest with an end, so the setting for how you like to work
+  // never turns it into a stopwatch.
+  const mode =
+    input.mode ?? (input.plannedMinutes != null || kind === 'break' ? 'pomodoro' : fallbackMode);
+  const planned = mode === 'stopwatch' ? null : (input.plannedMinutes ?? defaultMinutes);
 
   return db.transaction(() => {
     const info = db
       .prepare(
         `INSERT INTO sessions
-          (project_id, title, intent, kind, planned_minutes, started_at, local_day,
-           active_seconds, status, calendar_event_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'running', ?, ?, ?)`,
+          (project_id, title, intent, kind, planned_minutes, estimated_minutes, started_at,
+           local_day, active_seconds, status, calendar_event_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'running', ?, ?, ?)`,
       )
       .run(
         input.projectId ?? null,
@@ -165,6 +203,7 @@ export function startSession(input: StartInput): SessionView {
         input.intent ?? null,
         kind,
         planned,
+        input.estimatedMinutes ?? null,
         now,
         focusDay(now, tz(), dayStartHour()),
         input.calendarEventId ?? null,
@@ -307,6 +346,11 @@ export function addInterruption(id: number, delta = 1): SessionView {
 
 export function extendSession(id: number, minutes: number): SessionView {
   const row = getSessionRow(id);
+  // null + minutes is a number in JS, so without this a stopwatch would quietly
+  // turn into a fixed-length block.
+  if (row.planned_minutes == null) {
+    throw conflict('Stopwatch blocks have no planned length to extend');
+  }
   const next = Math.max(1, row.planned_minutes + minutes);
   db.prepare('UPDATE sessions SET planned_minutes = ?, updated_at = ? WHERE id = ?').run(
     next,

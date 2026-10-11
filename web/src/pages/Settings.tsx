@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
+import { ModePicker } from '../components/pickers';
 import { Button, Card, Empty, Field, inputBase, inputClass } from '../components/ui';
 import { useCalendarSources, useSettings, useTheme } from '../hooks';
 import { api } from '../api';
 import { useQueryClient } from '@tanstack/react-query';
 
 const NUMBER_FIELDS: { key: string; label: string; hint?: string; min: number; max: number }[] = [
-  { key: 'focus_minutes', label: 'Default block length (min)', min: 1, max: 480 },
+  { key: 'focus_minutes', label: 'Pomodoro length (min)', min: 1, max: 480 },
   { key: 'short_break_minutes', label: 'Short break (min)', min: 1, max: 120 },
   { key: 'long_break_minutes', label: 'Long break (min)', min: 1, max: 240 },
   { key: 'blocks_before_long_break', label: 'Blocks before a long break', min: 1, max: 12 },
@@ -55,6 +56,16 @@ export function SettingsPage() {
 
       <Card title="Timer" subtitle="Defaults for new blocks">
         <div className="grid gap-3 sm:grid-cols-2">
+          <Field
+            label="Default timer"
+            hint="A stopwatch counts up until you stop it; a Pomodoro counts down a fixed length."
+            group
+          >
+            <ModePicker
+              value={draft.default_timer_mode === 'pomodoro' ? 'pomodoro' : 'stopwatch'}
+              onChange={(mode) => setDraft({ ...draft, default_timer_mode: mode })}
+            />
+          </Field>
           {NUMBER_FIELDS.map((f) => (
             <Field key={f.key} label={f.label} hint={f.hint}>
               <input
@@ -86,13 +97,14 @@ export function SettingsPage() {
       </Card>
 
       <Card title="Appearance">
-        <Field label="Theme">
+        <Field label="Theme" group>
           <div className="flex gap-1.5">
             {(['system', 'light', 'dark'] as const).map((t) => (
               <Button
                 key={t}
                 size="sm"
                 variant={theme === t ? 'primary' : 'default'}
+                aria-pressed={theme === t}
                 onClick={() => setTheme(t)}
                 className="capitalize"
               >

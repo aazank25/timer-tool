@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../db.js';
 import { handler, intParam, notFound, parse } from '../lib/http.js';
+import type { TimerMode } from '../lib/sessions.js';
 import { nowIso } from '../lib/time.js';
 
 export const timersRouter = Router();
@@ -13,6 +14,8 @@ export interface TimerView {
   projectName: string | null;
   projectColor: string | null;
   title: string;
+  mode: TimerMode;
+  /** Always null for a stopwatch: it has no length to start with. */
   plannedMinutes: number | null;
   pinned: boolean;
   useCount: number;
@@ -30,7 +33,7 @@ const key = (projectId: number | null, title: string) => `${projectId ?? 'none'}
 function listTimers(limit: number): TimerView[] {
   const pinned = db
     .prepare(
-      `SELECT t.id, t.project_id, t.title, t.planned_minutes, t.position,
+      `SELECT t.id, t.project_id, t.title, t.planned_minutes, t.mode, t.position,
               p.name AS project_name, p.color AS project_color
        FROM saved_timers t LEFT JOIN projects p ON p.id = t.project_id
        ORDER BY t.position ASC, t.id ASC`,
@@ -40,6 +43,7 @@ function listTimers(limit: number): TimerView[] {
     project_id: number | null;
     title: string;
     planned_minutes: number | null;
+    mode: TimerMode;
     project_name: string | null;
     project_color: string | null;
   }[];
@@ -52,6 +56,12 @@ function listTimers(limit: number): TimerView[] {
               SUM(s.active_seconds)           AS total_seconds,
               MAX(s.started_at)               AS last_used_at,
               CAST(ROUND(AVG(s.planned_minutes)) AS INTEGER) AS planned_minutes,
+              -- The mode you last ran it in, not a blend of every run: a title
+              -- you moved from pomodoros to a stopwatch should start as one.
+              (SELECT l.planned_minutes IS NULL FROM sessions l
+                WHERE l.kind = 'focus' AND l.status = 'completed'
+                  AND l.project_id IS s.project_id AND l.title = s.title
+                ORDER BY l.started_at DESC, l.id DESC LIMIT 1) AS last_was_stopwatch,
               p.name AS project_name, p.color AS project_color
        FROM sessions s LEFT JOIN projects p ON p.id = s.project_id
        WHERE s.kind = 'focus' AND s.status = 'completed'
@@ -66,6 +76,7 @@ function listTimers(limit: number): TimerView[] {
     total_seconds: number | null;
     last_used_at: string | null;
     planned_minutes: number | null;
+    last_was_stopwatch: number;
     project_name: string | null;
     project_color: string | null;
   }[];
@@ -81,7 +92,9 @@ function listTimers(limit: number): TimerView[] {
       projectName: t.project_name,
       projectColor: t.project_color,
       title: t.title,
-      plannedMinutes: t.planned_minutes ?? s?.planned_minutes ?? null,
+      mode: t.mode,
+      plannedMinutes:
+        t.mode === 'stopwatch' ? null : (t.planned_minutes ?? s?.planned_minutes ?? null),
       pinned: true,
       useCount: s?.use_count ?? 0,
       totalSeconds: s?.total_seconds ?? 0,
@@ -99,7 +112,8 @@ function listTimers(limit: number): TimerView[] {
       projectName: h.project_name,
       projectColor: h.project_color,
       title: h.title,
-      plannedMinutes: h.planned_minutes,
+      mode: h.last_was_stopwatch ? 'stopwatch' : 'pomodoro',
+      plannedMinutes: h.last_was_stopwatch ? null : h.planned_minutes,
       pinned: false,
       useCount: h.use_count,
       totalSeconds: h.total_seconds ?? 0,
@@ -125,14 +139,22 @@ timersRouter.post(
         projectId: z.number().int().positive().nullish(),
         title: z.string().trim().min(1).max(300),
         plannedMinutes: z.number().int().min(1).max(480).nullish(),
+        // Optional so a client that predates stopwatch still pins fixed-length timers.
+        mode: z.enum(['stopwatch', 'pomodoro']).optional(),
       }),
       req.body,
     );
     db.prepare(
-      `INSERT INTO saved_timers (project_id, title, planned_minutes, position, created_at)
-       VALUES (?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM saved_timers), ?)
+      `INSERT INTO saved_timers (project_id, title, planned_minutes, mode, position, created_at)
+       VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM saved_timers), ?)
        ON CONFLICT DO NOTHING`,
-    ).run(body.projectId ?? null, body.title, body.plannedMinutes ?? null, nowIso());
+    ).run(
+      body.projectId ?? null,
+      body.title,
+      body.plannedMinutes ?? null,
+      body.mode ?? 'pomodoro',
+      nowIso(),
+    );
     res.status(201);
     return listTimers(18);
   }),
