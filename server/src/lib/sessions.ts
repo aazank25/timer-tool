@@ -1,6 +1,7 @@
 import { db } from '../db.js';
 import { badRequest, conflict, notFound } from './http.js';
 import { dayStartHour, getNumber, getSetting, tz } from './settings.js';
+import { requireProject, requireTask, startTask } from './tasks.js';
 import { focusDay, nowIso, secondsBetween } from './time.js';
 
 export type SessionStatus = 'running' | 'paused' | 'completed' | 'abandoned';
@@ -11,6 +12,8 @@ export type TimerMode = 'stopwatch' | 'pomodoro';
 export interface SessionRow {
   id: number;
   project_id: number | null;
+  /** The task this block was the work on, if any. */
+  task_id: number | null;
   title: string;
   intent: string | null;
   kind: 'focus' | 'break';
@@ -30,6 +33,7 @@ export interface SessionRow {
   updated_at: string;
   project_name?: string | null;
   project_color?: string | null;
+  task_title?: string | null;
 }
 
 export interface SessionView {
@@ -37,6 +41,8 @@ export interface SessionView {
   projectId: number | null;
   projectName: string | null;
   projectColor: string | null;
+  taskId: number | null;
+  taskTitle: string | null;
   title: string;
   intent: string | null;
   kind: 'focus' | 'break';
@@ -62,8 +68,10 @@ export interface SessionView {
 }
 
 const SELECT = `
-  SELECT s.*, p.name AS project_name, p.color AS project_color
-  FROM sessions s LEFT JOIN projects p ON p.id = s.project_id`;
+  SELECT s.*, p.name AS project_name, p.color AS project_color, t.title AS task_title
+  FROM sessions s
+  LEFT JOIN projects p ON p.id = s.project_id
+  LEFT JOIN tasks t ON t.id = s.task_id`;
 
 /**
  * A 0-100 blend of how focused the block felt and how it actually went.
@@ -110,6 +118,8 @@ export function toView(row: SessionRow): SessionView {
     projectId: row.project_id,
     projectName: row.project_name ?? null,
     projectColor: row.project_color ?? null,
+    taskId: row.task_id,
+    taskTitle: row.task_title ?? null,
     title: row.title,
     intent: row.intent,
     kind: row.kind,
@@ -146,7 +156,16 @@ export function liveSessionRow(): SessionRow | undefined {
 }
 
 export interface StartInput {
+  /**
+   * Left out, the block takes the task's project (if it has one); naming a
+   * project, or null for none, always wins.
+   */
   projectId?: number | null;
+  /**
+   * The task this block is the work on. A task's own estimate is total effort
+   * across many blocks, so it is never copied onto the block as its estimate.
+   */
+  taskId?: number | null;
   title: string;
   intent?: string | null;
   /**
@@ -171,6 +190,8 @@ export function startSession(input: StartInput): SessionView {
   if (input.mode === 'stopwatch' && input.plannedMinutes != null) {
     throw badRequest('A stopwatch has no planned length');
   }
+  // Wrong whatever is on the clock, so refused before looking at it, like the above.
+  const task = input.taskId == null ? null : requireTask(input.taskId);
   const live = liveSessionRow();
   if (live) {
     throw conflict(
@@ -188,17 +209,24 @@ export function startSession(input: StartInput): SessionView {
   const mode =
     input.mode ?? (input.plannedMinutes != null || kind === 'break' ? 'pomodoro' : fallbackMode);
   const planned = mode === 'stopwatch' ? null : (input.plannedMinutes ?? defaultMinutes);
+  // A task's project is where a block on it belongs unless the caller says otherwise.
+  const projectId = input.projectId !== undefined ? input.projectId : (task?.projectId ?? null);
 
   return db.transaction(() => {
+    // Ahead of the first write, so a project that is not there is the caller's 400
+    // and not the foreign key's 500.
+    if (projectId != null) requireProject(projectId);
     const info = db
       .prepare(
         `INSERT INTO sessions
-          (project_id, title, intent, kind, planned_minutes, estimated_minutes, started_at,
-           local_day, active_seconds, status, calendar_event_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'running', ?, ?, ?)`,
+          (project_id, task_id, title, intent, kind, planned_minutes, estimated_minutes,
+           started_at, local_day, active_seconds, status, calendar_event_id, created_at,
+           updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'running', ?, ?, ?)`,
       )
       .run(
-        input.projectId ?? null,
+        projectId,
+        task?.id ?? null,
         input.title,
         input.intent ?? null,
         kind,
@@ -212,6 +240,8 @@ export function startSession(input: StartInput): SessionView {
       );
     const id = Number(info.lastInsertRowid);
     db.prepare('INSERT INTO session_segments (session_id, started_at) VALUES (?, ?)').run(id, now);
+    // Work begun on a task moves it along. A break is a rest, not work on it.
+    if (task && kind === 'focus') startTask(task.id);
     if (input.planItemId) {
       db.prepare('UPDATE plan_items SET session_id = ?, updated_at = ? WHERE id = ?').run(
         id,

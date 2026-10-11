@@ -5,7 +5,9 @@ worked on, how long, and how focused you were.**
 
 Blocks of time roll up to overarching **projects**, each block is titled with
 what you actually did, and each gets a focus rating — so the day becomes
-reviewable instead of a blur.
+reviewable instead of a blur. Smaller **tasks** — the rows of a weekly
+priorities list — can be what a block is for, so each shows the time really
+logged against its estimate.
 
 Everything lives in one SQLite file on your machine. The server binds to
 loopback only. Nothing leaves the laptop unless you connect a calendar feed.
@@ -111,10 +113,10 @@ reinstalling it never touches your history.
 ## The loop
 
 1. **Focus** — start one of your saved timers with a single click, or name a new
-   block: project, what you're working on, and optionally a guess at how long
-   it will take. It runs as a stopwatch until you stop it; pick Pomodoro for a
-   fixed-length countdown instead. Pause, add 5 minutes to a Pomodoro, or log
-   an interruption without stopping the clock.
+   block: project, what you're working on (or the task it's for), and
+   optionally a guess at how long it will take. It runs as a stopwatch until you
+   stop it; pick Pomodoro for a fixed-length countdown instead. Pause, add 5
+   minutes to a Pomodoro, or log an interruption without stopping the clock.
 2. **Finish** — rate the block 1–5 (number keys), rewrite the title to what you
    actually did, add notes.
 3. **Today** — the shape of the day: timeline, time per project, time per hour,
@@ -125,6 +127,13 @@ reinstalling it never touches your history.
 **Saved timers** are the fast path. The list builds itself from the
 project + task pairs you keep returning to, so it is useful on day two without
 anyone curating it; pin one to hold it at the top.
+
+**Tasks** are the weekly priorities list that replaces a spreadsheet: a row for
+each thing that needs doing, with its project (or none), priority, status,
+target date and estimate, grouped by the week it was added. Press ▶ on a row, or
+pick the task on the Focus screen, and the block counts against it — the estimate
+finally has an actual beside it. A task moves to *in progress* when you start
+work on it, and deleting one keeps every block logged on it.
 
 The clock is owned by the server and stored as run/pause segments, so a
 refresh, a closed lid or a restart loses nothing, and paused time is never
@@ -154,11 +163,12 @@ Note that a published ICS feed can lag the real calendar by hours; see
 ```
 server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
   src/app.ts    boots the API and client on a port; embedded by the desktop app
-  src/lib/      sessions (timer), stats (rollups), calendar (ICS), time, settings
-  src/routes/   projects, sessions, timers, plan, stats, settings, calendar
+  src/lib/      sessions (timer), tasks, stats (rollups), calendar (ICS), time, settings
+  src/routes/   projects, sessions, tasks, timers, plan, stats, settings, calendar
   test/         timer accounting, stopwatch, saved-timer mode, day boundaries,
-                rollups, ICS parsing, migration and backup
-web/      React + Vite + Tailwind. Focus · Today · Projects · Review · Settings
+                rollups, ICS parsing, migration and backup; tasks (status dates,
+                logged time, validation, reordering, migration 4)
+web/      React + Vite + Tailwind. Focus · Today · Tasks · Projects · Review · Settings
 desktop/  Electron shell: menu-bar clock, hotkeys, packaging
   main.mjs      window, tray, shortcuts; starts the server in-process
   scripts/      icon generator and payload bundler (no binaries in git)

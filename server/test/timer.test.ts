@@ -1015,13 +1015,19 @@ describe('stopping and editing a block over the API', () => {
 
   it('applies a PATCH whole or not at all', async () => {
     const id = await twoSittings('Atomic edit');
+    const { db } = await dbMod();
     const before = await stored(id);
     assert.equal(before.block.active_seconds, 3000);
     assert.equal(before.segments.length, 2);
 
-    // The time is rewritten first and the project then fails its foreign key: both must unwind.
+    // The time is rewritten first and the edit's own update then fails, as a full disk would:
+    // both must unwind. (A project that is not there never gets this far, it is refused with a
+    // 400 before anything is written, so the failure is made here by a TEMP trigger that is
+    // dropped again below.)
+    db.exec(`CREATE TEMP TRIGGER fail_the_edit BEFORE UPDATE OF title ON sessions
+             WHEN NEW.title = 'tripwire' BEGIN SELECT RAISE(ABORT, 'tripwire'); END`);
     const good = { activeSeconds: 60, estimatedMinutes: 30 };
-    const bad = { ...good, projectId: 999_999 };
+    const bad = { ...good, title: 'tripwire' };
     // The server logs the failure it answers with; keep that stack trace out of the report.
     const quiet = mock.method(console, 'error', () => {});
     let failed;
@@ -1029,16 +1035,67 @@ describe('stopping and editing a block over the API', () => {
       failed = await api.call('PATCH', `/sessions/${id}`, bad);
     } finally {
       quiet.mock.restore();
+      db.exec('DROP TRIGGER IF EXISTS fail_the_edit');
     }
-    assert.ok(failed.status >= 400, `expected a refusal, got ${failed.status}`);
+    // Exactly the 500 the trigger causes: a 400 would mean it was refused before the writes,
+    // and this would no longer be testing the unwinding.
+    assert.equal(failed.status, 500);
+    assert.match(failed.body.details, /tripwire/);
     assert.deepEqual(await stored(id), before);
 
-    // Without the bad project the same request goes through, all of it.
+    // Without the failing title the same request goes through, all of it.
     const ok = await api.call('PATCH', `/sessions/${id}`, good);
     assert.equal(ok.status, 200);
     assert.equal(ok.body.elapsedSeconds, 60);
     assert.equal(ok.body.estimatedMinutes, 30);
     assert.equal((await stored(id)).segments.length, 1);
+  });
+
+  it('answers 400 to a project that is not there when starting a block, and starts nothing', async () => {
+    const { db } = await dbMod();
+    const count = (table: string) =>
+      (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+    const [blocks, segments] = [count('sessions'), count('session_segments')];
+
+    const res = await api.call('POST', '/sessions', { title: 'Nowhere', projectId: 999_999 });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'Unknown project');
+    assert.equal(count('sessions'), blocks);
+    assert.equal(count('session_segments'), segments);
+    assert.equal((await api.call('GET', '/sessions/active')).body.session, null);
+
+    // A project that is there, and an explicit none, are unaffected.
+    const named = await api.call('POST', '/sessions', { title: 'Somewhere', projectId });
+    assert.equal(named.status, 201);
+    assert.equal(named.body.projectId, projectId);
+    await api.call('POST', `/sessions/${named.body.id}/abandon`);
+    const none = await api.call('POST', '/sessions', {
+      title: 'Nowhere on purpose',
+      projectId: null,
+    });
+    assert.equal(none.status, 201);
+    assert.equal(none.body.projectId, null);
+  });
+
+  it('answers 400 to a project that is not there when editing a block, and leaves it as it was', async () => {
+    const id = await twoSittings('Stays put');
+    const before = await stored(id);
+
+    // The rest of the edit rides along to prove none of it is written before the refusal.
+    const res = await api.call('PATCH', `/sessions/${id}`, {
+      projectId: 999_999,
+      title: 'Renamed',
+      activeSeconds: 60,
+      estimatedMinutes: 30,
+    });
+    assert.equal(res.status, 400);
+    assert.equal(res.body.error, 'Unknown project');
+    assert.deepEqual(await stored(id), before);
+
+    // An explicit none still clears the project.
+    const cleared = await api.call('PATCH', `/sessions/${id}`, { projectId: null });
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.body.projectId, null);
   });
 
   it('refuses to rewrite the time of a block still on the clock, and changes nothing', async () => {
@@ -1120,10 +1177,12 @@ describe('migration 3 on an existing database', () => {
       runMigrations(conn, file);
 
       // Nothing was lost, and old blocks read back as the fixed-length blocks they were.
+      // The runner applies everything pending, so migration 4 follows the 3 under test.
       assert.deepEqual(conn.prepare('SELECT id FROM _migrations ORDER BY id').all(), [
         { id: 1 },
         { id: 2 },
         { id: 3 },
+        { id: 4 },
       ]);
       const old = conn.prepare('SELECT * FROM sessions WHERE id = 7').get() as SessionRow;
       assert.equal(old.title, 'Old block');

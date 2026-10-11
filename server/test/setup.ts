@@ -15,7 +15,7 @@ export const testDataDir = dir;
 export async function freshDb() {
   const { initDb, db } = await import('../src/db.js');
   initDb();
-  db.exec(`DELETE FROM session_segments; DELETE FROM sessions; DELETE FROM plan_items;
-           DELETE FROM calendar_events; DELETE FROM projects;`);
+  db.exec(`DELETE FROM session_segments; DELETE FROM sessions; DELETE FROM tasks;
+           DELETE FROM plan_items; DELETE FROM calendar_events; DELETE FROM projects;`);
   return db;
 }

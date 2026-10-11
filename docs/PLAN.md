@@ -10,12 +10,13 @@ unless you explicitly connect a calendar feed.
 
 ## 1. The model
 
-Four concepts, and no more:
+Six concepts, and no more:
 
 | Concept | What it is |
 |---|---|
 | **Project** | An overarching thing you're pushing on — *ROI Dashboard*, *Unit Pricing Model*. Long-lived, colour-coded, optional weekly hour target. |
 | **Block** | One stretch of focused work. Belongs to at most one project, titled with **what you actually did** ("Competitor demo teardown — Vendor A"), rated 1–5 afterwards. |
+| **Task** | A smaller unit of work than a project: one row of a weekly priorities list, with a priority, a status, an estimate and a target date. Belongs to a project or, for the odd job, to none. A block can be the work on a task, so a task shows the time really logged against its estimate. |
 | **Plan item** | A block you intend to do today. One click turns it into a running block. |
 | **Saved timer** | A project + task pair you start with one click. Derived from what you repeat; pinning only holds one at the top. |
 | **Context item** | Something from outside — a meeting, a Notion page, a transcript — attached to a project or a block. |
@@ -123,6 +124,26 @@ access. Recurring meetings are expanded (`RRULE`), cancelled instances honoured
 > particular refreshes the secret address lazily, sometimes by hours. Fine for
 > "what did today look like", not good enough for "start my 2pm now". Phase 5
 > fixes this with a real API integration.
+
+**Tasks — the weekly priorities sheet, in the app.** Done.
+
+The Tasks tab replaces the spreadsheet of the same job. Each row is a task: a
+project (or none), priority, status, target date, estimate and what was logged,
+grouped under a "Week of" header — the Monday of the week it was added — with
+completed rows struck through. Group by project or status instead, and cut the
+list to open, completed or all.
+
+- **A block can be the work on a task**, so the estimate finally has an actual
+  beside it: the task's finished focus blocks, plus the block on the clock right
+  now. Press ▶ on a row or pick the task on the Focus screen; the block takes the
+  task's project unless you say otherwise. A task's estimate is total effort
+  across many blocks, so it is never copied onto a block as that block's guess.
+- **Status moves the dates.** A block started on a task that is not started or
+  held up makes it in progress. Moving a task to in progress stamps a start date
+  and to completed stamps a completion date; reopening clears the latter. A date
+  you type always wins over the one the status would have filled in.
+- **Deleting a task keeps its blocks.** They lose the link, never their minutes.
+  Deleting a project likewise leaves its tasks behind as misc ones.
 
 ---
 
@@ -272,13 +293,24 @@ assets sit in git.
 projects          id, name, color, description, weekly_target_minutes,
                   notion_url, archived, timestamps
 
-sessions          id, project_id→projects, title, intent, kind(focus|break),
+sessions          id, project_id→projects, task_id→tasks, title, intent,
+                  kind(focus|break),
                   planned_minutes (NULL = stopwatch), estimated_minutes
                   (display only), started_at, ended_at, local_day,
                   active_seconds, interruptions, focus_rating(1-5), notes,
                   status(running|paused|completed|abandoned),
                   calendar_event_id, timestamps
                   · partial unique index: at most one running/paused row
+                  · task_id is ON DELETE SET NULL: a deleted task unlinks its
+                    blocks, it never deletes one
+
+tasks             id, project_id→projects (NULL = a misc task), title,
+                  priority(high|medium|low),
+                  status(not_started|in_progress|held_up|completed),
+                  estimated_minutes (total effort across blocks; display only),
+                  added_on, start_date, target_date, completed_on, notes,
+                  results, position, timestamps
+                  · dates are plain YYYY-MM-DD days, not instants
 
 session_segments  id, session_id→sessions, started_at, ended_at
                   · an open row means the clock is ticking
@@ -313,7 +345,7 @@ has nothing to lose and takes no backup.
 | Storage | SQLite (`better-sqlite3`) | One file you can copy, back up and query with any tool. Prebuilt binaries, so no compiler needed. |
 | Server | Express + Zod on `127.0.0.1` | Loopback-only and single-user, so no auth to build. Needed anyway to own the clock and hold integration secrets. |
 | Client | React + Vite + Tailwind v4 | Static bundle; a desktop shell can host it unchanged in phase 6. |
-| Data fetching | TanStack Query | Cache invalidation across five screens for free. |
+| Data fetching | TanStack Query | Cache invalidation across six screens for free. |
 | Charts | Hand-rolled CSS/SVG | No chart library. Every mark follows one validated palette and spec. |
 
 **No accounts, no cloud, no telemetry.** The server binds to loopback and is

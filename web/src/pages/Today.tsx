@@ -112,7 +112,7 @@ export function TodayPage({ dark }: { dark: boolean }) {
             <DayTimeline sessions={stats.sessions} events={events} dark={dark} />
           </Card>
 
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Card title="Where the time went" subtitle="By project, biggest first">
               <BarsByName
                 bars={stats.byProject.map((p) => ({
@@ -142,7 +142,7 @@ export function TodayPage({ dark }: { dark: boolean }) {
         </>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <PlanCard day={active} plan={plan} projects={projects} dark={dark} />
         <CalendarCard events={events} projects={projects} dark={dark} />
       </div>

@@ -35,7 +35,7 @@ export function SavedTimers({
   }
 
   return (
-    <ul className="grid gap-2 sm:grid-cols-2">
+    <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
       {timers.map((timer) => {
         const color = seriesColor(timer.projectColor, dark);
         return (

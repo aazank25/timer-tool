@@ -1,5 +1,5 @@
 import { db, DEFAULT_SETTINGS } from '../db.js';
-import { hostTimeZone } from './time.js';
+import { focusDay, hostTimeZone, nowIso } from './time.js';
 
 export function allSettings(): Record<string, string> {
   const rows = db.prepare('SELECT key, value FROM settings').all() as {
@@ -33,3 +33,6 @@ export function getNumber(key: string, fallback: number): number {
 /** Timezone every day boundary in the app is resolved against. */
 export const tz = () => getSetting('timezone') || hostTimeZone();
 export const dayStartHour = () => getNumber('day_start_hour', 4);
+
+/** The day the user is currently in, honouring their timezone and day-start hour. */
+export const today = () => focusDay(nowIso(), tz(), dayStartHour());

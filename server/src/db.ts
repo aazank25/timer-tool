@@ -176,6 +176,49 @@ export const migrations: Migration[] = [
     CREATE INDEX sessions_pair_recent ON sessions(project_id, title, started_at);
     `,
   },
+  {
+    id: 4,
+    name: 'tasks',
+    up: `
+    -- A smaller unit of work than a project: one row of the weekly-priorities
+    -- sheet this replaces. project_id is nullable because a "misc" task has no
+    -- project, and SET NULL leaves a deleted project's tasks behind as misc
+    -- ones instead of taking them with it.
+    CREATE TABLE tasks (
+      id                INTEGER PRIMARY KEY,
+      project_id        INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+      title             TEXT    NOT NULL,
+      priority          TEXT    NOT NULL DEFAULT 'medium',
+      status            TEXT    NOT NULL DEFAULT 'not_started',
+      -- Total effort across however many blocks the task takes, not one block's
+      -- guess. Display only: it is never a block's estimate or its countdown.
+      estimated_minutes INTEGER,
+      -- Plain YYYY-MM-DD days, like sessions.local_day: a target date is a
+      -- calendar day and must not shift with the timezone or the clock.
+      added_on          TEXT    NOT NULL,
+      start_date        TEXT,
+      target_date       TEXT,
+      completed_on      TEXT,
+      notes             TEXT,
+      results           TEXT,
+      position          INTEGER NOT NULL DEFAULT 0,
+      created_at        TEXT    NOT NULL,
+      updated_at        TEXT    NOT NULL,
+      CHECK (priority IN ('high','medium','low')),
+      CHECK (status IN ('not_started','in_progress','held_up','completed')),
+      CHECK (estimated_minutes IS NULL OR estimated_minutes BETWEEN 1 AND 6000)
+    );
+    CREATE INDEX tasks_project ON tasks(project_id);
+    -- The list is cut by status (open or completed) and then ordered by position.
+    CREATE INDEX tasks_status  ON tasks(status, position);
+
+    -- A block can be the work on a task, so a task shows the time really logged
+    -- against its estimate. Logged time is the record: deleting a task unlinks
+    -- its blocks, it never deletes one or touches its minutes.
+    ALTER TABLE sessions ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL;
+    CREATE INDEX sessions_task ON sessions(task_id);
+    `,
+  },
 ];
 
 export const DEFAULT_SETTINGS: Record<string, string> = {

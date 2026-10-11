@@ -22,6 +22,9 @@ export interface Session {
   projectId: number | null;
   projectName: string | null;
   projectColor: string | null;
+  /** The task this block was the work on, if any. */
+  taskId: number | null;
+  taskTitle: string | null;
   title: string;
   intent: string | null;
   kind: 'focus' | 'break';
@@ -44,6 +47,58 @@ export interface Session {
   status: SessionStatus;
   isLive: boolean;
   calendarEventId: string | null;
+}
+
+export type TaskPriority = 'high' | 'medium' | 'low';
+export type TaskStatus = 'not_started' | 'in_progress' | 'held_up' | 'completed';
+
+/** A smaller unit of work than a project, or one that belongs to no project at all. */
+export interface Task {
+  id: number;
+  projectId: number | null;
+  projectName: string | null;
+  projectColor: string | null;
+  title: string;
+  priority: TaskPriority;
+  status: TaskStatus;
+  /** Total effort across every block it takes. Display only: never a block's own estimate. */
+  estimatedMinutes: number | null;
+  addedOn: string;
+  /** The Monday of the week it was added: the sheet's "Week Of". */
+  weekOf: string;
+  startDate: string | null;
+  targetDate: string | null;
+  completedOn: string | null;
+  notes: string | null;
+  results: string | null;
+  position: number;
+  /** Focus time logged on it, a block still on the clock included. */
+  loggedSeconds: number;
+  blockCount: number;
+  lastWorkedAt: string | null;
+  /** Past its target day and not completed. */
+  overdue: boolean;
+}
+
+export interface TaskFilter {
+  view?: 'open' | 'completed' | 'all';
+  /** A project's id, or 'none' for the tasks that belong to no project. */
+  projectId?: number | 'none';
+}
+
+/** Undefined leaves a field as it is; null clears the ones that can be empty. */
+export interface TaskInput {
+  title?: string;
+  projectId?: number | null;
+  priority?: TaskPriority;
+  status?: TaskStatus;
+  estimatedMinutes?: number | null;
+  addedOn?: string;
+  startDate?: string | null;
+  targetDate?: string | null;
+  completedOn?: string | null;
+  notes?: string | null;
+  results?: string | null;
 }
 
 export interface PlanItem {
@@ -205,6 +260,7 @@ export const api = {
     request<Session[]>('GET', `/sessions${qs(params)}`),
   startSession: (body: {
     projectId?: number | null;
+    taskId?: number | null;
     title: string;
     intent?: string | null;
     mode?: TimerMode;
@@ -232,9 +288,17 @@ export const api = {
     body: { focusRating?: number | null; notes?: string | null; title?: string; activeSeconds?: number },
   ) => request<Session>('POST', `/sessions/${id}/complete`, body),
   abandonSession: (id: number) => request<Session>('POST', `/sessions/${id}/abandon`, {}),
-  updateSession: (id: number, body: Record<string, unknown>) =>
+  updateSession: (id: number, body: Record<string, unknown> & { taskId?: number | null }) =>
     request<Session>('PATCH', `/sessions/${id}`, body),
   deleteSession: (id: number) => request<{ deleted: number }>('DELETE', `/sessions/${id}`),
+
+  listTasks: (f: TaskFilter = {}) =>
+    request<Task[]>('GET', `/tasks${qs({ view: f.view, projectId: f.projectId })}`),
+  createTask: (body: TaskInput & { title: string }) => request<Task>('POST', '/tasks', body),
+  updateTask: (id: number, body: TaskInput) => request<Task>('PATCH', `/tasks/${id}`, body),
+  deleteTask: (id: number) => request<{ deleted: number }>('DELETE', `/tasks/${id}`),
+  reorderTasks: (ids: number[]) =>
+    request<{ reordered: number }>('POST', '/tasks/reorder', { ids }),
 
   listTimers: (limit = 18) => request<SavedTimer[]>('GET', `/timers${qs({ limit })}`),
   saveTimer: (body: {

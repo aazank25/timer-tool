@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
-import { api, type Session } from './api';
+import { api, type Session, type TaskFilter, type TaskInput } from './api';
 import { clock } from './lib/format';
 
 /* ------------------------------------------------------------------ theme */
@@ -53,11 +53,15 @@ export const keys = {
   day: (day: string) => ['stats', 'day', day] as const,
   range: (from: string, to: string) => ['stats', 'range', from, to] as const,
   plan: (day: string) => ['plan', day] as const,
+  tasks: (f: TaskFilter) => ['tasks', f.view ?? 'open', f.projectId ?? 'all'] as const,
   timers: ['timers'] as const,
   settings: ['settings'] as const,
   calendarSources: ['calendar', 'sources'] as const,
   calendarEvents: (from: string, to: string) => ['calendar', 'events', from, to] as const,
 };
+
+/** How often a running block is re-read: the live session itself, and what shows its time. */
+const LIVE_POLL_MS = 15_000;
 
 /** Everything that changes when a block starts, stops or is edited. */
 function invalidateTimeline(qc: QueryClient) {
@@ -65,6 +69,8 @@ function invalidateTimeline(qc: QueryClient) {
   void qc.invalidateQueries({ queryKey: ['stats'] });
   void qc.invalidateQueries({ queryKey: ['plan'] });
   void qc.invalidateQueries({ queryKey: ['projects'] });
+  // A task's logged time is the sum of its blocks, so it moves with them.
+  void qc.invalidateQueries({ queryKey: ['tasks'] });
   void qc.invalidateQueries({ queryKey: ['timers'] });
   void qc.invalidateQueries({ queryKey: ['calendar', 'events'] });
 }
@@ -101,6 +107,20 @@ export function usePlan(day: string | undefined) {
     queryKey: keys.plan(day ?? ''),
     queryFn: () => api.listPlan(day as string),
     enabled: !!day,
+  });
+}
+
+/**
+ * `poll` is for a caller that shows logged time while a block is running. A block
+ * on the clock counts toward its task's total and the server measures it live, so
+ * the figure goes stale as the clock runs: it is re-read at the live-session poll's
+ * own pace. With nothing running nothing changes, so there is nothing to poll for.
+ */
+export function useTasks(filter: TaskFilter = {}, { poll = false }: { poll?: boolean } = {}) {
+  return useQuery({
+    queryKey: keys.tasks(filter),
+    queryFn: () => api.listTasks(filter),
+    refetchInterval: poll ? LIVE_POLL_MS : false,
   });
 }
 
@@ -155,7 +175,7 @@ export function useLiveSession(): LiveSession & { isLoading: boolean } {
   const query = useQuery({
     queryKey: keys.active,
     queryFn: api.activeSession,
-    refetchInterval: 15_000,
+    refetchInterval: LIVE_POLL_MS,
     refetchOnWindowFocus: true,
   });
   const now = useTick(1000);
@@ -250,6 +270,27 @@ export function useCalendarActions() {
       onSuccess: onDone,
     }),
     sync: useMutation({ mutationFn: api.syncCalendars, onSuccess: onDone }),
+  };
+}
+
+export function useTaskActions() {
+  const qc = useQueryClient();
+  const onDone = () => {
+    void qc.invalidateQueries({ queryKey: ['tasks'] });
+    void qc.invalidateQueries({ queryKey: ['projects'] });
+    // A block carries the title of the task it is on, so a rename or a delete has to
+    // reach the day's blocks (the log, the rollups) and the block on the clock too.
+    void qc.invalidateQueries({ queryKey: ['stats'] });
+    void qc.invalidateQueries({ queryKey: ['session'] });
+  };
+  return {
+    create: useMutation({ mutationFn: api.createTask, onSuccess: onDone }),
+    update: useMutation({
+      mutationFn: ({ id, ...body }: { id: number } & TaskInput) => api.updateTask(id, body),
+      onSuccess: onDone,
+    }),
+    remove: useMutation({ mutationFn: api.deleteTask, onSuccess: onDone }),
+    reorder: useMutation({ mutationFn: api.reorderTasks, onSuccess: onDone }),
   };
 }
 

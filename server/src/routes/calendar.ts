@@ -12,8 +12,7 @@ import {
   updateSource,
 } from '../lib/calendar.js';
 import { badRequest, handler, parse } from '../lib/http.js';
-import { getSetting } from '../lib/settings.js';
-import { today } from './stats.js';
+import { getSetting, today } from '../lib/settings.js';
 
 export const calendarRouter = Router();
 

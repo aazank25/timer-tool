@@ -21,6 +21,7 @@ import {
   useProjects,
   useSessionActions,
   useSettings,
+  useTasks,
   useTimerActions,
   useTimers,
   useToday,
@@ -55,7 +56,7 @@ export function FocusPage({ dark }: { dark: boolean }) {
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
       <div className="space-y-4">
         {live.session ? (
           <LiveBlock live={live} dark={dark} onFinish={() => setFinishing(true)} />
@@ -201,6 +202,7 @@ function StartBlock({
   error?: string;
   onStart: (input: {
     projectId: number | null;
+    taskId: number | null;
     title: string;
     intent: string | null;
     mode: TimerMode;
@@ -208,12 +210,28 @@ function StartBlock({
     estimatedMinutes?: number | null;
   }) => void;
 }) {
-  // Undefined until the person picks: it follows the project worked on most
-  // recently. Null is an explicit "No project" and has to stick, so nothing
-  // may fill it back in.
+  const { data: openTasks = [] } = useTasks({ view: 'open' });
+  // The task this block is the work on. One that was finished elsewhere drops
+  // out of the open list, and with it out of the form.
+  const [taskPick, setTaskPick] = useState<number | null>(null);
+  const task = openTasks.find((t) => t.id === taskPick) ?? null;
+  // Undefined until a task sets it. Null is a task with no project, which is
+  // not the same as no opinion, so it has to stick.
+  const [taskProject, setTaskProject] = useState<number | null | undefined>(undefined);
+  // Undefined until the person picks: it follows the task's project, and with
+  // no task the project worked on most recently. Null is an explicit "No
+  // project" and has to stick, so nothing may fill it back in.
   const [projectPick, setProjectPick] = useState<number | null | undefined>(undefined);
-  const projectId = projectPick === undefined ? (projects[0]?.id ?? null) : projectPick;
+  const projectId =
+    projectPick !== undefined
+      ? projectPick
+      : taskProject !== undefined
+        ? taskProject
+        : (projects[0]?.id ?? null);
   const [title, setTitle] = useState('');
+  // The title a task last put in the box, kept to tell it from one the person wrote:
+  // only a title that is still exactly this may be swapped when another task is picked.
+  const [filledTitle, setFilledTitle] = useState<string | null>(null);
   const [intent, setIntent] = useState('');
   // Only what the person picked on this form is state. The mode and length are
   // read from the settings on every render, so a default that arrives late is
@@ -228,12 +246,32 @@ function StartBlock({
   const canStart = settingsReady && title.trim().length > 0 && !pending;
   const stopwatch = mode === 'stopwatch';
 
+  // Choosing a task names the block after it, and files it under the task's project,
+  // but only until a project has been picked. The name follows the task only while it
+  // is not the person's own, that is empty or still exactly what the last task put
+  // there: choosing another task swaps it, choosing none clears it, and a title typed
+  // or edited by hand is never overwritten. Choosing none lets go of the link; the
+  // project stays as it was.
+  function pickTask(id: number | null) {
+    setTaskPick(id);
+    const picked = openTasks.find((t) => t.id === id);
+    if (!title.trim() || title === filledTitle) {
+      setTitle(picked?.title ?? '');
+      setFilledTitle(picked?.title ?? null);
+    }
+    if (!picked) return;
+    // The picker only lists live projects, so a task on an archived one has
+    // nothing to show here and files under no project rather than a hidden one.
+    setTaskProject(projects.some((p) => p.id === picked.projectId) ? picked.projectId : null);
+  }
+
   // One path for Enter and the button, so they can never send different things.
   function start() {
     // Only a pomodoro ever notifies, so a stopwatch has no reason to ask.
     if (!stopwatch) requestNotificationPermission();
     onStart({
       projectId,
+      taskId: task?.id ?? null,
       title: title.trim(),
       intent: intent.trim() || null,
       mode,
@@ -244,6 +282,25 @@ function StartBlock({
   return (
     <Card title="Start a block" subtitle="One thing at a time. Name it now, rate it after.">
       <div className="space-y-4">
+        <Field
+          label="Task (optional)"
+          hint={openTasks.length ? undefined : 'No open tasks yet — add them on the Tasks tab.'}
+        >
+          <select
+            className={inputClass}
+            value={task?.id ?? ''}
+            disabled={openTasks.length === 0}
+            onChange={(e) => pickTask(e.target.value ? Number(e.target.value) : null)}
+          >
+            <option value="">— none —</option>
+            {openTasks.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.projectName ? `${t.title} · ${t.projectName}` : t.title}
+              </option>
+            ))}
+          </select>
+        </Field>
+
         <Field label="What are you working on?">
           <input
             className={inputClass}
@@ -332,13 +389,20 @@ function LiveBlock({
   return (
     <Card>
       <div className="flex flex-col items-center gap-6 py-2">
-        <div className="text-center">
+        {/* Capped at the card: in a centred column a block is as wide as its longest word. */}
+        <div className="max-w-full text-center">
           <div className="flex items-center justify-center gap-1.5 text-xs">
             <Swatch color={color} />
-            <span className="text-ink-2">{session.projectName ?? 'No project'}</span>
+            <span className="min-w-0 break-words text-ink-2">
+              {session.projectName ?? 'No project'}
+            </span>
           </div>
-          <h1 className="mt-1.5 max-w-lg text-xl font-semibold text-ink">{session.title}</h1>
-          {session.intent && <p className="mt-1 text-xs text-muted">{session.intent}</p>}
+          <h1 className="mt-1.5 max-w-lg break-words text-xl font-semibold text-ink">
+            {session.title}
+          </h1>
+          {session.intent && (
+            <p className="mt-1 break-words text-xs text-muted">{session.intent}</p>
+          )}
         </div>
 
         <TimerRing

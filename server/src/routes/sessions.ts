@@ -17,6 +17,7 @@ import {
   stopSession,
   toView,
 } from '../lib/sessions.js';
+import { requireProject, requireTask } from '../lib/tasks.js';
 import { focusDay, nowIso } from '../lib/time.js';
 
 export const sessionsRouter = Router();
@@ -28,6 +29,7 @@ const estimate = z.number().int().min(1).max(8 * 60).nullish();
 
 const startSchema = z.object({
   projectId: z.number().int().positive().nullish(),
+  taskId: z.number().int().positive().nullish(),
   title: z.string().trim().min(1).max(300),
   intent: z.string().max(2000).nullish(),
   mode: z.enum(['stopwatch', 'pomodoro']).optional(),
@@ -61,6 +63,8 @@ const manualSchema = z.object({
 const patchSchema = z.object({
   title: z.string().trim().min(1).max(300).optional(),
   projectId: z.number().int().positive().nullish(),
+  // Null unlinks the block from its task.
+  taskId: z.number().int().positive().nullish(),
   intent: z.string().max(2000).nullish(),
   focusRating: rating.nullish(),
   notes: z.string().max(20_000).nullish(),
@@ -178,6 +182,7 @@ sessionsRouter.patch(
     const map: Record<string, unknown> = {
       title: body.title,
       project_id: body.projectId,
+      task_id: body.taskId,
       intent: body.intent,
       focus_rating: body.focusRating,
       notes: body.notes,
@@ -192,9 +197,12 @@ sessionsRouter.patch(
       sets.push(`${col} = ?`);
       args.push(val);
     }
-    // One transaction, so a request that fails partway (a project that does not
-    // exist, say) cannot leave the block with its time rewritten and nothing else.
+    // One transaction, so a request that fails partway cannot leave the block with
+    // its time rewritten and nothing else. A project or task that is not there is
+    // refused first, ahead of the first write, as a 400 rather than a foreign-key 500.
     db.transaction(() => {
+      if (body.projectId != null) requireProject(body.projectId);
+      if (body.taskId != null) requireTask(body.taskId);
       if (body.activeSeconds !== undefined) overwriteActiveSeconds(id, body.activeSeconds);
       if (sets.length) {
         sets.push('updated_at = ?');

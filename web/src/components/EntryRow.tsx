@@ -49,6 +49,11 @@ export function EntryRow({
         </span>
         <span className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] text-muted">
           <span className="truncate">{session.projectName ?? 'No project'}</span>
+          {session.taskTitle && session.taskTitle !== session.title && (
+            <span className="truncate" title={`Task: ${session.taskTitle}`}>
+              ↳ {session.taskTitle}
+            </span>
+          )}
           {session.interruptions > 0 && <span>{session.interruptions} interruptions</span>}
           {showRating && session.focusRating != null && <RatingDots rating={session.focusRating} />}
         </span>

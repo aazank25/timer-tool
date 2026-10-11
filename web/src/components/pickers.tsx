@@ -14,12 +14,15 @@ export function ProjectPicker({
   onChange,
   dark,
   allowNone = true,
+  ariaLabel,
 }: {
   projects: Project[];
   value: number | null;
   onChange: (id: number | null) => void;
   dark: boolean;
   allowNone?: boolean;
+  /** For a picker with no <Field> around it: the select has no other name. */
+  ariaLabel?: string;
 }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
@@ -49,7 +52,13 @@ export function ProjectPicker({
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') void submit();
-            if (e.key === 'Escape') setCreating(false);
+            if (e.key === 'Escape') {
+              // A dialog around this listens for Escape on the document. Left to travel
+              // there, the same keypress that cancels the new project would close it too,
+              // and take whatever else was typed into it along.
+              e.stopPropagation();
+              setCreating(false);
+            }
           }}
         />
         <Button variant="primary" onClick={() => void submit()} disabled={!name.trim()}>
@@ -67,6 +76,7 @@ export function ProjectPicker({
       {selected && <Swatch color={seriesColor(selected.color, dark)} />}
       <select
         className={inputClass}
+        aria-label={ariaLabel}
         value={value ?? ''}
         onChange={(e) => {
           if (e.target.value === '__new') {

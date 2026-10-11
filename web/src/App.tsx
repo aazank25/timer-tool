@@ -3,6 +3,7 @@ import { FocusPage } from './pages/Focus';
 import { ProjectsPage } from './pages/Projects';
 import { ReviewPage } from './pages/Review';
 import { SettingsPage } from './pages/Settings';
+import { TasksPage } from './pages/Tasks';
 import { TodayPage } from './pages/Today';
 import { Button } from './components/ui';
 import { useLiveSession, useSessionActions, useTheme } from './hooks';
@@ -22,6 +23,13 @@ const Icon = {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" {...p}>
       <rect x="3.5" y="5" width="17" height="15" rx="2.5" />
       <path d="M3.5 10h17M8.5 3.5v3M15.5 3.5v3" strokeLinecap="round" />
+    </svg>
+  ),
+  tasks: (p: IconProps) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" {...p}>
+      <path d="m4.5 7 1.7 1.7L9.5 5.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="m4.5 16 1.7 1.7 3.3-3.2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M13 7.5h7M13 16.5h7" strokeLinecap="round" />
     </svg>
   ),
   projects: (p: IconProps) => (
@@ -55,6 +63,7 @@ const IS_DESKTOP =
 const TABS = [
   { to: '/', label: 'Focus', icon: Icon.focus },
   { to: '/today', label: 'Today', icon: Icon.today },
+  { to: '/tasks', label: 'Tasks', icon: Icon.tasks },
   { to: '/projects', label: 'Projects', icon: Icon.projects },
   { to: '/review', label: 'Review', icon: Icon.review },
   { to: '/settings', label: 'Settings', icon: Icon.settings },
@@ -72,6 +81,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<FocusPage dark={dark} />} />
             <Route path="/today" element={<TodayPage dark={dark} />} />
+            <Route path="/tasks" element={<TasksPage dark={dark} />} />
             <Route path="/projects" element={<ProjectsPage dark={dark} />} />
             <Route path="/review" element={<ReviewPage dark={dark} />} />
             <Route path="/settings" element={<SettingsPage />} />
