@@ -144,9 +144,16 @@ export function Modal({
       if (e.key === 'Escape') onClose();
     };
     document.addEventListener('keydown', onKey);
-    ref.current?.querySelector<HTMLElement>('[data-autofocus]')?.focus();
     return () => document.removeEventListener('keydown', onKey);
   }, [open, onClose]);
+
+  // Kept apart from the Escape listener: focus should move once, when the
+  // dialog opens. Callers pass a fresh onClose every render, so sharing its
+  // deps would steal focus back from whatever the user is typing in.
+  useEffect(() => {
+    if (!open) return;
+    ref.current?.querySelector<HTMLElement>('[data-autofocus]')?.focus();
+  }, [open]);
 
   if (!open) return null;
   return (

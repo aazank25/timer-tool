@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { PlanItem, SavedTimer, Session } from '../api';
 import { DayBar } from '../components/DayBar';
 import { EntryRow } from '../components/EntryRow';
@@ -372,15 +372,18 @@ function FinishDialog({
   const [title, setTitle] = useState(session.title);
   const [notes, setNotes] = useState('');
   const [trim, setTrim] = useState(false);
+  const initialisedFor = useRef<number | null>(null);
 
+  // Escape closes the dialog but this stays mounted, so reset only for a
+  // different block — resetting on every open would wipe a half-written draft.
   useEffect(() => {
-    if (open) {
-      setTitle(session.title);
-      setRating(null);
-      setNotes('');
-      setTrim(false);
-    }
-  }, [open, session.title]);
+    if (!open || initialisedFor.current === session.id) return;
+    initialisedFor.current = session.id;
+    setTitle(session.title);
+    setRating(null);
+    setNotes('');
+    setTrim(false);
+  }, [open, session.id, session.title]);
 
   // Rate with the number keys; the dialog is the only thing focused.
   useEffect(() => {
