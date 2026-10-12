@@ -76,8 +76,8 @@ function problemsWith(value: (key: Key) => string): Problems {
 
 /**
  * Prompts and nudges: when to ask about time you were away or a block left running, whether
- * to offer to pause for meetings, and the work days and hours the desktop app's nudges keep
- * to. It keeps its own draft and saves only its own keys, so it can sit beside the other
+ * to offer to pause for meetings, and the work days and hours the nudge and the reminders keep
+ * to. It keeps its own edits and saves only its own keys, so it can sit beside the other
  * settings cards without either one overwriting the other.
  */
 export function PromptSettings() {
@@ -174,7 +174,7 @@ export function PromptSettings() {
               : value(key);
       }
       // The answer is every setting as it now is: the cache is brought up to date with it, so
-      // the Timer card's own copy picks the new values up rather than sending the old back.
+      // every card on the page shows what is saved (the others' unsaved edits stay as they are).
       qc.setQueryData(keys.settings, await api.updateSettings(body));
       // The banners are worked out from these settings, so they are read again now and not at the
       // next poll: a threshold that was just raised should not leave its banner up for 15 seconds.
