@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { reason, type CalendarEvent, type PlanItem, type Session } from '../api';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { api, ApiError, reason, type CalendarEvent, type PlanItem, type Session } from '../api';
 import { BarsByName, Columns, Hero, StatTile } from '../components/charts';
 import { DayBar } from '../components/DayBar';
 import { EntryRow } from '../components/EntryRow';
@@ -15,9 +16,9 @@ import {
 import { Button, Card, Empty, Field, inputBase, inputClass, Modal, Swatch } from '../components/ui';
 import { WrapUpLink } from '../components/wrapup';
 import {
+  keys,
   useActiveSession,
   useCalendarActions,
-  useCalendarEvents,
   useDayStats,
   usePlan,
   usePlanActions,
@@ -28,6 +29,13 @@ import {
 } from '../hooks';
 import { addDays, dayLabel, duration, hourLabel, timeOfDay, todayKey } from '../lib/format';
 import { seriesColor } from '../lib/palette';
+import { errorText } from '../lib/tone';
+
+/** How often the day's meetings are read again; they are also read when the window is focused. */
+const CALENDAR_POLL_MS = 60_000;
+
+/** How long a button that gave way to "logged" is owed the focus it had, if that never shows up. */
+const REFOCUS_MS = 3_000;
 
 export function TodayPage({ dark }: { dark: boolean }) {
   const { data: todayInfo } = useToday();
@@ -37,7 +45,15 @@ export function TodayPage({ dark }: { dark: boolean }) {
 
   const { data: stats } = useDayStats(active);
   const { data: plan = [] } = usePlan(active);
-  const { data: events = [] } = useCalendarEvents(active, active);
+  // The calendar is synced in the background on a schedule of its own, so a meeting it brings in
+  // would only show on the card after a reload. Read again every minute, and whenever the window
+  // is looked at, it is there by the time the banner that is about it is.
+  const { data: events = [] } = useQuery({
+    queryKey: keys.calendarEvents(active, active),
+    queryFn: () => api.calendarEvents({ from: active, to: active }),
+    refetchInterval: CALENDAR_POLL_MS,
+    refetchOnWindowFocus: true,
+  });
   const { data: projects = [], isSuccess: projectsLoaded } = useProjects();
 
   return (
@@ -284,6 +300,19 @@ function PlanCard({
 
 /* --------------------------------------------------------------- calendar */
 
+/**
+ * Why a meeting could not be logged, in words. The server's own when it sent one: it says what is
+ * wrong with this meeting. A failure of the connection or of the server's side is not for the
+ * person to read raw ("Failed to fetch", "Unexpected token '<'").
+ */
+function logProblem(err: unknown): string {
+  if (err instanceof ApiError && err.status < 500) {
+    return reason(err, 'That meeting could not be logged');
+  }
+  if (err instanceof TypeError) return "Couldn't reach FocusDesk. Try again.";
+  return "Something went wrong on FocusDesk's side. Try again.";
+}
+
 function CalendarCard({
   events,
   projects,
@@ -294,9 +323,80 @@ function CalendarCard({
   dark: boolean;
 }) {
   const actions = useSessionActions();
+  const qc = useQueryClient();
   const { create } = usePlanActions();
   const { assignProject } = useCalendarActions();
   const [assigning, setAssigning] = useState<CalendarEvent | null>(null);
+  // The meetings being logged right now. Held in a ref as well as in state: the state is only seen
+  // on the next draw, so two presses in the same task would both find the button free, and each
+  // would log the meeting.
+  const logging = useRef(new Set<string>());
+  const [sending, setSending] = useState<readonly string[]>([]);
+  // Why the last attempt to log each meeting was refused.
+  const [problems, setProblems] = useState<Record<string, string>>({});
+  // The "logged" that a button gives way to, and the meeting whose button had focus when it did.
+  const loggedText = useRef(new Map<string, HTMLElement>());
+  const refocus = useRef<string | null>(null);
+
+  // A meeting that is no longer listed, or is logged, has no button left to show a refusal by.
+  useEffect(() => {
+    setProblems((current) => {
+      const kept = Object.entries(current).filter(([id]) =>
+        events.some((e) => e.id === id && e.loggedSeconds === 0),
+      );
+      return kept.length === Object.keys(current).length ? current : Object.fromEntries(kept);
+    });
+  }, [events]);
+
+  // A button that gives way to what was logged takes the focus on it with it, and the browser
+  // drops that on the page. Once the text is there it goes to that. This runs after every draw,
+  // as the draw that has the text in it is whichever one the meetings arrive in.
+  useEffect(() => {
+    const id = refocus.current;
+    const text = id == null ? undefined : loggedText.current.get(id);
+    if (text) {
+      text.focus();
+      refocus.current = null;
+    }
+  });
+
+  async function logMeeting(e: CalendarEvent, button: HTMLElement) {
+    if (logging.current.has(e.id)) return;
+    logging.current.add(e.id);
+    setSending((now) => [...now, e.id]);
+    setProblems(({ [e.id]: _was, ...rest }) => rest);
+    const hadFocus = document.activeElement === button;
+    // Whether the button is about to give way to what was logged, by this press or by another's.
+    let logged = false;
+    try {
+      await actions.logManual.mutateAsync({
+        projectId: e.projectId,
+        title: e.title,
+        startedAt: e.startsAt,
+        minutes: Math.max(5, Math.round((Date.parse(e.endsAt) - Date.parse(e.startsAt)) / 60000)),
+        calendarEventId: e.id,
+      });
+      logged = true;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        // Already logged, from another window or since this page was drawn. Nothing is wrong, but
+        // what is on screen is out of date: read again, the button gives way to what was logged.
+        logged = true;
+        void qc.invalidateQueries();
+      } else {
+        setProblems((now) => ({ ...now, [e.id]: logProblem(err) }));
+      }
+    } finally {
+      logging.current.delete(e.id);
+      setSending((now) => now.filter((id) => id !== e.id));
+    }
+    if (logged && hadFocus && document.activeElement === button) {
+      refocus.current = e.id;
+      setTimeout(() => {
+        if (refocus.current === e.id) refocus.current = null;
+      }, REFOCUS_MS);
+    }
+  }
 
   if (!events.length) {
     return (
@@ -326,32 +426,36 @@ function CalendarCard({
               <button
                 type="button"
                 onClick={() => setAssigning(e)}
-                className="flex items-center gap-1.5 text-muted hover:text-ink"
+                // A project's name can be longer than the card is wide, and in one word.
+                className="flex max-w-full items-center gap-1.5 text-left text-muted
+                  [overflow-wrap:anywhere] hover:text-ink"
               >
                 <Swatch color={seriesColor(e.projectColor, dark)} />
                 {e.projectName ?? 'Assign project'}
               </button>
               {e.loggedSeconds > 0 ? (
-                <span className="tabular text-good">{duration(e.loggedSeconds)} logged</span>
+                <span
+                  ref={(text) => {
+                    if (text) loggedText.current.set(e.id, text);
+                    else loggedText.current.delete(e.id);
+                  }}
+                  tabIndex={-1}
+                  className="tabular rounded-sm text-good focus-visible:outline-2
+                    focus-visible:outline-offset-2 focus-visible:outline-accent"
+                >
+                  {duration(e.loggedSeconds)} logged
+                </span>
               ) : (
                 !e.allDay && (
                   <button
                     type="button"
-                    className="text-accent hover:underline"
-                    onClick={() =>
-                      actions.logManual.mutate({
-                        projectId: e.projectId,
-                        title: e.title,
-                        startedAt: e.startsAt,
-                        minutes: Math.max(
-                          5,
-                          Math.round((Date.parse(e.endsAt) - Date.parse(e.startsAt)) / 60000),
-                        ),
-                        calendarEventId: e.id,
-                      })
-                    }
+                    // Not disabled while it is sending: a button that is disabled cannot keep
+                    // focus, which would fall to the page. `logMeeting` ignores the press instead.
+                    aria-disabled={sending.includes(e.id) || undefined}
+                    className="text-accent hover:underline aria-disabled:cursor-progress"
+                    onClick={(ev) => void logMeeting(e, ev.currentTarget)}
                   >
-                    Log as time spent
+                    {sending.includes(e.id) ? 'Logging…' : 'Log as time spent'}
                   </button>
                 )
               )}
@@ -374,6 +478,11 @@ function CalendarCard({
                 Add to plan
               </button>
             </div>
+            {problems[e.id] && (
+              <p role="alert" className={`mt-1 ${errorText}`}>
+                {problems[e.id]}
+              </p>
+            )}
           </li>
         ))}
       </ul>
