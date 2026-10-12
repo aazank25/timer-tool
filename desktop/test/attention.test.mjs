@@ -82,8 +82,12 @@ const idle = {
 
 /* ---------------------------------------------------------------------------- the world */
 
-/** Electron's Notification, as far as it matters: made, shown, and clicked or closed by someone. */
-function notificationClass({ supported = true, failsToShow = false } = {}) {
+/**
+ * Electron's Notification, as far as it matters: made, shown, and clicked or closed by someone.
+ * Taking one down from the app's side (`close()`) does not emit 'close', which Electron does not
+ * promise to either.
+ */
+function notificationClass({ supported = true, failsToShow = false, failsToClose = false } = {}) {
   return class FakeNotification extends EventEmitter {
     static created = [];
     static isSupported() {
@@ -93,17 +97,22 @@ function notificationClass({ supported = true, failsToShow = false } = {}) {
       super();
       this.options = options;
       this.shown = false;
+      this.closed = false;
       FakeNotification.created.push(this);
     }
     show() {
       if (failsToShow) throw new Error('this platform cannot show it');
       this.shown = true;
     }
+    close() {
+      if (failsToClose) throw new Error('this platform cannot close it');
+      this.closed = true;
+    }
   };
 }
 
 /** What the person does with the machine, and what the app was asked to do about it. */
-function setup({ prompts = [], supported = true, failsToShow = false } = {}) {
+function setup({ prompts = [], supported = true, failsToShow = false, failsToClose = false } = {}) {
   const world = { prompts, idle: 0, locked: false, listError: null, answerError: null, listed: 0 };
   const calls = {
     acted: [],
@@ -114,7 +123,7 @@ function setup({ prompts = [], supported = true, failsToShow = false } = {}) {
     afterActions: 0,
     logs: [],
   };
-  const Notification = notificationClass({ supported, failsToShow });
+  const Notification = notificationClass({ supported, failsToShow, failsToClose });
   const attention = createAttention({
     fetchPrompts: async () => {
       world.listed++;
@@ -480,6 +489,130 @@ describe('reading the list', () => {
   });
 });
 
+/* --------------------------------------------------- what it remembers, and what it takes down */
+
+describe('which notifications are on screen', () => {
+  it('takes a notification down when its prompt has gone, and holds it no longer', async () => {
+    const { world, attention, Notification } = setup({ prompts: [away, wrapUp] });
+    await attention.refresh();
+    assert.equal(attention.heldCount(), 2);
+
+    // Answered in the window, or no longer true: the list no longer has it.
+    world.prompts = [wrapUp];
+    await attention.refresh();
+
+    const [first, second] = Notification.created;
+    assert.equal(first.closed, true, 'the one about the prompt that has gone');
+    assert.equal(second.closed, false, 'and not the one that is still being asked');
+    assert.equal(attention.heldCount(), 1);
+
+    world.prompts = [];
+    await attention.refresh();
+    assert.equal(second.closed, true);
+    assert.equal(attention.heldCount(), 0);
+  });
+
+  it('does not take down a notification that has been clicked or closed already, and does not tell again', async () => {
+    const { world, attention, Notification } = setup({ prompts: [away, wrapUp] });
+    await attention.refresh();
+    const [clicked, dismissed] = Notification.created;
+    clicked.emit('click', {});
+    dismissed.emit('close', {});
+    assert.equal(attention.heldCount(), 0);
+
+    world.prompts = [];
+    await attention.refresh();
+    world.prompts = [away, wrapUp];
+    await attention.refresh();
+
+    assert.equal(clicked.closed, false);
+    assert.equal(dismissed.closed, false);
+    assert.equal(Notification.created.length, 2, 'what was told about is not told again');
+  });
+
+  it('takes down nothing for a prompt it never notified, and nothing while the list cannot be read', async () => {
+    const { world, attention, Notification } = setup({ prompts: [away] });
+    world.locked = true;
+    await attention.refresh();
+    world.prompts = [];
+    await attention.refresh();
+    assert.equal(Notification.created.length, 0);
+
+    world.locked = false;
+    world.prompts = [away];
+    await attention.refresh();
+    world.listError = new Error('the server is away');
+    world.prompts = [];
+    await attention.refresh();
+
+    assert.equal(Notification.created[0].closed, false, 'a read that failed says nothing is gone');
+    assert.equal(attention.heldCount(), 1);
+  });
+
+  it('logs a notification that cannot be taken down, and carries on', async () => {
+    const { world, attention, calls } = setup({ prompts: [away, wrapUp], failsToClose: true });
+    await attention.refresh();
+
+    world.prompts = [wrapUp];
+    await assert.doesNotReject(attention.refresh());
+
+    assert.equal(calls.logs.length, 1);
+    assert.equal(attention.heldCount(), 1, 'it is not held on to for ever for the failure');
+    assert.deepEqual(
+      attention.prompts().map((p) => p.id),
+      ['wrapup:2026-10-12'],
+    );
+  });
+});
+
+describe('which prompts it has told about', () => {
+  it('never forgets a prompt that is still listed, however many others come and go in the meantime', async () => {
+    const { world, attention, Notification } = setup();
+    const waiting = { ...away, id: 'away:1:1' };
+
+    // A new question every poll for far more than it remembers, and one that is never answered.
+    for (let n = 0; n < 700; n++) {
+      world.prompts = [waiting, { ...idle, id: `idle:${n}` }];
+      await attention.refresh();
+    }
+
+    const told = Notification.created.filter((n) => n.options.title === away.title);
+    assert.equal(told.length, 1, 'told about once in 700 polls');
+    assert.equal(Notification.created.length, 701);
+    assert.ok(attention.notified().includes('away:1:1'));
+  });
+
+  it('forgets the oldest of what is no longer listed once past its limit, and keeps what it must', async () => {
+    const { world, attention } = setup();
+    const waiting = { ...away, id: 'away:1:1' };
+
+    for (let n = 0; n < 700; n++) {
+      world.prompts = [waiting, { ...idle, id: `idle:${n}` }];
+      await attention.refresh();
+    }
+
+    const remembered = attention.notified();
+    assert.equal(remembered.length, 500);
+    assert.ok(remembered.includes('away:1:1'), 'the one that is still listed');
+    assert.ok(remembered.includes('idle:699'), 'the newest');
+    assert.ok(!remembered.includes('idle:0'), 'the oldest that has gone');
+    // 701 had been told about, so the 201 oldest that were not listed had to go.
+    assert.ok(!remembered.includes('idle:200'), 'the last of them');
+    assert.ok(remembered.includes('idle:201'), 'and the first that did not');
+  });
+
+  it('keeps every id while they are all still listed, past its limit, and tells about none again', async () => {
+    const many = Array.from({ length: 520 }, (_, n) => ({ ...idle, id: `idle:${n}` }));
+    const { attention, Notification } = setup({ prompts: many });
+
+    await attention.refresh();
+    await attention.refresh();
+
+    assert.equal(Notification.created.length, 520);
+    assert.equal(attention.notified().length, 520);
+  });
+});
+
 /* ------------------------------------------------------------------------------ the menu */
 
 describe('the Needs attention section of the menu', () => {
@@ -674,6 +807,71 @@ describe('trimming a label', () => {
     assert.equal(trimLabel('  padded  '), 'padded');
     assert.equal(trimLabel('abcdef', 4), 'abc…');
     assert.equal(trimLabel(undefined), '');
+  });
+});
+
+describe('menu labels', () => {
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  it('doubles an ampersand, which a menu would otherwise take for a keyboard shortcut', () => {
+    assert.equal(trimLabel('R&D sync has started'), 'R&&D sync has started');
+    assert.equal(trimLabel('Q&&A'), 'Q&&&&A');
+    assert.equal(trimLabel('&'), '&&');
+    assert.equal(trimLabel('Tom & Jerry & co'), 'Tom && Jerry && co');
+  });
+
+  it('makes one line of it: a line break or a run of spaces is a single space', () => {
+    assert.equal(trimLabel('Deep\nwork\r\ntoday'), 'Deep work today');
+    assert.equal(trimLabel('a \t\t  b  c'), 'a b c');
+    assert.equal(trimLabel('\n  padded\n'), 'padded');
+    assert.equal(trimLabel('\n '), '');
+  });
+
+  it('cuts by character, so that an emoji is never left in half', () => {
+    // 58 letters and three emoji: sixty-one characters, and the cut falls after the first emoji.
+    const cut = trimLabel(`${'x'.repeat(58)}😀😀😀`);
+    assert.equal(cut, `${'x'.repeat(58)}😀…`);
+    assert.doesNotMatch(cut, lone);
+
+    // Sixty characters that take up more than sixty units are whole.
+    const whole = `${'x'.repeat(58)}😀😀`;
+    assert.equal(trimLabel(whole), whole);
+    assert.equal(Array.from(trimLabel(whole)).length, 60);
+  });
+
+  it('cuts at the limit counting what is shown, and not the second ampersand of each', () => {
+    assert.equal(trimLabel('&'.repeat(60)), '&&'.repeat(60));
+    assert.equal(trimLabel('&'.repeat(61)), `${'&&'.repeat(59)}…`);
+  });
+
+  it('cleans the title of a prompt and the labels of its answers in the menu', async () => {
+    const odd = {
+      ...away,
+      title: 'R&D sync\nhas   started',
+      actions: [
+        { id: 'keep', label: 'Keep & go' },
+        { id: 'drop', label: 'Drop\n40 min' },
+      ],
+    };
+    const { attention } = setup({ prompts: [odd] });
+
+    await attention.refresh();
+    const [, item] = attention.menuItems();
+
+    assert.equal(item.label, 'R&&D sync has started');
+    assert.deepEqual(
+      item.submenu.map((entry) => entry.label),
+      ['Keep && go', 'Drop 40 min'],
+    );
+  });
+
+  it('leaves what the notification says alone: it is not a menu', async () => {
+    const odd = { ...away, title: 'R&D sync\nhas started' };
+    const { attention, Notification } = setup({ prompts: [odd] });
+
+    await attention.refresh();
+
+    assert.equal(Notification.created[0].options.title, 'R&D sync\nhas started');
   });
 });
 

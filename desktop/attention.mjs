@@ -8,6 +8,10 @@
  * Nothing here imports Electron. What it needs of it is handed in (the Notification class,
  * the windows to show) so the rules can be tested without a screen: who is told when, what
  * a click goes to, and what the menu says.
+ *
+ * What it has told you is remembered only while the app runs, so after a restart whatever is
+ * still waiting is told once more. That is the price of keeping nothing on disk for it, and it
+ * is a fair one: a question that is still open after a restart is worth hearing again.
  */
 
 /** Someone who has touched the machine this recently is at it; anyone who has not is not. */
@@ -21,10 +25,23 @@ const REMEMBERED_IDS = 500;
 /** Notifications still on screen are held on to (see `show`); this many is more than there ever are. */
 const HELD_NOTIFICATIONS = 50;
 
-/** The title as a menu label: whole if it fits, else cut at the limit with an ellipsis. */
+/**
+ * Text as a menu label: one line, whole if it fits and else cut at the limit with an ellipsis,
+ * and safe to hand to a menu.
+ *
+ * A title is whatever somebody typed, and a menu takes it for more than text. A line break or a
+ * run of spaces is shown as it is typed. A lone `&` marks a keyboard shortcut on Windows and
+ * Linux and is dropped on a Mac, so "R&D sync" read "RD sync": it is doubled, which every
+ * platform reads as the character itself. And the cut is made by character, since cutting by
+ * the units JavaScript counts in splits an emoji in two and leaves half of it, which cannot be
+ * drawn. The limit counts what is shown, so the doubled `&`s are not part of it.
+ */
 export function trimLabel(text, max = MENU_LABEL_MAX) {
-  const label = String(text ?? '').trim();
-  return label.length <= max ? label : `${label.slice(0, max - 1).trimEnd()}…`;
+  const label = String(text ?? '').replace(/\s+/g, ' ').trim();
+  const characters = Array.from(label);
+  const shown =
+    characters.length <= max ? label : `${characters.slice(0, max - 1).join('').trimEnd()}…`;
+  return shown.replace(/&/g, '&&');
 }
 
 const messageOf = (err) => (err instanceof Error ? err.message : String(err));
@@ -59,14 +76,16 @@ export function createAttention({
 }) {
   /** What the server last said needs attention, oldest first. */
   let prompts = [];
-  /** Every id that has been notified about, so one is never told twice. */
+  /** Every id that has been notified about, so one is never told twice (see `remember`). */
   const notified = new Set();
   /**
-   * The notifications that are on screen. macOS lets go of a notification the moment nothing
-   * in the app refers to it, and one that has been let go of never delivers its click, so
-   * each is kept here until it is clicked or closed.
+   * The notifications that are on screen, each under the id of the prompt it is about. macOS
+   * lets go of a notification the moment nothing in the app refers to it, and one that has been
+   * let go of never delivers its click, so each is kept here until it is clicked or closed, or
+   * its prompt is gone: then it is taken off the screen too, rather than left there asking
+   * about something that has been answered.
    */
-  const held = new Set();
+  const held = new Map();
   /** One read at a time, in the order they were asked for. */
   let queue = Promise.resolve();
 
@@ -104,11 +123,13 @@ export function createAttention({
 
   function show(prompt) {
     let notification;
+    const release = () => {
+      if (held.get(prompt.id) === notification) held.delete(prompt.id);
+    };
     try {
       notification = new Notification({ title: prompt.title, body: prompt.body });
-      held.add(notification);
-      if (held.size > HELD_NOTIFICATIONS) held.delete(held.values().next().value);
-      const release = () => held.delete(notification);
+      held.set(prompt.id, notification);
+      if (held.size > HELD_NOTIFICATIONS) held.delete(held.keys().next().value);
       notification.on('click', () => {
         release();
         clicked(prompt);
@@ -117,8 +138,36 @@ export function createAttention({
       notification.on('failed', release);
       notification.show();
     } catch (err) {
-      if (notification) held.delete(notification);
+      release();
       log('[attention] could not show a notification', err);
+    }
+  }
+
+  /**
+   * Remember that this id has been told about. Ids are kept for the life of the app, up to a
+   * limit, and past it the oldest go first, but only those that are no longer listed: an id that
+   * is still listed is never forgotten, or a question that waits for days would be told afresh
+   * each time enough others had come and gone.
+   */
+  function remember(id, listed) {
+    notified.add(id);
+    for (const old of notified) {
+      if (notified.size <= REMEMBERED_IDS) break;
+      if (!listed.has(old)) notified.delete(old);
+    }
+  }
+
+  /** Take down the notifications whose prompts are gone: answered in the window, or no longer true. */
+  function closeGone() {
+    const listed = new Set(prompts.map((p) => p.id));
+    for (const [id, notification] of held) {
+      if (listed.has(id)) continue;
+      held.delete(id);
+      try {
+        notification.close();
+      } catch (err) {
+        log('[attention] could not close a notification', err);
+      }
     }
   }
 
@@ -131,10 +180,10 @@ export function createAttention({
       // Not knowing is not being able to.
     }
     if (!supported || !present()) return;
+    const listed = new Set(prompts.map((p) => p.id));
     for (const prompt of prompts) {
       if (notified.has(prompt.id)) continue;
-      notified.add(prompt.id);
-      if (notified.size > REMEMBERED_IDS) notified.delete(notified.values().next().value);
+      remember(prompt.id, listed);
       show(prompt);
     }
   }
@@ -144,6 +193,7 @@ export function createAttention({
       const list = await fetchPrompts();
       if (!Array.isArray(list)) return;
       prompts = list;
+      closeGone();
       notifyNew();
       onChange();
     } catch (err) {
@@ -210,7 +260,7 @@ export function createAttention({
         ...prompts.map((prompt) => ({
           label: trimLabel(prompt.title),
           submenu: prompt.actions.map((action) => ({
-            label: action.label,
+            label: trimLabel(action.label),
             // The promise is for whoever wants to wait for it; the menu does not.
             click: () => choose(prompt, action),
           })),

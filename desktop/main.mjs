@@ -14,9 +14,12 @@ import {
   powerMonitor,
   session as electronSession,
 } from 'electron';
-import { createAttention, interruptedItem } from './attention.mjs';
+import { createAttention, interruptedItem, trimLabel } from './attention.mjs';
 import { createAwayTracker } from './away.mjs';
+import { elapsedSeconds, menuBarText } from './menu-bar.mjs';
 import { createPalette, isLocal } from './palette.mjs';
+import { rereadAfter } from './requests.mjs';
+import { navigationScript, windowPlan } from './window-route.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isMac = process.platform === 'darwin';
@@ -89,23 +92,13 @@ function createWindow() {
 }
 
 /**
- * The address of a page of the app, with the flag that tells the page it is inside this
- * shell (see IS_DESKTOP in web/src/App.tsx). A route that does not stay on the local server
- * is not one of the app's, and goes to the front page instead.
- */
-function routeUrl(route) {
-  const base = new URL(server.url);
-  const url = new URL(route, base);
-  if (url.origin !== base.origin) return routeUrl('/');
-  url.searchParams.set('desktop', '1');
-  return url.toString();
-}
-
-/**
  * Show the main window. With a route ('/wrap-up', '/wrap-up/week?week=2026-10-05') it is taken
  * there first and shown once the page is up, so it never opens on the page it was last left
- * on. Electron hands an event to the handlers that call this as they are (the tray, the
- * hotkey, the dock icon), so only a string is a route.
+ * on. A page of the app that is loaded is moved to the route from inside, as a click on its own
+ * sidebar would, because loading it again throws away whatever was typed and not yet saved;
+ * it is only loaded when there is no page of the app to move (see window-route.mjs). Electron
+ * hands an event to the handlers that call this as they are (the tray, the hotkey, the dock
+ * icon), so only a string is a route.
  */
 function showWindow(route) {
   // A second launch during startup can ask for the window before the server
@@ -121,11 +114,31 @@ function showWindow(route) {
     reveal();
     return;
   }
-  win
-    .loadURL(routeUrl(route))
-    // A page that is replaced by another before it has loaded is not a failure to show it.
-    .catch((err) => console.error('[focusdesk] could not open', route, err.message))
-    .finally(reveal);
+  const plan = windowPlan({
+    currentUrl: win.webContents.getURL(),
+    loading: win.webContents.isLoading(),
+    route,
+    serverUrl: server.url,
+  });
+  if (plan.action === 'show') {
+    reveal();
+    return;
+  }
+  const load = () =>
+    win
+      .loadURL(plan.url)
+      // A page that is replaced by another before it has loaded is not a failure to show it.
+      .catch((err) => console.error('[focusdesk] could not open', route, err.message))
+      .finally(reveal);
+  if (plan.action === 'load') {
+    load();
+    return;
+  }
+  win.webContents.executeJavaScript(navigationScript(plan.path)).then(reveal, (err) => {
+    // The page could not be moved (it is not the app's page after all): load it instead.
+    console.error('[focusdesk] could not move to', route, err.message);
+    load();
+  });
 }
 
 /* ------------------------------------------------------------------ api */
@@ -181,6 +194,11 @@ let away = null;
 /** What "Got interrupted" offers. It comes from the server, so the two cannot drift apart. */
 let interruptionReasons = [];
 
+/**
+ * Read the clock from the server and show it. Resolves to the block that was read (null for
+ * none, or when the server could not be asked), which is what away detection wants when it asks
+ * what is on the clock *now*.
+ */
 async function poll() {
   try {
     const { session } = await api('/sessions/active');
@@ -192,23 +210,16 @@ async function poll() {
   }
   renderTitle();
   renderMenu();
+  return live.session;
 }
 
-function elapsedNow() {
-  if (!live.session) return 0;
-  if (live.session.status !== 'running') return live.elapsedAtPoll;
-  return live.elapsedAtPoll + Math.max(0, (Date.now() - live.polledAt) / 1000);
-}
-
-function formatClock(seconds) {
-  const total = Math.max(0, Math.round(seconds));
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  const mm = String(m).padStart(2, '0');
-  return h > 0
-    ? `${h}:${mm}:${String(s).padStart(2, '0')}`
-    : `${mm}:${String(s).padStart(2, '0')}`;
+/**
+ * Read the clock and what is waiting for an answer again, which is what is wanted when something
+ * has just been done somewhere else that changes both (a block started in the window, or the
+ * quick-switch box put away) and the menu bar should show it now, and not in 5 s and 15 s.
+ */
+function refreshMenuBar() {
+  return poll().then(() => attention?.refresh());
 }
 
 /**
@@ -229,38 +240,12 @@ function setTrayText(title, toolTip) {
 
 function renderTitle() {
   if (!tray) return;
-  const s = live.session;
-  // A dot before the clock while something is waiting for an answer: it is seen without being
-  // read, and the clock beside it is as it was. Without a clock it stands alone.
-  const waiting = attention?.pending() ?? 0;
-  const mark = waiting > 0 ? '•' : '';
-  const needs =
-    waiting > 0
-      ? `\n${waiting} ${waiting === 1 ? 'thing needs' : 'things need'} your attention`
-      : '';
-
-  if (!s) {
-    setTrayText(mark, `FocusDesk - nothing running${needs}`);
-    return;
-  }
-
-  // A stopwatch has no planned time, so there is nothing to count down to and
-  // nothing to run over: the menu bar just counts up, unsigned.
-  const stopwatch = s.plannedSeconds == null;
-  let label;
-  if (stopwatch) {
-    label = formatClock(elapsedNow());
-  } else {
-    const remaining = s.plannedSeconds - elapsedNow();
-    label = remaining >= 0 ? formatClock(remaining) : `+${formatClock(-remaining)}`;
-  }
-  const project = s.projectName ?? 'No project';
-  setTrayText(
-    s.status === 'paused' ? `${mark ? `${mark} ` : ''}|| ${label}` : `${mark} ${label}`,
-    (stopwatch
-      ? `${s.title}\n${project} · stopwatch ${label}`
-      : `${s.title}\n${project} - ${label}`) + needs,
-  );
+  const { title, toolTip } = menuBarText({
+    session: live.session,
+    elapsed: elapsedSeconds(live, Date.now()),
+    waiting: attention?.pending() ?? 0,
+  });
+  setTrayText(title, toolTip);
 }
 
 /** The menu as it was last built, as data that still has its click handlers: what the tests press. */
@@ -288,9 +273,9 @@ function renderMenu() {
     ...(attention?.menuItems() ?? []),
     ...(s
       ? [
-          { label: s.title.slice(0, 60), enabled: false },
+          { label: trimLabel(s.title), enabled: false },
           {
-            label: s.projectName ? `Project: ${s.projectName}` : 'No project',
+            label: s.projectName ? trimLabel(`Project: ${s.projectName}`) : 'No project',
             enabled: false,
           },
           { type: 'separator' },
@@ -451,8 +436,8 @@ const PROMPT_POLL_MS = 15_000;
 /** How often the settings are read again, which away detection goes by, besides when one is saved. */
 const SETTINGS_POLL_MS = 60_000;
 
-/** What the tests put in place of the clock and the idle time, to stand in for hours of waiting. */
-const stubbed = { now: null, idleSeconds: null };
+/** What the tests put in place of the clock, the idle time and the lock, to stand in for hours of waiting. */
+const stubbed = { now: null, idleSeconds: null, locked: null };
 
 function systemIdleSeconds() {
   if (stubbed.idleSeconds != null) return stubbed.idleSeconds;
@@ -461,6 +446,21 @@ function systemIdleSeconds() {
   } catch {
     // Not every platform can say. Never idle is the safe answer: nothing is reported or held back for it.
     return 0;
+  }
+}
+
+/**
+ * Whether the system says the screen is locked right now: what tells somebody at the lock
+ * screen from somebody who is back whose unlock was never seen (see away.mjs). A platform that
+ * cannot say answers 'unknown', which is not locked; one that throws is taken to be locked, the
+ * answer that ends nothing early.
+ */
+function systemIsLocked() {
+  if (stubbed.locked != null) return stubbed.locked;
+  try {
+    return powerMonitor.getSystemIdleState(1) === 'locked';
+  } catch {
+    return true;
   }
 }
 
@@ -530,7 +530,11 @@ async function startAttention() {
   away = createAwayTracker({
     now: () => stubbed.now ?? Date.now(),
     getIdleSeconds: systemIdleSeconds,
-    getLive: () => live.session,
+    // Asked of the server as each stretch begins, and not read from what the menu bar last saw:
+    // that can be five seconds old, and a block stopped in the window a moment before the screen
+    // locks is not one anybody was away from (nor is one just started one that was not).
+    getLive: () => poll(),
+    isLocked: systemIsLocked,
     getSettings: () => settings,
     report: async ({ sessionId, startedAt, endedAt }) => {
       const entry = { sessionId, startedAt, endedAt, ok: true, error: null };
@@ -571,15 +575,13 @@ async function startAttention() {
   onPower('resume', () => comeBack(() => away.onResume()));
   onPower('user-did-become-active', () => comeBack(() => away.onBecomeActive()));
 
-  // Saving the settings in either window: the thresholds may be different now.
+  // What either window has just done to the server: saving the settings (the thresholds may be
+  // different now), and anything that changes the block on the clock, which the menu bar would
+  // otherwise not know for five seconds (see requests.mjs for what counts).
   electronSession.defaultSession.webRequest.onCompleted((details) => {
-    if (
-      details.method === 'PATCH' &&
-      details.statusCode < 400 &&
-      details.url.startsWith(`${server.url}/api/settings`)
-    ) {
-      void readSettings();
-    }
+    const again = rereadAfter(details, server.url);
+    if (again.settings) void readSettings();
+    if (again.live) void refreshMenuBar();
   });
 
   await readSettings();
@@ -613,6 +615,10 @@ async function startAttention() {
         /** Pretend the machine has been idle this many seconds, or let it say for itself with null. */
         setIdle: (seconds) => {
           stubbed.idleSeconds = seconds;
+        },
+        /** Pretend the system says the screen is locked (true) or not (false), or let it say for itself with null. */
+        setLocked: (locked) => {
+          stubbed.locked = locked;
         },
       },
       attention: {
@@ -666,7 +672,7 @@ app.whenReady().then(async () => {
     backgroundColor: BACKGROUND,
     // The box may have changed what is on the clock, and a block that is started answers the
     // nudge to start one: show both in the menu bar now, not in 5s and 15s.
-    onClose: () => void poll().then(() => attention?.refresh()),
+    onClose: () => void refreshMenuBar(),
   });
   if (process.env.FOCUSDESK_TEST === '1') {
     // What the end-to-end tests reach into the running app by, and nothing else does.

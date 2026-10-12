@@ -49,6 +49,11 @@ export async function reset() {
     work_end: DEFAULT_SETTINGS.work_end!,
     nudge_minutes: DEFAULT_SETTINGS.nudge_minutes!,
   });
+  // Every test is a server that has only just started. Its start is worked out at the first
+  // listing and kept (a clock that goes on without the uptime is a Mac that slept), so one that
+  // was kept from the test before would be hours behind a clock frozen somewhere else, and the
+  // nudge would be due in tests that are not about it.
+  (await import('../src/lib/reminders.js')).setServerStartedAt(null);
   return db;
 }
 

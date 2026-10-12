@@ -1,6 +1,6 @@
 import { db } from '../db.js';
 import { badRequest } from './http.js';
-import { clockSetting, instantAt, isoWeekday } from './local-time.js';
+import { clockSetting, instantAt, isoWeekday, minutesOfDay } from './local-time.js';
 import { promptState, setPromptState } from './prompt-state.js';
 import { clockTime, minutesPhrase } from './prompt-text.js';
 import type { PromptProvider } from './prompts.js';
@@ -19,7 +19,8 @@ import { isDayWrappedUp, isWeekReviewed } from './wrapup.js';
  *
  * They run on every poll of every window, so each reads and nothing more, and rules out the
  * cheapest things first. Every time of day is read in the user's own timezone (see
- * local-time.ts), and the day is the focus day, the one the day-start hour turns over.
+ * local-time.ts), and the day is the focus day, the one the day-start hour turns over. The one
+ * exception is the nudge's work days, which go with its work hours and so with the calendar day.
  */
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -75,9 +76,14 @@ export const wrapUpProvider: PromptProvider = {
     const day = focusDay(now, zone, startHour);
     if (!workDays().has(isoWeekday(day))) return [];
 
-    // A time earlier than the day-start hour is in the small hours that end this day, so it
+    // A time at or before the day-start hour is in the small hours that end this day, so it
     // is on the next calendar day: a wrap-up at 01:00 means the night after, not the night before.
-    const due = instantAt(Number(time.slice(0, 2)) < startHour ? addDays(day, 1) : day, time, zone);
+    // It is compared in minutes, and "at" counts: exactly the day-start hour is the moment this
+    // day turns into the next, so it is never due (by then it is the next day that is asked
+    // about), where taking it for the day's own first minute asked to wrap up from the first
+    // block of the morning.
+    const small = minutesOfDay(time) <= startHour * 60;
+    const due = instantAt(small ? addDays(day, 1) : day, time, zone);
     if (now.getTime() < due) return [];
 
     const id = `wrapup:${day}`;
@@ -161,7 +167,7 @@ export const weekReviewProvider: PromptProvider = {
 /* ----------------------------------------------------- nothing on the clock */
 
 let startedAtOverride: number | null = null;
-/** Where the process's own start was put the last time it was worked out: see serverStartedAt. */
+/** Where the process's own start was put when it was first worked out: see serverStartedAt. */
 let measuredStart: number | null = null;
 
 /**
@@ -176,22 +182,26 @@ export function setServerStartedAt(ms: number | null): void {
 
 /**
  * When the server began, which is as far back as it can say that nothing has been on the
- * clock. It is the process's uptime counted back from `now` rather than a time noted when the
- * module loaded, which comes to the same instant in a running app and is not thrown off by a
- * clock that is set to some other day, as a test's is.
+ * clock. It is worked out once, the first time it is asked (which is within seconds of the
+ * start, as the app reads the list as soon as it is up), as the process's uptime counted back
+ * from `now`, and then kept. Counting back from `now` and not noting the time when the module
+ * loaded comes to the same instant in a running app and is not thrown off by a clock that is
+ * set to some other day, as a test's is.
  *
- * It has to be one instant, because the quiet stretch is named by it to the millisecond. `now`
- * and the uptime are read a little apart, and a different amount apart each time (the
- * providers before this one have run in between), so counting back afresh would put the start
- * somewhere new on every poll: the same stretch would be a different prompt each time it is
- * listed, and a notification would be shown for each. A reading therefore only replaces the one
- * before it when it is more than a second away from it, which is the clock having been moved
- * (or a Mac that slept, which the uptime does not count), and not the jitter.
+ * It has to be one instant, because the quiet stretch is named by it to the millisecond: the
+ * same stretch is a different prompt, and a second notification, if its start moves. Counting
+ * back afresh on every poll moved it by the few milliseconds between reading `now` and the
+ * uptime, and, worse, by every hour a Mac slept, which the uptime does not count: after the
+ * lid was opened the nudge said "Since 11:00 AM" about a stretch it had already asked about
+ * from 10:00. So a start that was worked out stays, a clock that has gone forward (a sleep, or
+ * a long wait) is just more quiet, and it is only replaced when the clock has been moved back
+ * to before it, which would otherwise hold the nudge off until the clock caught up.
  */
 function serverStartedAt(now: number): number {
   if (startedAtOverride !== null) return startedAtOverride;
-  const reading = Math.floor(now - process.uptime() * 1000);
-  if (measuredStart === null || Math.abs(reading - measuredStart) > 1_000) measuredStart = reading;
+  if (measuredStart === null || measuredStart > now) {
+    measuredStart = Math.floor(now - process.uptime() * 1000);
+  }
   return measuredStart;
 }
 
@@ -217,8 +227,9 @@ function inAMeeting(ms: number, day: string): boolean {
 const IDLE_KEYS = "key >= 'idle:' AND key < 'idle;'";
 
 /**
- * "Nothing on the clock": in work hours of a work day, with no block on the clock (running
- * or paused) and no meeting going on, for as long as `nudge_minutes`.
+ * "Nothing on the clock": in work hours of a work day (the hours and the weekday are both the
+ * clock's), with no block on the clock (running or paused) and no meeting going on, for as long
+ * as `nudge_minutes`.
  *
  * How long it has been quiet runs from the latest of four moments: work starting, the last
  * block of any kind ending, the last time the nudge was dismissed, and the server starting,
@@ -239,15 +250,19 @@ export const idleProvider: PromptProvider = {
 
     const zone = tz();
     const t = now.getTime();
-    const day = focusDay(now, zone, dayStartHour());
-    if (!workDays().has(isoWeekday(day))) return [];
-    // Hours are times on the clock, so they are the calendar day's: at 01:00 it is still
-    // yesterday for the focus day and well before work for the hours.
+    // Work days and work hours are both read off the clock, so they are both the calendar
+    // day's: the hours are 09:00 to 18:00 of a day, and that day has to be a work day. The focus
+    // day turns over at the day-start hour, which can fall inside the work hours, and going by
+    // its weekday made the morning before it belong to the day before: with the day starting at
+    // 12:00 a Saturday morning nudged (it was Friday) and a Monday morning did not (it was Sunday).
     const calendar = localDay(now, zone);
+    if (!workDays().has(isoWeekday(calendar))) return [];
     const open = instantAt(calendar, opens, zone);
     const close = instantAt(calendar, closes, zone);
     if (t < open || t >= close) return [];
 
+    // Whether the day's work is done is the focus day's question, as it is for the wrap-up.
+    const day = focusDay(now, zone, dayStartHour());
     if (liveSessionRow() || inAMeeting(t, day) || isDayWrappedUp(day)) return [];
 
     const since = Math.max(
