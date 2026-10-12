@@ -19,6 +19,10 @@
   --good: #0ca30c;
   --warning: #fab219;
   --critical: #d03b3b;
+  /* The three as text on their own tint: darker on a light page, so they stay readable. */
+  --good-ink: #0b6e0b;
+  --warning-ink: #8a5d00;
+  --critical-ink: #b02a2a;
   --track: #e1e0d9;
   color-scheme: light;
 }
@@ -38,6 +42,9 @@
     --good: #0ca30c;
     --warning: #fab219;
     --critical: #d03b3b;
+    --good-ink: #45c245;
+    --warning-ink: #fab219;
+    --critical-ink: #f26b6b;
     --track: #2c2c2a;
     color-scheme: dark;
   }
@@ -57,6 +64,9 @@
   --good: #0ca30c;
   --warning: #fab219;
   --critical: #d03b3b;
+  --good-ink: #45c245;
+  --warning-ink: #fab219;
+  --critical-ink: #f26b6b;
   --track: #2c2c2a;
   color-scheme: dark;
 }
@@ -75,6 +85,9 @@
   --color-good: var(--good);
   --color-warning: var(--warning);
   --color-critical: var(--critical);
+  --color-good-ink: var(--good-ink);
+  --color-warning-ink: var(--warning-ink);
+  --color-critical-ink: var(--critical-ink);
   --color-track: var(--track);
   --font-sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
 }

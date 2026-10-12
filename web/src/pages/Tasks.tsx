@@ -1035,17 +1035,24 @@ function GripIcon() {
   );
 }
 
-/** High is solid, medium is outlined, low is plain text: the label is always there. */
+/**
+ * High is red, medium yellow, low green, each tinted from the app's own tokens with its text in
+ * the darker or lighter shade of the same colour that reads on that tint in the current theme.
+ * The label is always there: the colour helps you scan the column, it never says anything alone.
+ */
+const PRIORITY_TONE: Record<TaskPriority, string> = {
+  high: 'border-critical/50 bg-critical/15 text-critical-ink',
+  medium: 'border-warning/50 bg-warning/15 text-warning-ink',
+  low: 'border-good/50 bg-good/15 text-good-ink',
+};
+
 function PriorityPill({ priority }: { priority: TaskPriority }) {
-  const label = PRIORITY_LABEL[priority];
-  if (priority === 'low') return <span className="text-[11px] text-muted">{label}</span>;
   return (
     <span
-      className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-medium ${
-        priority === 'high' ? 'bg-ink text-plane' : 'border border-ink/40 text-ink'
-      }`}
+      className={`inline-block rounded-full border px-2 py-0.5 text-[11px] font-medium
+        ${PRIORITY_TONE[priority]}`}
     >
-      {label}
+      {PRIORITY_LABEL[priority]}
     </span>
   );
 }
