@@ -2702,7 +2702,7 @@ describe('migration 4 on an existing database', () => {
     (conn.prepare(sql).all() as { name: string }[]).map((r) => r.name);
 
   it('keeps every row, leaves old blocks unlinked, and enforces the link from then on', async () => {
-    const { runMigrations } = await dbMod();
+    const { migrations, runMigrations } = await dbMod();
     const dir = scratch();
     const file = path.join(dir, 'focusdesk.sqlite');
     const conn = new Database(file);
@@ -2789,12 +2789,10 @@ describe('migration 4 on an existing database', () => {
 
       runMigrations(conn, file);
 
-      assert.deepEqual(conn.prepare('SELECT id, name FROM _migrations ORDER BY id').all(), [
-        { id: 1, name: 'initial schema' },
-        { id: 2, name: 'saved timers' },
-        { id: 3, name: 'stopwatch mode' },
-        { id: 4, name: 'tasks' },
-      ]);
+      assert.deepEqual(
+        conn.prepare('SELECT id, name FROM _migrations ORDER BY id').all(),
+        migrations.map((m) => ({ id: m.id, name: m.name })),
+      );
 
       // Every old row is as it was, and none of the blocks points at a task.
       assert.deepEqual(

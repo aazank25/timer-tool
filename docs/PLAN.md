@@ -183,6 +183,63 @@ list to open, completed or all.
 - **Deleting a task keeps its blocks.** They lose the link, never their minutes.
   Deleting a project likewise leaves its tasks behind as misc ones.
 
+**End-of-day wrap-up and the Monday review.** Done.
+
+Two screens that close out a day and a week, reached from a button on Today
+(*Wrap up the day*, `/wrap-up`, any day with `?day=`) and on Review (*Weekly
+review*, `/wrap-up/week`, any week with `?week=`). Neither is a sidebar tab.
+
+- **The day** opens with what yesterday's wrap-up said to do (*Yesterday you
+  planned: …*, or the day it is from when yesterday had no note), then the
+  headline totals, then *Rate what's left* (every finished focus block with no
+  rating, one tap for 1–5, and it leaves the list once rated), *Tasks you moved*
+  (time put on each, what is logged against its estimate, and a status menu that
+  changes the task), a one-line *Tomorrow* note that saves on Enter or when you
+  leave the box, a summary to copy, and *Done for the day*, which stamps when.
+- **The week** has the totals, focused time per day (all seven, zero days
+  included), time per project, the tasks worked on with this week's time beside
+  all that is logged against the estimate, what was completed that week, and
+  *Unfinished from this week* (the tasks from that week's sheet still open, with
+  a marked place for a carry-over button, not built yet). It takes a *Next week's
+  focus* note, offers the summary to copy, and is closed with *Mark week
+  reviewed*. It opens on last week on a Monday or Tuesday, when the week just
+  finished is the one being reviewed and the new one has barely begun, and on the
+  current week from Wednesday; the arrows step between weeks.
+- **A block still on the clock counts.** Every figure is built from the blocks as
+  the timer reads them, with their live elapsed time, not from the stored
+  `active_seconds` column: that is only written when a block is paused or stopped,
+  so a summary built from it would leave out the block running at the very moment
+  you wrap up. A paused block counts what it had when it was paused; breaks and
+  discarded blocks are never counted.
+- **The summary is plain text** (`Mon Oct 12 — 5h 20m focused, 7 blocks, focus
+  3.9/5`, a bullet per project with its block titles, the tasks with what is
+  logged against the estimate and their status, then the Tomorrow line), written
+  by pure functions (`daySummary` and `weekSummary`, in
+  `web/src/lib/wrapupSummary.ts`) that the page previews and *Copy summary* puts
+  on the clipboard. Where the browser has no clipboard to write to, the text is
+  selected and the person is told to copy it themselves. The week's version lists
+  the time per project, what was worked on, completed and left open, and the
+  next-week note. The web app has no test runner of its own, so the server's
+  suite loads these small files (and `lib/weeks.ts`, which decides the week the
+  review opens on) by their path and tests them there.
+- **Notes and stamps are stored apart from the blocks** (`day_notes`,
+  `week_reviews`): a note and a done stamp are each optional and independent, a
+  second *Done* keeps the first stamp, and editing a note never undoes a stamp.
+  `isDayWrappedUp(day)` and `isWeekReviewed(day)` in `server/src/lib/wrapup.ts`
+  say whether one was done, for anything that reminds you.
+- **A week is named by its Monday, and a task's week is the task view's.** The
+  review takes any day of a week and files under its Monday. What is *unfinished*
+  from a week is read off each task's `weekOf`, as the Tasks tab states it, and
+  never worked out again from the day it was added.
+- **`wrapup_time`** (default `17:30`, `HH:MM` on a 24-hour clock, or empty for
+  off) is when the wrap-up is due. Settings has a card for it with its own Save;
+  it only stores the time.
+
+API: `GET /api/wrapup/day?day=`, `PUT /api/wrapup/day/:day {note}`, `POST
+/api/wrapup/day/:day/done`, and the same three under `/api/wrapup/week` with
+`?week=` and `/:week`. A note is at most 500 characters, trimmed, and null or
+blank clears it.
+
 ---
 
 ## 3. Roadmap
@@ -316,7 +373,8 @@ assets sit in git.
 ### Later, if wanted
 
 - Break timer with auto-suggested short/long breaks (the settings already exist).
-- Weekly review email or a Monday "here's where last week went" summary.
+- Sending the weekly review to you (an email or a notification on Monday): the
+  review itself is built, so what is left is delivering it.
 - Idle detection — notice the machine was locked and offer to trim the block.
 - CSV / JSON export.
 - Sync across machines. This is the one feature that breaks the local-first
@@ -369,7 +427,18 @@ calendar_events   id("provider:uid:start"), provider, calendar_id, title,
 context_items     id, source(notion|calendar|manual), external_id, title, url,
                   snippet, occurred_at, project_id, session_id, raw, created_at
 
+day_notes         day (YYYY-MM-DD, the key), note, wrapped_up_at, updated_at
+                  · one row per day the wrap-up was touched: the "tomorrow"
+                    line, and when "Done for the day" was pressed. Each stays
+                    NULL until set and neither implies the other
+                  · a plain focus day, like sessions.local_day, so it does not
+                    shift with the timezone
+
+week_reviews      week (the Monday, the key), note, reviewed_at, updated_at
+                  · the same for a week; any day of the week is filed under it
+
 settings          key, value
+                  · wrapup_time: HH:MM (24-hour) or '' for off, default 17:30
 ```
 
 Migrations are append-only in `server/src/db.ts` — never edit a shipped one.
