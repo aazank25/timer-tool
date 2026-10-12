@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
-import { reason, type PlanItem, type SavedTimer, type Session, type TimerMode } from '../api';
+import {
+  api,
+  reason,
+  type PlanItem,
+  type SavedTimer,
+  type Session,
+  type TimerMode,
+} from '../api';
 import { DayBar } from '../components/DayBar';
 import { EntryRow } from '../components/EntryRow';
 import { InterruptionChooser } from '../components/InterruptionChooser';
@@ -19,6 +27,7 @@ import {
 import { TimerRing } from '../components/TimerRing';
 import { Button, Card, Empty, Field, inputClass, Modal, Swatch } from '../components/ui';
 import {
+  keys,
   requestNotificationPermission,
   useBlockEndAlert,
   useDayStats,
@@ -32,8 +41,19 @@ import {
   useTimers,
   useToday,
 } from '../hooks';
+import { useExpiring } from '../lib/expiring';
 import { clock, duration, timeOfDay } from '../lib/format';
 import { seriesColor } from '../lib/palette';
+
+/** How long the note about a finish that was refused stays up. */
+const NOTICE_MS = 8_000;
+const NOT_ON_THE_CLOCK = 'That block is no longer on the clock';
+
+/**
+ * A block is told apart by its id and when it started, not by the id alone: the id of a block
+ * that was deleted can be given to the next one.
+ */
+const identify = (s: Session) => ({ id: s.id, startedAt: s.startedAt });
 
 export function FocusPage({ dark }: { dark: boolean }) {
   const live = useLiveSession();
@@ -46,26 +66,74 @@ export function FocusPage({ dark }: { dark: boolean }) {
   const { data: timers = [] } = useTimers();
   const actions = useSessionActions();
   const timerActions = useTimerActions();
-  const [finishing, setFinishing] = useState(false);
-
-  // A long-block prompt's "Finish block" arrives as /?finish=1: open the finish dialog for the
-  // block on the clock, then take the parameter off the address (replacing the entry, so Back
-  // does not open it again). It waits for the block to load, and with none live it is just
-  // taken off, so an old link cannot leave a dialog waiting for the next block.
-  const [params, setParams] = useSearchParams();
-  const wantsFinish = params.get('finish') === '1';
+  // The block the finish dialog is open for, and not just whether it is open: it is open only while
+  // that block is the one on the clock. A flag that outlived the block would leave the dialog for
+  // whichever came next, with its title and the notes typed in it written over, and "Log block"
+  // would finish a block it was never opened for, or it would open by itself on the next one.
+  const [finishingBlock, setFinishingBlock] = useState<ReturnType<typeof identify> | null>(null);
+  const [notice, say, noticed] = useExpiring(NOTICE_MS);
+  const finishing =
+    !!live.session &&
+    finishingBlock?.id === live.session.id &&
+    finishingBlock.startedAt === live.session.startedAt;
+  // The block it was open for has left the clock, finished or switched from somewhere else. The
+  // dialog is not open any more, whatever it was on, and it is said why. Only the id and start
+  // are read, so this does not run again on every tick.
+  const liveId = live.session?.id;
+  const liveStartedAt = live.session?.startedAt;
   useEffect(() => {
-    if (!wantsFinish || live.isLoading) return;
-    if (live.session) setFinishing(true);
+    if (!finishingBlock) return;
+    if (finishingBlock.id === liveId && finishingBlock.startedAt === liveStartedAt) return;
+    setFinishingBlock(null);
+    say(NOT_ON_THE_CLOCK);
+  }, [finishingBlock, liveId, liveStartedAt, say]);
+
+  // A long-block prompt's "Finish block" arrives as /?finish=<the block it asks about>. The page
+  // it was pressed on may be minutes old, so the block on the clock is read again first, and the
+  // dialog opens only if that is this block and it is a focus block. Otherwise a banner for a block
+  // that has since been finished, or switched away from, would open the dialog for whatever is on
+  // the clock now, and "Log block" would finish the wrong one. A refusal says so.
+  //
+  // The parameter comes off the address at once, replacing the entry, and not when the block has
+  // been read: pressed twice meanwhile, that would leave an entry with it behind, and Back would
+  // land on it and open the dialog again. Only the newest ask is answered.
+  const qc = useQueryClient();
+  const [params, setParams] = useSearchParams();
+  const finishParam = params.get('finish');
+  const lastAsked = useRef(0);
+  useEffect(() => {
+    if (finishParam === null) return;
+    const asked = ++lastAsked.current;
     setParams(
-      (current) => {
-        const next = new URLSearchParams(current);
+      (now) => {
+        const next = new URLSearchParams(now);
         next.delete('finish');
         return next;
       },
       { replace: true },
     );
-  }, [wantsFinish, live.isLoading, live.session, setParams]);
+    void (async () => {
+      // A block's id is digits and nothing else; anything more is not one, and asks nothing.
+      const wanted = /^\d+$/.test(finishParam) ? Number(finishParam) : null;
+      let block: Session | null = null;
+      let reached = true;
+      if (wanted !== null) {
+        try {
+          block = (
+            await qc.fetchQuery({ queryKey: keys.active, queryFn: api.activeSession, staleTime: 0 })
+          ).session;
+        } catch {
+          reached = false;
+        }
+      }
+      if (asked !== lastAsked.current) return;
+      if (block && block.kind === 'focus' && block.id === wanted) {
+        setFinishingBlock(identify(block));
+      } else {
+        say(reached ? NOT_ON_THE_CLOCK : "Couldn't reach FocusDesk. Try again.");
+      }
+    })();
+  }, [finishParam, qc, setParams, say]);
 
   const defaultMinutes = Number(settings?.focus_minutes ?? 45);
   const defaultMode: TimerMode =
@@ -83,8 +151,25 @@ export function FocusPage({ dark }: { dark: boolean }) {
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_300px]">
       <div className="space-y-4">
+        {/* Said as well as shown. The one that is said is always there, out of the layout, so that
+            what is put in it is announced; the one that is shown is not read a second time. */}
+        <div role="status" className="sr-only">
+          <span key={noticed}>{notice}</span>
+        </div>
+        {notice && (
+          <p
+            aria-hidden="true"
+            className="rounded-lg border border-hairline bg-raised px-3 py-2 text-xs text-ink-2"
+          >
+            {notice}
+          </p>
+        )}
         {live.session ? (
-          <LiveBlock live={live} dark={dark} onFinish={() => setFinishing(true)} />
+          <LiveBlock
+            live={live}
+            dark={dark}
+            onFinish={() => live.session && setFinishingBlock(identify(live.session))}
+          />
         ) : (
           <>
             <Card
@@ -138,10 +223,10 @@ export function FocusPage({ dark }: { dark: boolean }) {
             open={finishing}
             session={live.session}
             elapsedSeconds={live.elapsedSeconds}
-            onClose={() => setFinishing(false)}
+            onClose={() => setFinishingBlock(null)}
             onComplete={(body) => {
               actions.complete.mutate({ id: live.session!.id, ...body });
-              setFinishing(false);
+              setFinishingBlock(null);
             }}
           />
         )}

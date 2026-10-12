@@ -1,7 +1,9 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { api, reason } from '../../api';
 import { keys, useSettings } from '../../hooks';
+import { errorText } from '../../lib/tone';
+import { promptKeys } from '../../prompts';
 import { Button, Card, inputClass } from '../ui';
 
 /** The settings this card edits, and nothing else: it saves only these, and only the ones changed. */
@@ -17,7 +19,7 @@ const KEYS = [
 type Key = (typeof KEYS)[number];
 
 /** What has been typed and not saved yet. A key that is not in it shows what is saved. */
-type Draft = Partial<Record<Key, string>>;
+type Edits = Partial<Record<Key, string>>;
 
 /** The most each number of minutes may be: the same limits the server holds them to. */
 const MAX_MINUTES = { away_minutes: 240, long_block_minutes: 720, nudge_minutes: 240 } as const;
@@ -36,6 +38,27 @@ const DAYS = [
 const isMinutes = (text: string, max: number) => /^\d+$/.test(text.trim()) && Number(text) <= max;
 
 type Problems = Partial<Record<keyof typeof MAX_MINUTES | 'hours', string>>;
+
+/**
+ * The fields that can have something wrong, in the order they are on the card, and the control
+ * of each that holds the cursor when Save is pressed with it wrong (the work hours' first one).
+ */
+const PROBLEM_ORDER = [
+  ['away_minutes', 'away'],
+  ['long_block_minutes', 'long'],
+  ['hours', 'start'],
+  ['nudge_minutes', 'nudge'],
+] as const;
+
+/** The edits that are left once those `drop` says are done with are taken out. */
+function without(edits: Edits, drop: (key: Key, text: string) => boolean): Edits {
+  const kept: Edits = {};
+  for (const key of KEYS) {
+    const text = edits[key];
+    if (text !== undefined && !drop(key, text)) kept[key] = text;
+  }
+  return kept;
+}
 
 /** What is wrong with the values as they stand, in words, by field. The server checks it all again. */
 function problemsWith(value: (key: Key) => string): Problems {
@@ -61,10 +84,22 @@ export function PromptSettings() {
   const { data: settings } = useSettings();
   const qc = useQueryClient();
   const base = useId();
-  const [draft, setDraft] = useState<Draft>({});
+  // What has been typed on this card and not saved from it, key by key: a key is here only while
+  // its value is not what is saved. A field shows its edit where there is one and what is saved
+  // everywhere else, so whatever lands in the saved settings (another window, another card's Save)
+  // reaches every field that has not been touched and never writes over one that has. Save sends
+  // the edits and only those, so it cannot undo what another card saved either.
+  const [edits, setEdits] = useState<Edits>({});
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Whether Save was pressed while something was still wrong. A field's own message is there as it
+  // is typed but is not announced: a number half typed is not yet a mistake. Pressing Save is the
+  // moment for saying so.
+  const [refused, setRefused] = useState(false);
+  // Held in a ref, as the state is only seen on the next draw: a second press in the same task
+  // would otherwise send the same save twice.
+  const sending = useRef(false);
 
   // The "Saved" note goes by itself, and must not fire on a card that has gone.
   useEffect(() => {
@@ -72,6 +107,16 @@ export function PromptSettings() {
     const timer = setTimeout(() => setSaved(false), 2500);
     return () => clearTimeout(timer);
   }, [saved]);
+
+  // An edit the saved value has caught up with is not one any more: the same value was saved
+  // from somewhere else.
+  useEffect(() => {
+    if (!settings) return;
+    setEdits((now) => {
+      const kept = without(now, (key, text) => settings[key] === text);
+      return Object.keys(kept).length === Object.keys(now).length ? now : kept;
+    });
+  }, [settings]);
 
   if (!settings) {
     return (
@@ -81,13 +126,18 @@ export function PromptSettings() {
     );
   }
 
-  const value = (key: Key): string => draft[key] ?? settings[key] ?? '';
-  const changed = KEYS.filter((key) => draft[key] !== undefined && draft[key] !== settings[key]);
+  const value = (key: Key): string => edits[key] ?? settings[key] ?? '';
+  const changed = KEYS.filter((key) => edits[key] !== undefined && edits[key] !== settings[key]);
   const problems = problemsWith(value);
   const invalid = Object.keys(problems).length > 0;
   const set = (key: Key, text: string) => {
     setSaved(false);
-    setDraft((current) => ({ ...current, [key]: text }));
+    setRefused(false);
+    // Typing back what is saved is not an edit, and the field follows the saved value again.
+    setEdits((current) => {
+      const { [key]: _was, ...rest } = current;
+      return settings[key] === text ? rest : { ...rest, [key]: text };
+    });
   };
 
   const days = new Set(value('work_days').split(',').filter(Boolean).map(Number));
@@ -98,8 +148,21 @@ export function PromptSettings() {
   };
 
   async function save() {
+    if (sending.current || changed.length === 0) return;
+    if (invalid) {
+      // Something was typed that cannot be saved. It is said now, and the cursor goes to the
+      // first field with a problem, where its message is read out with its name.
+      setRefused(true);
+      const first = PROBLEM_ORDER.find(([field]) => problems[field]);
+      if (first) document.getElementById(`${base}-${first[1]}`)?.focus();
+      return;
+    }
+    sending.current = true;
     setSaving(true);
     setError(null);
+    // The text that is being saved, key by key, to tell which edits it has settled afterwards.
+    const sent: Edits = {};
+    for (const key of changed) sent[key] = value(key);
     try {
       const body: Record<string, string | number | boolean> = {};
       for (const key of changed) {
@@ -113,11 +176,21 @@ export function PromptSettings() {
       // The answer is every setting as it now is: the cache is brought up to date with it, so
       // the Timer card's own copy picks the new values up rather than sending the old back.
       qc.setQueryData(keys.settings, await api.updateSettings(body));
-      setDraft({});
+      // The banners are worked out from these settings, so they are read again now and not at the
+      // next poll: a threshold that was just raised should not leave its banner up for 15 seconds.
+      void qc.invalidateQueries({ queryKey: promptKeys.all });
+      // What was sent is what is saved now, as the server stored it ("045" is saved as 45), so it
+      // stops being an edit, unless it has been typed over since: that is still the person's.
+      setEdits((now) => without(now, (key, text) => sent[key] === text));
       setSaved(true);
     } catch (err) {
       setError(reason(err, 'Could not save'));
+      // What the server refused was judged against the settings as it has them, which may not be
+      // what this card has been showing (another window changed one). They are read again, so the
+      // fields that were not edited show what is really saved.
+      void qc.invalidateQueries({ queryKey: keys.settings });
     } finally {
+      sending.current = false;
       setSaving(false);
     }
   }
@@ -204,8 +277,9 @@ export function PromptSettings() {
             <label className="block text-[11px] text-muted">
               Start
               <input
+                id={`${base}-start`}
                 type="time"
-                className={`${inputClass} mt-0.5 text-ink`}
+                className={`${inputClass} mt-0.5 text-ink aria-invalid:border-critical`}
                 value={value('work_start')}
                 aria-invalid={problems.hours ? true : undefined}
                 aria-describedby={`${base}-hours-hint${problems.hours ? ` ${base}-hours-error` : ''}`}
@@ -216,7 +290,7 @@ export function PromptSettings() {
               End
               <input
                 type="time"
-                className={`${inputClass} mt-0.5 text-ink`}
+                className={`${inputClass} mt-0.5 text-ink aria-invalid:border-critical`}
                 value={value('work_end')}
                 aria-invalid={problems.hours ? true : undefined}
                 aria-describedby={`${base}-hours-hint${problems.hours ? ` ${base}-hours-error` : ''}`}
@@ -229,7 +303,7 @@ export function PromptSettings() {
             days too, and the review of last week comes when work starts on the first of them.
           </p>
           {problems.hours && (
-            <p id={`${base}-hours-error`} role="alert" className="mt-1 text-[11px] text-critical">
+            <p id={`${base}-hours-error`} className={`mt-1 text-[11px] ${errorText}`}>
               {problems.hours}
             </p>
           )}
@@ -249,7 +323,11 @@ export function PromptSettings() {
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <Button
           variant="primary"
-          disabled={saving || invalid || changed.length === 0}
+          // Not disabled when there is something wrong: pressing it is how that is announced. Nor
+          // when there is nothing to save, or while saving: a button that is disabled cannot keep
+          // focus, which falls to the page, so the press is ignored in `save` instead.
+          aria-disabled={saving || changed.length === 0 || undefined}
+          className="aria-disabled:cursor-not-allowed aria-disabled:opacity-40"
           onClick={() => void save()}
         >
           {saving ? 'Saving…' : 'Save prompts & nudges'}
@@ -259,8 +337,15 @@ export function PromptSettings() {
             Saved
           </span>
         )}
+        {refused && invalid && (
+          <span role="alert" className={`text-xs ${errorText}`}>
+            {Object.keys(problems).length === 1
+              ? `Not saved yet. ${Object.values(problems)[0]}`
+              : `Not saved yet: ${Object.keys(problems).length} fields need fixing.`}
+          </span>
+        )}
         {error && (
-          <span role="alert" className="text-xs text-critical">
+          <span role="alert" className={`text-xs ${errorText}`}>
             {error}
           </span>
         )}
@@ -286,29 +371,43 @@ function NumberRow({
   error: string | undefined;
   onChange: (text: string) => void;
 }) {
+  // 0 is not a length of time here but the way to switch the thing off. The hint says so in words;
+  // this says it beside the number, where the 0 is, and is read out with the field.
+  const off = !error && value.trim() !== '' && Number(value) === 0;
   return (
     <div>
       <label htmlFor={id} className="mb-1 block text-xs font-medium text-ink-2">
         {label}
       </label>
-      <input
-        id={id}
-        type="number"
-        inputMode="numeric"
-        min={0}
-        max={max}
-        step={1}
-        className={inputClass}
-        value={value}
-        aria-invalid={error ? true : undefined}
-        aria-describedby={`${id}-hint${error ? ` ${id}-error` : ''}`}
-        onChange={(e) => onChange(e.target.value)}
-      />
+      <div className="flex items-center gap-2">
+        <input
+          id={id}
+          type="number"
+          inputMode="numeric"
+          min={0}
+          max={max}
+          step={1}
+          className={`${inputClass} min-w-0 aria-invalid:border-critical`}
+          value={value}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={`${id}-hint${off ? ` ${id}-off` : ''}${error ? ` ${id}-error` : ''}`}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        {off && (
+          <span
+            id={`${id}-off`}
+            className="shrink-0 rounded-md border border-hairline bg-raised px-2 py-1 text-xs
+              font-medium text-ink-2"
+          >
+            Off
+          </span>
+        )}
+      </div>
       <p id={`${id}-hint`} className="mt-1 text-[11px] text-muted">
         {hint}
       </p>
       {error && (
-        <p id={`${id}-error`} role="alert" className="mt-1 text-[11px] text-critical">
+        <p id={`${id}-error`} className={`mt-1 text-[11px] ${errorText}`}>
           {error}
         </p>
       )}
