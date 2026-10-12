@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { Project } from '../api';
+import { reason, type Project } from '../api';
 import { BarsByName, Meter } from '../components/charts';
 import { Button, Card, Empty, Field, inputClass, Modal, Swatch } from '../components/ui';
 import { useProjectActions, useProjects, useRangeStats } from '../hooks';
@@ -72,13 +72,7 @@ export function ProjectsPage({ dark }: { dark: boolean }) {
         <Card title="Archived" subtitle="Hidden from the timer; history is kept">
           <ul className="space-y-1.5 text-xs">
             {archived.map((p) => (
-              <li key={p.id} className="flex items-center justify-between gap-2">
-                <span className="flex items-center gap-1.5">
-                  <Swatch color={seriesColor(p.color, dark)} />
-                  <span className="text-ink-2">{p.name}</span>
-                </span>
-                <span className="tabular text-muted">{duration(p.totalSeconds)}</span>
-              </li>
+              <ArchivedRow key={p.id} project={p} dark={dark} />
             ))}
           </ul>
         </Card>
@@ -93,6 +87,42 @@ export function ProjectsPage({ dark }: { dark: boolean }) {
         />
       )}
     </div>
+  );
+}
+
+/**
+ * An archived project, and the way back from it: unarchiving puts it on the timer's pickers
+ * and in the list above again, history and all. Each row has its own mutation, so the button
+ * that is working and the project that could not be restored are the one that was pressed.
+ */
+function ArchivedRow({ project, dark }: { project: Project; dark: boolean }) {
+  const { update } = useProjectActions();
+  return (
+    <li>
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <Swatch color={seriesColor(project.color, dark)} />
+          <span className="truncate text-ink-2">{project.name}</span>
+        </span>
+        <span className="flex shrink-0 items-center gap-2">
+          <span className="tabular text-muted">{duration(project.totalSeconds)}</span>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={update.isPending}
+            aria-label={`${update.isPending ? 'Unarchiving' : 'Unarchive'} ${project.name}`}
+            onClick={() => update.mutate({ id: project.id, archived: false })}
+          >
+            {update.isPending ? 'Unarchiving…' : 'Unarchive'}
+          </Button>
+        </span>
+      </div>
+      {update.isError && (
+        <p role="alert" className="mt-1 text-xs text-critical">
+          {`Could not unarchive “${project.name}”: ${reason(update.error, 'try again')}`}
+        </p>
+      )}
+    </li>
   );
 }
 

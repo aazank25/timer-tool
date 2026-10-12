@@ -1,3 +1,5 @@
+import type { InterruptionReason } from './lib/interruptions';
+
 export interface Project {
   id: number;
   name: string;
@@ -64,8 +66,13 @@ export interface Task {
   /** Total effort across every block it takes. Display only: never a block's own estimate. */
   estimatedMinutes: number | null;
   addedOn: string;
-  /** The Monday of the week it was added: the sheet's "Week Of". */
+  /**
+   * The Monday of the week it sits in: the sheet's "Week Of". It starts as the week it was
+   * added, and moves when the task is carried forward or filed under another week.
+   */
   weekOf: string;
+  /** The Monday of the week it was added, when that is not the week it sits in now. */
+  carriedFrom: string | null;
   startDate: string | null;
   targetDate: string | null;
   completedOn: string | null;
@@ -100,6 +107,8 @@ export interface TaskInput {
   status?: TaskStatus;
   estimatedMinutes?: number | null;
   addedOn?: string;
+  /** Any day of the week to file it under: the server takes it to that week's Monday. */
+  weekOf?: string;
   startDate?: string | null;
   targetDate?: string | null;
   completedOn?: string | null;
@@ -236,7 +245,7 @@ export function reason(err: unknown, fallback: string): string {
   return first ? `${err.message} (${first[0]}: ${first[1]?.[0] ?? 'not allowed'})` : err.message;
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
     headers: body === undefined ? undefined : { 'content-type': 'application/json' },
@@ -252,7 +261,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return payload as T;
 }
 
-const qs = (params: Record<string, string | number | undefined>) => {
+export const qs = (params: Record<string, string | number | undefined>) => {
   const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== '');
   return entries.length
     ? `?${new URLSearchParams(entries.map(([k, v]) => [k, String(v)])).toString()}`
@@ -300,7 +309,9 @@ export const api = {
   }) => request<Session>('POST', '/sessions/manual', body),
   pauseSession: (id: number) => request<Session>('POST', `/sessions/${id}/pause`),
   resumeSession: (id: number) => request<Session>('POST', `/sessions/${id}/resume`),
-  addInterruption: (id: number) => request<Session>('POST', `/sessions/${id}/interruption`, {}),
+  // No reason is the body it always had: the reason is left out, not sent as null.
+  addInterruption: (id: number, reason?: InterruptionReason | null) =>
+    request<Session>('POST', `/sessions/${id}/interruption`, reason ? { reason } : {}),
   extendSession: (id: number, minutes: number) =>
     request<Session>('POST', `/sessions/${id}/extend`, { minutes }),
   completeSession: (

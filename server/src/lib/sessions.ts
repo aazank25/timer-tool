@@ -1,5 +1,6 @@
 import { db } from '../db.js';
 import { badRequest, conflict, notFound } from './http.js';
+import type { InterruptionReason } from './interruptions.js';
 import { dayStartHour, getNumber, getSetting, tz } from './settings.js';
 import { requireProject, requireTask, startTask } from './tasks.js';
 import { focusDay, nowIso, secondsBetween } from './time.js';
@@ -363,15 +364,43 @@ export function overwriteActiveSeconds(id: number, seconds: number, now = nowIso
   })();
 }
 
-export function addInterruption(id: number, delta = 1): SessionView {
-  const row = getSessionRow(id);
-  const next = Math.max(0, row.interruptions + delta);
-  db.prepare('UPDATE sessions SET interruptions = ?, updated_at = ? WHERE id = ?').run(
-    next,
-    nowIso(),
-    id,
-  );
-  return toView(getSessionRow(id));
+/**
+ * Log an interruption on a block, or take some back with a negative `delta`. The count on
+ * the block is what the score and the day's totals read; the rows in `interruptions` say
+ * what each one was. The two are written together, so a failed write cannot leave a count
+ * that no row stands behind or the reverse.
+ *   + each one added gets a row of its own, with `reason` or none (NULL, "No reason")
+ *   - takes that many of the block's most recent rows away with it, and never below zero:
+ *     the count stops at 0, and no more rows go than there are. Most recent by id, which is
+ *     the order they were made in, and which stays right if the clock is set back.
+ * A reason says what an added interruption was, so it means nothing to a delta that adds none.
+ * Blocks logged before reasons existed have a count and no rows, and taking one back from
+ * those only lowers the count.
+ */
+export function addInterruption(
+  id: number,
+  delta = 1,
+  reason: InterruptionReason | null = null,
+): SessionView {
+  const now = nowIso();
+  return db.transaction(() => {
+    const row = getSessionRow(id);
+    db.prepare('UPDATE sessions SET interruptions = ?, updated_at = ? WHERE id = ?').run(
+      Math.max(0, row.interruptions + delta),
+      now,
+      id,
+    );
+    if (delta > 0) {
+      const add = db.prepare('INSERT INTO interruptions (session_id, at, reason) VALUES (?, ?, ?)');
+      for (let n = 0; n < delta; n++) add.run(id, now, reason);
+    } else if (delta < 0) {
+      db.prepare(
+        `DELETE FROM interruptions WHERE id IN (
+           SELECT id FROM interruptions WHERE session_id = ? ORDER BY id DESC LIMIT ?)`,
+      ).run(id, -delta);
+    }
+    return toView(getSessionRow(id));
+  })();
 }
 
 export function extendSession(id: number, minutes: number): SessionView {

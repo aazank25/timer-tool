@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import type { PlanItem, SavedTimer, Session, TimerMode } from '../api';
+import { reason, type PlanItem, type SavedTimer, type Session, type TimerMode } from '../api';
 import { DayBar } from '../components/DayBar';
 import { EntryRow } from '../components/EntryRow';
+import { InterruptionChooser } from '../components/InterruptionChooser';
 import { SavedTimers } from '../components/SavedTimers';
 import {
   DurationPicker,
@@ -459,7 +460,8 @@ function LiveBlock({
           </div>
         </dl>
 
-        <div className="flex flex-wrap items-center justify-center gap-2">
+        {/* Relative: the list of reasons under "Got interrupted" is placed against this row. */}
+        <div className="relative flex flex-wrap items-center justify-center gap-2">
           {session.status === 'running' ? (
             <Button onClick={() => actions.pause.mutate(session.id)}>Pause</Button>
           ) : (
@@ -472,12 +474,9 @@ function LiveBlock({
               +5 min
             </Button>
           )}
-          <Button
-            onClick={() => actions.interrupt.mutate(session.id)}
-            title="Log a distraction without stopping the clock"
-          >
-            Got interrupted
-          </Button>
+          <InterruptionChooser
+            onChoose={(picked) => actions.interrupt.mutate({ id: session.id, reason: picked })}
+          />
           <Button variant="primary" onClick={onFinish}>
             Done
           </Button>
@@ -485,6 +484,11 @@ function LiveBlock({
             Discard
           </Button>
         </div>
+        {actions.interrupt.isError && (
+          <p role="alert" className="text-xs text-critical">
+            {reason(actions.interrupt.error, 'Could not log that interruption')}
+          </p>
+        )}
 
         {live.overrunSeconds != null && live.overrunSeconds > 0 && (
           <p className="text-xs text-warning">

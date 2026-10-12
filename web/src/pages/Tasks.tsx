@@ -30,7 +30,8 @@ import {
   useTasks,
   useToday,
 } from '../hooks';
-import { dayLabel, duration, todayKey } from '../lib/format';
+import { useCarryOver } from '../insights';
+import { addDays, dayLabel, duration, todayKey } from '../lib/format';
 import { seriesColor } from '../lib/palette';
 
 type View = 'open' | 'completed' | 'all';
@@ -42,8 +43,10 @@ const VIEWS: { value: View; label: string }[] = [
   { value: 'all', label: 'All' },
 ];
 
+// "Week", not "week added": the week a task sits in is its own, and a task that was carried
+// forward is in a later week than the one it was added in.
 const GROUPS: { value: GroupBy; label: string }[] = [
-  { value: 'week', label: 'Week added' },
+  { value: 'week', label: 'Week' },
   { value: 'project', label: 'Project' },
   { value: 'status', label: 'Status' },
 ];
@@ -85,6 +88,21 @@ const STATUS_TONE: Record<TaskStatus, string> = {
 
 /** 90 -> "1.5h", 120 -> "2h", 100 -> "1.67h": two decimals at most, no trailing zeros. */
 const hoursText = (minutes: number) => String(Number((minutes / 60).toFixed(2)));
+
+/** The Monday of the week a day is in: a Sunday belongs to the week before it, as on the server. */
+function mondayOf(day: string): string {
+  const dow = (new Date(`${day}T00:00:00Z`).getUTCDay() + 6) % 7; // 0 = Monday
+  return addDays(day, -dow);
+}
+
+/** "Oct 5, 2026": with the year, because a tooltip has no heading to say which one. */
+const fullDay = (day: string) =>
+  new Date(`${day}T12:00:00Z`).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
 
 interface Group {
   key: string;
@@ -168,10 +186,20 @@ export function TasksPage({ dark }: { dark: boolean }) {
   const { isPending: settingsPending } = useSettings();
   const { start } = useSessionActions();
   const taskActions = useTaskActions();
+  const carryOver = useCarryOver();
 
   const activeProjects = projects.filter((p) => !p.archived);
   const thisYear = (todayInfo?.today ?? todayKey()).slice(0, 4);
   const groups = groupTasks(tasks ?? [], groupBy, thisYear);
+
+  // What the button below would carry: every task that is not done and sits in a week before
+  // this one, whatever the list is cut to. Worked out from the server's today, which turns
+  // the week over at the day-start hour, so nothing is said until that has arrived.
+  const thisWeek = todayInfo ? mondayOf(todayInfo.today) : null;
+  const behind =
+    thisWeek == null
+      ? 0
+      : (everyTask ?? []).filter((t) => t.status !== 'completed' && t.weekOf < thisWeek).length;
 
   // Why a block cannot be started from here right now, or null when it can. The
   // server picks the mode and length from the settings, so those have to be in.
@@ -208,6 +236,20 @@ export function TasksPage({ dark }: { dark: boolean }) {
     } catch (err) {
       setError(reason(err, 'Could not move the task'));
       return false;
+    }
+  }
+
+  async function carryIntoThisWeek() {
+    setError(null);
+    try {
+      // Settles once the lists have been read again, so the banner is gone by the time it does.
+      const { carried } = await carryOver.mutateAsync();
+      setAnnouncement((a) => ({
+        text: `Carried ${carried} unfinished task${carried === 1 ? '' : 's'} into this week`,
+        count: a.count + 1,
+      }));
+    } catch (err) {
+      setError(reason(err, 'Could not carry the tasks into this week'));
     }
   }
 
@@ -275,6 +317,14 @@ export function TasksPage({ dark }: { dark: boolean }) {
         <p role="alert" className="text-xs text-critical">
           {error}
         </p>
+      )}
+
+      {behind > 0 && (
+        <CarryOverBanner
+          count={behind}
+          pending={carryOver.isPending}
+          onCarry={() => void carryIntoThisWeek()}
+        />
       )}
 
       {isPending ? (
@@ -361,6 +411,45 @@ function Chips<T extends string>({
         </Button>
       ))}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------ carry over banner */
+
+/**
+ * Unfinished tasks left behind in earlier weeks, and the one button that brings them into this
+ * one. It says how many there are and what carrying does, so the button is not a surprise: they
+ * go to the bottom of their priority in this week, in the order they had. It carries every one
+ * of them, so the count is of every one, not of what the list below is cut to.
+ */
+function CarryOverBanner({
+  count,
+  pending,
+  onCarry,
+}: {
+  count: number;
+  pending: boolean;
+  onCarry: () => void;
+}) {
+  return (
+    <section
+      aria-label="Unfinished tasks from earlier weeks"
+      className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-2xl border
+        border-accent/40 bg-accent/10 px-4 py-3"
+    >
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-ink">
+          {count} unfinished task{count === 1 ? '' : 's'} from earlier weeks
+        </p>
+        <p className="mt-0.5 text-xs text-ink-2">
+          Carrying them moves them into this week, below what is already there and in the order
+          they had.
+        </p>
+      </div>
+      <Button variant="primary" size="sm" disabled={pending} onClick={onCarry}>
+        {pending ? 'Carrying…' : 'Carry into this week'}
+      </Button>
+    </section>
   );
 }
 
@@ -861,6 +950,16 @@ function TaskRow({
           >
             {task.title}
           </button>
+          {/* The word says it was carried; the week it was added in is in the tooltip. */}
+          {task.carriedFrom && (
+            <span
+              title={`Added the week of ${fullDay(task.carriedFrom)}`}
+              className="mt-0.5 shrink-0 rounded-full border border-hairline px-1.5 py-px
+                text-[10px] font-medium text-muted"
+            >
+              carried
+            </span>
+          )}
         </div>
       </td>
       <td className={`${cell} overflow-hidden`}>
@@ -1001,6 +1100,7 @@ function TaskDialog({
     task.estimatedMinutes == null ? '' : hoursText(task.estimatedMinutes),
   );
   const [addedOn, setAddedOn] = useState(task.addedOn);
+  const [weekOf, setWeekOf] = useState(task.weekOf);
   const [startDate, setStartDate] = useState(task.startDate ?? '');
   const [targetDate, setTargetDate] = useState(task.targetDate ?? '');
   const [completedOn, setCompletedOn] = useState(task.completedOn ?? '');
@@ -1021,6 +1121,10 @@ function TaskDialog({
       setError('A task needs the day it was added');
       return;
     }
+    if (!weekOf) {
+      setError('A task needs a week');
+      return;
+    }
     // Empty means no estimate. The field is in hours and the server stores minutes.
     const minutes = hours.trim() === '' ? null : Math.round(Number(hours) * 60);
     if (minutes != null && !(minutes >= 1 && minutes <= 6000)) {
@@ -1038,6 +1142,9 @@ function TaskDialog({
     if (status !== task.status) patch.status = status;
     if (minutes !== task.estimatedMinutes) patch.estimatedMinutes = minutes;
     if (addedOn !== task.addedOn) patch.addedOn = addedOn;
+    // Only when it was changed: the week files the task, so saying it again would be a move
+    // for no reason, and a task that was carried must keep the week it was carried into.
+    if (weekOf !== task.weekOf) patch.weekOf = weekOf;
     if (startDate !== (task.startDate ?? '')) patch.startDate = startDate || null;
     if (targetDate !== (task.targetDate ?? '')) patch.targetDate = targetDate || null;
     if (completedOn !== (task.completedOn ?? '')) patch.completedOn = completedOn || null;
@@ -1130,7 +1237,22 @@ function TaskDialog({
             </Field>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Field
+              label="Week of"
+              hint={
+                task.carriedFrom
+                  ? `Added the week of ${dayLabel(task.carriedFrom)}. Any day works.`
+                  : 'Any day works: it files under that week’s Monday.'
+              }
+            >
+              <input
+                type="date"
+                className={inputClass}
+                value={weekOf}
+                onChange={(e) => setWeekOf(e.target.value)}
+              />
+            </Field>
             <Field label="Added on">
               <input
                 type="date"

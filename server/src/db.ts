@@ -219,6 +219,42 @@ export const migrations: Migration[] = [
     CREATE INDEX sessions_task ON sessions(task_id);
     `,
   },
+  {
+    id: 5,
+    name: 'interruption reasons',
+    up: `
+    -- One row for each interruption logged from now on, so the count on a block can say
+    -- what pulled you away. sessions.interruptions stays the number everything else reads
+    -- (the score, the day's totals). Blocks logged before this have a count and no rows,
+    -- and a NULL reason is an interruption logged with "No reason".
+    CREATE TABLE interruptions (
+      id         INTEGER PRIMARY KEY,
+      session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      at         TEXT    NOT NULL,
+      reason     TEXT CHECK (reason IS NULL OR
+                             reason IN ('chat','meeting','person','phone','email','other'))
+    );
+    CREATE INDEX interruptions_session ON interruptions(session_id);
+    `,
+  },
+  {
+    id: 6,
+    name: 'task weeks',
+    up: `
+    -- The week a task sits in, kept apart from the day it was added: the sheet's "Week Of"
+    -- and "Date Added" columns, which only agree until a task is carried into a later week.
+    -- Always the Monday of that week, as a plain YYYY-MM-DD day.
+    ALTER TABLE tasks ADD COLUMN week_of TEXT;
+
+    -- Every task so far sat in the week it was added, so that is where it stays. Back six
+    -- days and then forward to a Monday lands on the day itself for a Monday and on the
+    -- Monday just gone for every other day, a Sunday included: the same rule as weekStart.
+    UPDATE tasks SET week_of = date(added_on, '-6 days', 'weekday 1');
+
+    -- A task's band is its week and its priority, ordered by position inside it.
+    CREATE INDEX tasks_week ON tasks(week_of, priority, position);
+    `,
+  },
 ];
 
 export const DEFAULT_SETTINGS: Record<string, string> = {

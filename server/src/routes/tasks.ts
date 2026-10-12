@@ -1,7 +1,14 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { handler, intParam, parse } from '../lib/http.js';
-import { createTask, deleteTask, listTasks, moveTask, updateTask } from '../lib/tasks.js';
+import {
+  carryOverTasks,
+  createTask,
+  deleteTask,
+  listTasks,
+  moveTask,
+  updateTask,
+} from '../lib/tasks.js';
 
 export const tasksRouter = Router();
 
@@ -27,6 +34,8 @@ const createSchema = z.object({
   // Total effort across every block it takes, not a single block's guess.
   estimatedMinutes: z.number().int().min(1).max(6000).nullish(),
   addedOn: day.optional(),
+  // Any real day: the task is filed under that day's Monday. A week cannot be blank, so no null.
+  weekOf: day.optional(),
   startDate: day.nullish(),
   targetDate: day.nullish(),
   completedOn: day.nullish(),
@@ -52,6 +61,15 @@ tasksRouter.post(
     res.status(201);
     return createTask(body);
   }),
+);
+
+/**
+ * Carry every unfinished task from an earlier week into this one. It takes no body: what
+ * it moves is decided by the tasks and by today, so there is nothing for a request to say.
+ */
+tasksRouter.post(
+  '/carry-over',
+  handler(() => carryOverTasks()),
 );
 
 /**

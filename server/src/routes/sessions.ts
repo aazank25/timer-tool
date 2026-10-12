@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../db.js';
 import { badRequest, handler, intParam, notFound, parse } from '../lib/http.js';
+import { INTERRUPTION_REASON_KEYS } from '../lib/interruptions.js';
 import { dayStartHour, tz } from '../lib/settings.js';
 import {
   addInterruption,
@@ -137,8 +138,15 @@ sessionsRouter.post(
 sessionsRouter.post(
   '/:id/interruption',
   handler((req) => {
-    const delta = parse(z.object({ delta: z.number().int().min(-10).max(10).optional() }), req.body ?? {});
-    return addInterruption(intParam(req.params.id, 'session id'), delta.delta ?? 1);
+    const body = parse(
+      z.object({
+        delta: z.number().int().min(-10).max(10).optional(),
+        // One of the fixed reasons, or left out for an interruption with no reason given.
+        reason: z.enum(INTERRUPTION_REASON_KEYS).optional(),
+      }),
+      req.body ?? {},
+    );
+    return addInterruption(intParam(req.params.id, 'session id'), body.delta ?? 1, body.reason);
   }),
 );
 

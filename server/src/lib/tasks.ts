@@ -20,6 +20,8 @@ export interface TaskRow {
   status: TaskStatus;
   estimated_minutes: number | null;
   added_on: string;
+  /** The Monday of the week it sits in. Stored, not worked out from `added_on`: see migration 6. */
+  week_of: string;
   start_date: string | null;
   target_date: string | null;
   completed_on: string | null;
@@ -47,8 +49,13 @@ export interface TaskView {
   /** Total effort across every block it takes. Display only: never a block's own estimate. */
   estimatedMinutes: number | null;
   addedOn: string;
-  /** The Monday of the week it was added: the sheet's "Week Of". */
+  /**
+   * The Monday of the week it sits in: the sheet's "Week Of". It starts as the week it was
+   * added and moves when the task is carried forward or filed under another week by hand.
+   */
   weekOf: string;
+  /** The Monday of the week it was added, when that is not the week it sits in now. */
+  carriedFrom: string | null;
   startDate: string | null;
   targetDate: string | null;
   completedOn: string | null;
@@ -67,8 +74,18 @@ export interface TaskView {
  * What the finished blocks on each task add up to. Breaks and abandoned blocks
  * are not work on it, and a block still on the clock is left out: its
  * active_seconds is only flushed on pause or stop, so `toView` reads that one
- * off the clock instead and nothing is counted twice.
+ * off the clock instead and nothing is counted twice. Exported so the estimate
+ * insights count a task's logged time by this same rule and not a copy of it.
  */
+export const LOGGED_ON_TASKS = `
+  SELECT task_id,
+         SUM(active_seconds) AS logged_seconds,
+         COUNT(*)            AS block_count,
+         MAX(started_at)     AS last_worked_at
+  FROM sessions
+  WHERE task_id IS NOT NULL AND kind = 'focus' AND status = 'completed'
+  GROUP BY task_id`;
+
 const SELECT = `
   SELECT t.*, p.name AS project_name, p.color AS project_color,
          COALESCE(w.logged_seconds, 0) AS logged_seconds,
@@ -76,23 +93,13 @@ const SELECT = `
          w.last_worked_at
   FROM tasks t
   LEFT JOIN projects p ON p.id = t.project_id
-  LEFT JOIN (
-    SELECT task_id,
-           SUM(active_seconds) AS logged_seconds,
-           COUNT(*)            AS block_count,
-           MAX(started_at)     AS last_worked_at
-    FROM sessions
-    WHERE task_id IS NOT NULL AND kind = 'focus' AND status = 'completed'
-    GROUP BY task_id
-  ) w ON w.task_id = t.id`;
+  LEFT JOIN (${LOGGED_ON_TASKS}) w ON w.task_id = t.id`;
 
 /**
- * The Monday of the week a task was added, in SQL, by the same rule as weekStart
- * in lib/time.ts (Monday-anchored, so a Sunday belongs to the week before it):
- * back six days, then forward to the next Monday. That is the day itself for a
- * Monday and the Monday just gone for every other day.
+ * The priority as a number, most pressing first. A band is ordered by it wherever the
+ * bands are listed, so the list and a carry-over cannot disagree about what comes first.
  */
-const WEEK_OF = `date(t.added_on, '-6 days', 'weekday 1')`;
+const PRIORITY_RANK = `CASE t.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END`;
 
 /**
  * Newest week first, then the most pressing within it, then the order you have put
@@ -100,14 +107,14 @@ const WEEK_OF = `date(t.added_on, '-6 days', 'weekday 1')`;
  * inside a band only: `position` is where it is kept. A new task takes the next
  * position, so it lands at the bottom of its band like a row added to the end of a
  * sheet, and a move renumbers the band it is made in. The week has to come before
- * the priority, or last week's high-priority task would sit above everything added
- * this week. The day a task was added is deliberately not in the order: it would
- * put the newest day on top and undo every move, and the week is already in it.
+ * the priority, or last week's high-priority task would sit above everything in
+ * this week. The week is the one stored on the task, not one worked out from the day
+ * it was added: a task carried forward sits with the week it was carried into. The day
+ * it was added is deliberately not in the order: it would put the newest day on top
+ * and undo every move.
  */
 const ORDER = `
-  ORDER BY ${WEEK_OF} DESC,
-           CASE t.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
-           t.position ASC, t.id ASC`;
+  ORDER BY t.week_of DESC, ${PRIORITY_RANK}, t.position ASC, t.id ASC`;
 
 /**
  * One past the highest position any task has, so the task given it sorts last in
@@ -139,6 +146,7 @@ function toView(row: TaskRow, day: string, clock: OnTheClock | null): TaskView {
     live && (row.last_worked_at == null || live.startedAt > row.last_worked_at)
       ? live.startedAt
       : row.last_worked_at;
+  const addedWeek = weekStart(row.added_on);
   return {
     id: row.id,
     projectId: row.project_id,
@@ -149,7 +157,8 @@ function toView(row: TaskRow, day: string, clock: OnTheClock | null): TaskView {
     status: row.status,
     estimatedMinutes: row.estimated_minutes,
     addedOn: row.added_on,
-    weekOf: weekStart(row.added_on),
+    weekOf: row.week_of,
+    carriedFrom: addedWeek === row.week_of ? null : addedWeek,
     startDate: row.start_date,
     targetDate: row.target_date,
     completedOn: row.completed_on,
@@ -200,8 +209,13 @@ export interface TaskInput {
   priority?: TaskPriority;
   status?: TaskStatus;
   estimatedMinutes?: number | null;
-  /** Defaults to today. */
+  /** Defaults to today. It is a record of when the task was added and never moves it between weeks. */
   addedOn?: string;
+  /**
+   * Any real day: the task is filed under that day's Monday. Left out, a new task goes in
+   * the week of the day it was added, and an edit leaves the week where it is.
+   */
+  weekOf?: string;
   startDate?: string | null;
   targetDate?: string | null;
   completedOn?: string | null;
@@ -271,13 +285,17 @@ export function createTask(input: TaskInput): TaskView {
   if (input.projectId != null) requireProject(input.projectId);
   const now = nowIso();
   const dates = datesFor({ status: null, startDate: null, completedOn: null }, input);
+  const addedOn = input.addedOn ?? today();
+  // A new task sits in the week it was added unless it is filed under another on the way in.
+  // A day given as the week is taken to its Monday, so no caller has to know to do that.
+  const weekOf = weekStart(input.weekOf ?? addedOn);
   return db.transaction(() => {
     const info = db
       .prepare(
         `INSERT INTO tasks
-          (project_id, title, priority, status, estimated_minutes, added_on, start_date,
+          (project_id, title, priority, status, estimated_minutes, added_on, week_of, start_date,
            target_date, completed_on, notes, results, position, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_POSITION}, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_POSITION}, ?, ?)`,
       )
       .run(
         input.projectId ?? null,
@@ -285,7 +303,8 @@ export function createTask(input: TaskInput): TaskView {
         input.priority ?? 'medium',
         input.status ?? 'not_started',
         input.estimatedMinutes ?? null,
-        input.addedOn ?? today(),
+        addedOn,
+        weekOf,
         dates.start_date ?? null,
         input.targetDate ?? null,
         dates.completed_on ?? null,
@@ -300,12 +319,12 @@ export function createTask(input: TaskInput): TaskView {
 
 export function updateTask(id: number, patch: TaskPatch): TaskView {
   const row = db
-    .prepare('SELECT priority, status, added_on, start_date, completed_on FROM tasks WHERE id = ?')
+    .prepare('SELECT priority, status, week_of, start_date, completed_on FROM tasks WHERE id = ?')
     .get(id) as
     | {
         priority: TaskPriority;
         status: TaskStatus;
-        added_on: string;
+        week_of: string;
         start_date: string | null;
         completed_on: string | null;
       }
@@ -313,12 +332,17 @@ export function updateTask(id: number, patch: TaskPatch): TaskView {
   if (!row) throw notFound('Task');
   if (patch.projectId != null) requireProject(patch.projectId);
 
+  // The week a task is filed under, as the Monday it is stored as. Saying the week it is
+  // already in, by any day of it, is not a change.
+  const weekOf = patch.weekOf === undefined ? undefined : weekStart(patch.weekOf);
+
   // A task that lands in another band goes to the bottom of it, like one added there.
-  // One that stays in its band keeps its place whatever else about it is edited, so a
-  // day within the same week is not a move, and neither is saying the priority again.
+  // One that stays in its band keeps its place whatever else about it is edited, so saying
+  // the priority again is not a move. Neither is the day it was added, whatever that is
+  // changed to: the day is a record, and only the week it is filed under puts it elsewhere.
   const changesBand =
     (patch.priority !== undefined && patch.priority !== row.priority) ||
-    (patch.addedOn !== undefined && weekStart(patch.addedOn) !== weekStart(row.added_on));
+    (weekOf !== undefined && weekOf !== row.week_of);
 
   const map: Record<string, unknown> = {
     project_id: patch.projectId,
@@ -327,6 +351,7 @@ export function updateTask(id: number, patch: TaskPatch): TaskView {
     status: patch.status,
     estimated_minutes: patch.estimatedMinutes,
     added_on: patch.addedOn,
+    week_of: weekOf,
     target_date: patch.targetDate,
     notes: patch.notes,
     results: patch.results,
@@ -383,7 +408,7 @@ export function moveTask(id: number, to: TaskMove): void {
     to.before !== undefined ? ([to.before, 'before'] as const) : ([to.after, 'after'] as const);
   db.transaction(() => {
     const ends = db
-      .prepare(`SELECT t.id, t.priority, ${WEEK_OF} AS week_of FROM tasks t WHERE t.id IN (?, ?)`)
+      .prepare('SELECT t.id, t.priority, t.week_of FROM tasks t WHERE t.id IN (?, ?)')
       .all(id, anchorId) as { id: number; priority: TaskPriority; week_of: string }[];
     const task = ends.find((r) => r.id === id);
     if (!task) throw notFound('Task');
@@ -398,7 +423,7 @@ export function moveTask(id: number, to: TaskMove): void {
     const band = db
       .prepare(
         `SELECT t.id, t.position FROM tasks t
-          WHERE t.priority = ? AND ${WEEK_OF} = ?
+          WHERE t.priority = ? AND t.week_of = ?
           ORDER BY t.position ASC, t.id ASC`,
       )
       .all(task.priority, task.week_of) as { id: number; position: number }[];
@@ -411,6 +436,37 @@ export function moveTask(id: number, to: TaskMove): void {
     order.forEach((taskId, position) => {
       if (was.get(taskId) !== position) write.run(position, now, taskId);
     });
+  })();
+}
+
+/**
+ * Bring every unfinished task from an earlier week into the week the user is in now, the
+ * Monday of today. A task that is done stays in the week it was finished in, and one filed
+ * under this week or a later one is not touched. Each carried task goes to the bottom of
+ * its band here (this week, its own priority), like a row added to the end of the sheet,
+ * and they keep the order they had: the oldest week first, then the order within its band,
+ * so one that was ahead of another still is. Each is given the highest position yet, one
+ * after the other, which is what puts it last and keeps them in that order.
+ *
+ * One transaction, so a failure part way carries none of them. Done twice it carries
+ * nothing the second time, because by then no unfinished task is left in an earlier week.
+ */
+export function carryOverTasks(): { carried: number; weekOf: string } {
+  const thisWeek = weekStart(today());
+  return db.transaction(() => {
+    const due = db
+      .prepare(
+        `SELECT t.id FROM tasks t
+          WHERE t.status <> 'completed' AND t.week_of < ?
+          ORDER BY t.week_of ASC, ${PRIORITY_RANK}, t.position ASC, t.id ASC`,
+      )
+      .all(thisWeek) as { id: number }[];
+    const carry = db.prepare(
+      `UPDATE tasks SET week_of = ?, position = ${NEXT_POSITION}, updated_at = ? WHERE id = ?`,
+    );
+    const now = nowIso();
+    for (const { id } of due) carry.run(thisWeek, now, id);
+    return { carried: due.length, weekOf: thisWeek };
   })();
 }
 

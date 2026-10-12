@@ -1148,7 +1148,7 @@ describe('migration 3 on an existing database', () => {
     fs.readdirSync(where).filter((f) => /^focusdesk\.backup-before-\d+-.+\.sqlite$/.test(f));
 
   it('keeps every row, accepts a null plan, and leaves a pre-migration backup', async () => {
-    const { runMigrations } = await dbMod();
+    const { runMigrations, migrations } = await dbMod();
     const { toView } = await mod();
     const file = path.join(dir, 'focusdesk.sqlite');
     const conn = new Database(file);
@@ -1182,13 +1182,12 @@ describe('migration 3 on an existing database', () => {
       runMigrations(conn, file);
 
       // Nothing was lost, and old blocks read back as the fixed-length blocks they were.
-      // The runner applies everything pending, so migration 4 follows the 3 under test.
-      assert.deepEqual(conn.prepare('SELECT id FROM _migrations ORDER BY id').all(), [
-        { id: 1 },
-        { id: 2 },
-        { id: 3 },
-        { id: 4 },
-      ]);
+      // The runner applies everything pending, so the migrations after the 3 under test follow
+      // it: the list is the shipped one, so adding a migration does not break this.
+      assert.deepEqual(
+        conn.prepare('SELECT id FROM _migrations ORDER BY id').all(),
+        migrations.map((m) => ({ id: m.id })),
+      );
       const old = conn.prepare('SELECT * FROM sessions WHERE id = 7').get() as SessionRow;
       assert.equal(old.title, 'Old block');
       assert.equal(old.planned_minutes, 45);

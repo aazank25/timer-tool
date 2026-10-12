@@ -116,13 +116,19 @@ reinstalling it never touches your history.
    block: project, what you're working on (or the task it's for), and
    optionally a guess at how long it will take. It runs as a stopwatch until you
    stop it; pick Pomodoro for a fixed-length countdown instead. Pause, add 5
-   minutes to a Pomodoro, or log an interruption without stopping the clock.
+   minutes to a Pomodoro, or log an interruption without stopping the clock:
+   *Got interrupted* opens a short list (Slack / chat, a meeting, someone
+   stopping by, a phone call, email, something else, or no reason), and one tap
+   logs it.
 2. **Finish** — rate the block 1–5 (number keys), rewrite the title to what you
    actually did, add notes.
 3. **Today** — the shape of the day: timeline, time per project, time per hour,
    daily target, and the full block log (click any row to fix it).
-4. **Review** — 7/30/90 days: where the time went, and which hours you actually
-   focus in.
+4. **Review** — 7/30/90 days: where the time went, which hours you actually
+   focus in, what interrupted you (by the reason you tapped, with the ones you
+   logged without a reason, or from before reasons existed, counted apart), and
+   how your estimates hold up: the median of actual over estimate for finished
+   blocks and completed tasks, overall and by project, over the last 90 days.
 
 **Saved timers** are the fast path. The list builds itself from the
 project + task pairs you keep returning to, so it is useful on day two without
@@ -130,10 +136,18 @@ anyone curating it; pin one to hold it at the top.
 
 **Tasks** are the weekly priorities list that replaces a spreadsheet: a row for
 each thing that needs doing, with its project (or none), priority, status,
-target date and estimate, grouped by the week it was added. Press ▶ on a row, or
+target date and estimate, grouped by the week it sits in. Press ▶ on a row, or
 pick the task on the Focus screen, and the block counts against it — the estimate
 finally has an actual beside it. A task moves to *in progress* when you start
 work on it, and deleting one keeps every block logged on it.
+
+Like the spreadsheet's separate *Week Of* and *Date Added* columns, a task's week
+is its own: it starts as the week the task was added and stays put when you edit
+the day it was added. What moves it is the *Week of* field in the edit dialog (any
+day of the week will do) or the banner that appears when unfinished tasks are
+left behind in earlier weeks: **Carry into this week** brings them all forward at
+once, to the bottom of their priority and in the order they had. A task that has
+been carried says so, with the week it was added in on hover.
 
 Inside a week, the rows of one priority stay in the order you put them in: a new
 task goes to the bottom, like a row added to the end of the sheet, and you drag a
@@ -175,7 +189,9 @@ server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
   test/         timer accounting, stopwatch, saved-timer mode, day boundaries,
                 rollups, ICS parsing, migration and backup; tasks (status dates,
                 logged time, validation, ordering and moves, linking a block
-                later, migration 4)
+                later, migration 4); insights (interruption reasons and their
+                stats, estimate accuracy, migration 5); carry-over (the stored
+                week, carrying unfinished tasks forward, migration 6)
 web/      React + Vite + Tailwind. Focus · Today · Tasks · Projects · Review · Settings
 desktop/  Electron shell: menu-bar clock, hotkeys, packaging
   main.mjs      window, tray, shortcuts; starts the server in-process

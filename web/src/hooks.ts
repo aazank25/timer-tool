@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { api, type Session, type TaskFilter, type TaskInput, type TaskMove } from './api';
 import { clock } from './lib/format';
+import type { InterruptionReason } from './lib/interruptions';
 
 /* ------------------------------------------------------------------ theme */
 
@@ -219,7 +220,11 @@ export function useSessionActions() {
     start: useMutation({ mutationFn: api.startSession, onSuccess: onDone }),
     pause: useMutation({ mutationFn: api.pauseSession, onSuccess: onDone }),
     resume: useMutation({ mutationFn: api.resumeSession, onSuccess: onDone }),
-    interrupt: useMutation({ mutationFn: api.addInterruption, onSuccess: onDone }),
+    interrupt: useMutation({
+      mutationFn: ({ id, reason }: { id: number; reason?: InterruptionReason | null }) =>
+        api.addInterruption(id, reason),
+      onSuccess: onDone,
+    }),
     extend: useMutation({
       mutationFn: ({ id, minutes }: { id: number; minutes: number }) =>
         api.extendSession(id, minutes),

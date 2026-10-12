@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { BarsByName, Columns, Hero, StatTile } from '../components/charts';
+import { EstimatesCard, InterruptionsCard } from '../components/InsightCards';
 import { Button, Card, Empty } from '../components/ui';
 import { useRangeStats, useToday } from '../hooks';
 import { addDays, dayLabel, duration, hourLabel, todayKey } from '../lib/format';
@@ -184,6 +185,12 @@ export function ReviewPage({ dark }: { dark: boolean }) {
           </Card>
         </>
       )}
+
+      {/* Their own empty states, so they show whether or not there is focus time above. */}
+      <div className="grid gap-4 lg:grid-cols-2">
+        <InterruptionsCard from={from} to={to} />
+        <EstimatesCard dark={dark} to={to} />
+      </div>
     </div>
   );
 }

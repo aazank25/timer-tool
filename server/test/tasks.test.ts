@@ -157,6 +157,7 @@ describe('a new task', () => {
       estimatedMinutes: null,
       addedOn: '2026-10-08',
       weekOf: '2026-10-05',
+      carriedFrom: null,
       startDate: null,
       targetDate: null,
       completedOn: null,
@@ -225,6 +226,7 @@ describe('a new task', () => {
       estimatedMinutes: 90,
       addedOn: '2026-10-01',
       weekOf: '2026-09-28',
+      carriedFrom: null,
       startDate: '2026-10-02',
       targetDate: '2026-10-09',
       completedOn: null,
@@ -1231,7 +1233,9 @@ describe('where a task sits in its band', () => {
     assert.deepEqual(await order(), ['H1', 'H2', 'B', 'A', 'L', 'C']);
   });
 
-  it("sends a task to the bottom of that week's band when its day moves into another week", async () => {
+  // The week is a field of its own now, and the day a task was added no longer files it: this
+  // used to be done by editing addedOn, which now moves nothing (see carryover.test.ts).
+  it("sends a task to the bottom of that week's band when it is filed under another week", async () => {
     const { updateTask, listTasks, getTask } = await tasksMod();
     const a = await task('A', { addedOn: MONDAY });
     await task('B', { addedOn: MONDAY });
@@ -1245,13 +1249,13 @@ describe('where a task sits in its band', () => {
 
     // On the Monday that opens the next week. A was the first made, so a task that kept its
     // place would head the week it joined.
-    const moved = updateTask(a.id, { addedOn: NEXT_MONDAY });
+    const moved = updateTask(a.id, { weekOf: NEXT_MONDAY });
     assert.equal(moved.weekOf, NEXT_MONDAY);
     assert.deepEqual(inNextWeek(), ['X', 'Y', 'A']);
 
-    // Back past the Sunday that closes the week before it, behind a task made since.
+    // Back by the Sunday that closes the week before it, behind a task made since.
     await task('C', { addedOn: MONDAY });
-    updateTask(a.id, { addedOn: '2026-10-11' });
+    updateTask(a.id, { weekOf: '2026-10-11' });
     assert.equal(getTask(a.id).weekOf, MONDAY);
     assert.deepEqual(await order(), ['X', 'Y', 'B', 'C', 'A']);
   });
@@ -1283,8 +1287,10 @@ describe('where a task sits in its band', () => {
     updateTask(b.id, { status: 'held_up' });
     updateTask(b.id, { title: 'B, renamed', notes: 'Waiting', results: 'None yet' });
     updateTask(b.id, { projectId: roi, estimatedMinutes: 90, targetDate: '2026-10-30' });
-    // Saying what it already is: the same priority, and the same day.
-    updateTask(b.id, { priority: 'medium', addedOn: MONDAY });
+    // Saying what it already is: the same priority, the same day, and the same week, by the
+    // Monday itself or by another day of it.
+    updateTask(b.id, { priority: 'medium', addedOn: MONDAY, weekOf: MONDAY });
+    updateTask(b.id, { weekOf: '2026-10-09' });
 
     assert.deepEqual(
       await positions(),
@@ -1650,7 +1656,7 @@ describe('tasks over the API', () => {
 
   it('refuses a date that is not YYYY-MM-DD, whichever field it is in', async () => {
     const t = (await api.call('POST', '/tasks', { title: 'Keep me' })).body;
-    for (const field of ['addedOn', 'startDate', 'targetDate', 'completedOn']) {
+    for (const field of ['addedOn', 'weekOf', 'startDate', 'targetDate', 'completedOn']) {
       for (const bad of [
         '2026-1-5',
         '10/08/2026',
@@ -1674,6 +1680,7 @@ describe('tasks over the API', () => {
   it('refuses a date that has the right shape but is not on the calendar', async () => {
     for (const bad of ['2026-02-30', '2026-13-01', '2026-00-10', '2026-04-31', '2026-10-00']) {
       assert.equal(await api.status('POST', '/tasks', { title: 'x', addedOn: bad }), 400, bad);
+      assert.equal(await api.status('POST', '/tasks', { title: 'x', weekOf: bad }), 400, bad);
       assert.equal(await api.status('POST', '/tasks', { title: 'x', targetDate: bad }), 400, bad);
     }
     // A leap day is a day.
@@ -1685,7 +1692,7 @@ describe('tasks over the API', () => {
     assert.equal((await api.call('GET', '/tasks?view=all')).status, 200);
   });
 
-  it('accepts null to clear a date, but not to blank the added-on day', async () => {
+  it('accepts null to clear a date, but not to blank the added-on day or the week', async () => {
     const t = (await api.call('POST', '/tasks', { title: 'Dated', targetDate: '2026-10-30' })).body;
     const cleared = await api.call('PATCH', `/tasks/${t.id}`, {
       targetDate: null,
@@ -1694,6 +1701,8 @@ describe('tasks over the API', () => {
     assert.equal(cleared.status, 200);
     assert.equal(cleared.body.targetDate, null);
     assert.equal(await api.status('PATCH', `/tasks/${t.id}`, { addedOn: null }), 400);
+    assert.equal(await api.status('PATCH', `/tasks/${t.id}`, { weekOf: null }), 400);
+    assert.equal(await api.status('POST', '/tasks', { title: 'x', weekOf: null }), 400);
   });
 
   it('refuses an estimate outside 1-6000 whole minutes', async () => {
@@ -2702,7 +2711,7 @@ describe('migration 4 on an existing database', () => {
     (conn.prepare(sql).all() as { name: string }[]).map((r) => r.name);
 
   it('keeps every row, leaves old blocks unlinked, and enforces the link from then on', async () => {
-    const { runMigrations } = await dbMod();
+    const { runMigrations, migrations } = await dbMod();
     const dir = scratch();
     const file = path.join(dir, 'focusdesk.sqlite');
     const conn = new Database(file);
@@ -2789,12 +2798,12 @@ describe('migration 4 on an existing database', () => {
 
       runMigrations(conn, file);
 
-      assert.deepEqual(conn.prepare('SELECT id, name FROM _migrations ORDER BY id').all(), [
-        { id: 1, name: 'initial schema' },
-        { id: 2, name: 'saved timers' },
-        { id: 3, name: 'stopwatch mode' },
-        { id: 4, name: 'tasks' },
-      ]);
+      // The runner applies everything pending, so the migrations after the 4 under test follow
+      // it, and whichever are added later: the list is the shipped one, not a copy of it.
+      assert.deepEqual(
+        conn.prepare('SELECT id, name FROM _migrations ORDER BY id').all(),
+        migrations.map((m) => ({ id: m.id, name: m.name })),
+      );
 
       // Every old row is as it was, and none of the blocks points at a task.
       assert.deepEqual(
@@ -2873,6 +2882,8 @@ describe('migration 4 on an existing database', () => {
         'position',
         'created_at',
         'updated_at',
+        // Added by migration 6, which the same run applies after the 4 under test.
+        'week_of',
       ]);
       const col = (table: string, name: string) =>
         (

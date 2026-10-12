@@ -76,11 +76,15 @@ reporting splits a block across the hours it really covered — 10:15 + 50m land
 **Phase 1 — the core loop.** Done.
 
 - Projects: CRUD, colour from a validated 8-slot palette, weekly targets,
-  archive (history is never deleted; hard-delete only detaches).
+  archive and unarchive (history is never deleted; hard-delete only detaches).
+  An archived project is listed under *Show archived* with an **Unarchive**
+  button, which puts it back on the timer's pickers and in the list; a failed
+  attempt says so under the row it was made on.
 - Timer: start with project + title + intent. It is a **stopwatch** by default —
   count up, stop when you are done, with an optional estimate shown against the
   actual — or a fixed-length **Pomodoro** that counts down. Pause/resume, +5 min
-  (Pomodoro), log an interruption without stopping the clock, complete, discard.
+  (Pomodoro), log an interruption without stopping the clock (and say what it
+  was, one tap more: see *Interruption reasons* below), complete, discard.
 - **Saved timers** — the one-click grid, borrowed from Timery. Rather than
   making you curate a list, it is derived from the project+title pairs you
   actually repeat (completed blocks, ranked by frequency then recency), with an
@@ -93,7 +97,8 @@ reporting splits a block across the hours it really covered — 10:15 + 50m land
   interruptions, longest unbroken run, day timeline, time-by-project,
   time-by-hour, full block log.
 - Review: 7/30/90-day windows, per-day columns, per-project bars and table,
-  best-hours chart.
+  best-hours chart, and two cards of their own: what interrupted you, and how
+  your estimates hold up (see *Interruption reasons and estimate accuracy*).
 - Settings: default timer (stopwatch or Pomodoro), Pomodoro length, breaks,
   daily target, timezone, day-start hour, theme.
 - Light and dark, keyboard-friendly, no horizontal scroll down to 400px.
@@ -129,7 +134,7 @@ access. Recurring meetings are expanded (`RRULE`), cancelled instances honoured
 
 The Tasks tab replaces the spreadsheet of the same job. Each row is a task: a
 project (or none), priority, status, target date, estimate and what was logged,
-grouped under a "Week of" header — the Monday of the week it was added — with
+grouped under a "Week of" header — the Monday of the week it sits in — with
 completed rows struck through. Group by project or status instead, and cut the
 list to open, completed or all.
 
@@ -160,12 +165,33 @@ list to open, completed or all.
   another one in its band; the server reads the whole band, completed rows the
   screen hides included, and numbers it 0..n-1 again, so a hidden row keeps its
   place in the order too. A task is never moved out of its band: an anchor in
-  another week or priority is refused. Editing a task's priority, or its added-on
-  day into another week, sends it to the bottom of its new band; any other edit
-  leaves its place alone, a day within the same week included. The added-on day no
-  longer orders anything. What changes on screen: within a week and priority, tasks
-  now list in the order they were added (new ones at the bottom), not newest day
-  first.
+  another week or priority is refused. Editing a task's priority, or the week it
+  is filed under, sends it to the bottom of its new band; any other edit leaves its
+  place alone, the day it was added included, whatever that is changed to. The
+  added-on day no longer orders anything, and no longer files a task in a week
+  either (see the next bullet). What changes on screen: within a week and priority,
+  tasks now list in the order they were added (new ones at the bottom), not newest
+  day first.
+- **A week of its own, and carrying unfinished work forward.** The week a task sits
+  in is stored (`tasks.week_of`, always a Monday), like the sheet's separate *Week
+  Of* and *Date Added* columns, so the two only agree until a task is carried. A new
+  task is filed under the week of the day it was added unless `weekOf` is given, and
+  `weekOf` on a create or an edit takes any real day and files the task under that
+  day's Monday; editing `addedOn` is editing a record and moves nothing. The order,
+  the bands and the moves all go by this stored week. In the task view `weekOf` is
+  that week, and `carriedFrom` is the Monday of the week it was added when that is
+  not the week it sits in, otherwise null. `POST /api/tasks/carry-over` (no body)
+  brings every task that is not completed and whose week is before this week's
+  Monday into this week, answering `{ carried, weekOf }`. This week is the user's:
+  it turns over at the day-start hour like every other day. Each carried task goes to
+  the bottom of its band here, one after the other, the oldest week first and in the
+  order it had within its week, so tasks that were in an order keep it, and what was
+  already in the week stays above them. Completed tasks stay in the week they were
+  finished in, and anything in this week or a later one is left alone. It is one
+  transaction, and the second call carries nothing. On the Tasks tab a banner says
+  how many unfinished tasks are left in earlier weeks and offers **Carry into this
+  week**; the edit dialog has a *Week of* field, sent only when it was changed; and a
+  carried row says *carried*, with the week it was added in as its tooltip.
 - **A block can be linked to a task after the fact.** Forgot to pick one? Open the
   block in Today's block log and choose its task: open tasks first, completed ones
   under their own heading. The task moves along as if the block had been started on
@@ -182,6 +208,54 @@ list to open, completed or all.
   them, and the edit with them, so the editor disables that field until it is paused.
 - **Deleting a task keeps its blocks.** They lose the link, never their minutes.
   Deleting a project likewise leaves its tasks behind as misc ones.
+
+**Interruption reasons and estimate accuracy — what pulls you away, and how good
+your guesses are.** Done.
+
+- **Interruption reasons.** *Got interrupted* on the Focus screen opens a short menu:
+  Slack / chat, Meeting, Someone stopped by, Phone call, Email, Something else, and
+  *No reason*. One tap logs it and closes the menu; Escape closes it without logging
+  anything, and the arrow keys, Home, End and Enter work as in any menu. The count on
+  the block is still the number the score and the day's totals read. Each
+  interruption logged from now on also gets a row in `interruptions` (migration 5;
+  `reason` is NULL for *No reason*), written in the same transaction as the count, so
+  neither can be left without the other. `POST /api/sessions/:id/interruption` takes
+  `{ delta?, reason? }` (delta -10 to 10, default 1; a reason from the fixed list,
+  anything else is a 400 that writes nothing) and answers with the block, as it
+  always has. A delta above zero adds that many rows, each with the reason; below
+  zero it takes that many of the block's most recent rows away, never below zero. A
+  block logged before reasons has a count and no rows, and taking one back from it
+  only lowers the count. The reason list is written once on the server
+  (`server/src/lib/interruptions.ts`) and mirrored in `web/src/lib/interruptions.ts`.
+- **What interrupted you.** `GET /api/stats/interruptions?from=&to=` (days; the 7
+  ending today unless given, checked like the other stats, `from` not after `to`)
+  answers `{ from, to, total, byReason: [{ reason, label, count }], unspecified }`:
+  the interruptions counted on focus blocks in the window, whatever the status of the
+  block (a discarded block was still interrupted) and leaving out breaks. `byReason`
+  is most often first, ties in the order of the list, and leaves out a reason nobody
+  gave. `unspecified` is what was counted with no reason: the interruptions of blocks
+  from before reasons, and those logged with *No reason*; `total` is always the
+  reasons given plus that. A block's rows are only read up to its own count, so a
+  count that was lowered by hand cannot make this show more than the rest of the app
+  does. `DayStats` and `RangeStats` are unchanged. Review has a *What interrupted
+  you* card for the window picked there, with an empty state.
+- **How your estimates hold up.** `GET /api/stats/estimates?from=&to=` (the 90 days
+  ending today unless given) answers `{ from, to, blocks, tasks, byProject }`, where
+  `blocks` and `tasks` are each `{ count, medianRatio }` and `byProject` has the same
+  two for each project, with *No project* as the entry whose id is null and a project
+  with nothing in either left out. The ratio is actual ÷ estimate. A block counts when
+  it is a completed focus block with an estimate, worked on a day in the window, and
+  its actual is its active seconds; a task counts when it is completed on a day in the
+  window, has an estimate, and has focus time logged on it, counted by the rule the
+  Tasks tab's *Logged* column uses (finished focus blocks only). A block is filed under
+  its own project and a task under its task's, which can differ. The median rather
+  than the mean, so one marathon block cannot drag a typical guess far; it is null
+  until there are three, because the middle of one or two numbers says nothing about
+  how you usually guess. Review's *How your estimates hold up* card reads it as "Blocks
+  run 1.6× your guess (8)", "about right" within a tenth either way, "finish in 70% of
+  your guess" below that, and "not enough yet" for a null. It always looks back 90
+  days, whatever window is picked above it, because a week holds too few estimated
+  blocks to judge a guess by.
 
 ---
 
@@ -341,20 +415,37 @@ sessions          id, project_id→projects, task_id→tasks, title, intent,
                   · partial unique index: at most one running/paused row
                   · task_id is ON DELETE SET NULL: a deleted task unlinks its
                     blocks, it never deletes one
+                  · interruptions is the count the score and the day's totals
+                    read; the reasons behind it are in the interruptions table
 
 tasks             id, project_id→projects (NULL = a misc task), title,
                   priority(high|medium|low),
                   status(not_started|in_progress|held_up|completed),
                   estimated_minutes (total effort across blocks; display only),
-                  added_on, start_date, target_date, completed_on, notes,
-                  results, position, timestamps
+                  added_on, week_of, start_date, target_date, completed_on,
+                  notes, results, position, timestamps
                   · dates are plain YYYY-MM-DD days, not instants
-                  · position orders a task inside its band (the week it was
-                    added, and its priority) and nowhere else: a new task takes
-                    the highest position + 1, a move renumbers its band 0..n-1.
-                    The app itself never reordered tasks before, so positions
-                    were simply the order they were made in, which is where the
-                    new rule starts from, so nothing was migrated
+                  · week_of is the Monday of the week the task sits in, stored
+                    apart from added_on (migration 6 filled it from added_on, so
+                    no task moved). Every write sets it; carrying a task forward
+                    or filing it under another week changes it and added_on
+                    stays the record of when it was added. Indexed with
+                    priority and position, the order the list is read in
+                  · position orders a task inside its band (its week_of and its
+                    priority) and nowhere else: a new task takes the highest
+                    position + 1, a move renumbers its band 0..n-1, and a task
+                    carried into a week takes the highest + 1 as well. The app
+                    itself never reordered tasks before, so positions were
+                    simply the order they were made in, which is where the new
+                    rule starts from, so nothing was migrated
+
+interruptions     id, session_id→sessions, at,
+                  reason(chat|meeting|person|phone|email|other, NULL = "No reason")
+                  · one row per interruption logged since migration 5. A block
+                    from before has a count and no rows, and its interruptions
+                    are counted as "unspecified" rather than guessed at
+                  · session_id is ON DELETE CASCADE: a deleted block takes its
+                    rows with it
 
 session_segments  id, session_id→sessions, started_at, ended_at
                   · an open row means the clock is ticking
