@@ -53,7 +53,7 @@ const wrapUp = {
   body: 'You have focused for 4 h 10 min across 3 blocks so far today.',
   createdAt: at,
   actions: [
-    { id: 'wrap-up', label: 'Wrap up', primary: true, open: '/wrap-up' },
+    { id: 'open', label: 'Wrap up', primary: true, open: '/wrap-up' },
     { id: 'dismiss', label: 'Not today' },
   ],
 };
@@ -64,7 +64,7 @@ const review = {
   body: 'The week of Oct 5, with 22 h 15 min of focus.',
   createdAt: at,
   actions: [
-    { id: 'review', label: 'Review', primary: true, open: '/wrap-up/week?week=2026-10-05' },
+    { id: 'open', label: 'Review', primary: true, open: '/wrap-up/week?week=2026-10-05' },
     { id: 'dismiss', label: 'Not this week' },
   ],
 };
@@ -75,7 +75,7 @@ const idle = {
   body: 'Since 2:15 PM. Start something?',
   createdAt: at,
   actions: [
-    { id: 'start', label: 'Start a block', primary: true, open: '/' },
+    { id: 'open', label: 'Start a block', primary: true, open: '/' },
     { id: 'dismiss', label: 'Not now' },
   ],
 };
@@ -105,7 +105,15 @@ function notificationClass({ supported = true, failsToShow = false } = {}) {
 /** What the person does with the machine, and what the app was asked to do about it. */
 function setup({ prompts = [], supported = true, failsToShow = false } = {}) {
   const world = { prompts, idle: 0, locked: false, listError: null, answerError: null, listed: 0 };
-  const calls = { acted: [], windows: [], palettes: 0, errors: [], changes: 0, afterActions: 0, logs: [] };
+  const calls = {
+    acted: [],
+    windows: [],
+    palettes: 0,
+    errors: [],
+    changes: 0,
+    afterActions: 0,
+    logs: [],
+  };
   const Notification = notificationClass({ supported, failsToShow });
   const attention = createAttention({
     fetchPrompts: async () => {
@@ -586,11 +594,13 @@ describe('the Needs attention section of the menu', () => {
     assert.equal(calls.palettes, 0);
   });
 
-  it('shows the server\'s own words when an answer is refused, and reads the list again: never a silent nothing', async () => {
+  it("shows the server's own words when an answer is refused, and reads the list again: never a silent nothing", async () => {
     const { world, attention, calls } = setup({ prompts: [away] });
     await attention.refresh();
     const read = world.listed;
-    world.answerError = Object.assign(new Error('That prompt is no longer current'), { status: 409 });
+    world.answerError = Object.assign(new Error('That prompt is no longer current'), {
+      status: 409,
+    });
     world.prompts = [];
 
     await assert.doesNotReject(submenuOf(attention, away.title).submenu[0].click());
@@ -598,7 +608,11 @@ describe('the Needs attention section of the menu', () => {
     assert.equal(calls.errors.length, 1);
     assert.match(calls.errors[0], /You were away 40 min/);
     assert.match(calls.errors[0], /That prompt is no longer current/);
-    assert.equal(world.listed, read + 1, 'and the prompt that is no longer there goes from the menu');
+    assert.equal(
+      world.listed,
+      read + 1,
+      'and the prompt that is no longer there goes from the menu',
+    );
     assert.equal(attention.pending(), 0);
     assert.equal(calls.afterActions, 1);
   });
@@ -682,13 +696,23 @@ describe('Got interrupted', () => {
     assert.equal(item.click, undefined, 'it opens a list, it logs nothing itself');
     assert.deepEqual(
       item.submenu.map((entry) => entry.label),
-      ['Slack / chat', 'Meeting', 'Someone stopped by', 'Phone call', 'Email', 'Something else', 'No reason'],
+      [
+        'Slack / chat',
+        'Meeting',
+        'Someone stopped by',
+        'Phone call',
+        'Email',
+        'Something else',
+        'No reason',
+      ],
     );
   });
 
   it('logs the reason that is chosen, on the block it is for, and none for No reason', async () => {
     const logged = [];
-    const item = interruptedItem({ id: 4, kind: 'focus' }, reasons, (id, reason) => logged.push([id, reason]));
+    const item = interruptedItem({ id: 4, kind: 'focus' }, reasons, (id, reason) =>
+      logged.push([id, reason]),
+    );
 
     for (const entry of item.submenu) await entry.click();
 
@@ -705,7 +729,9 @@ describe('Got interrupted', () => {
 
   it('is the one click it is in the window for a break: there is no reason to ask', () => {
     const logged = [];
-    const item = interruptedItem({ id: 9, kind: 'break' }, reasons, (id, reason) => logged.push([id, reason]));
+    const item = interruptedItem({ id: 9, kind: 'break' }, reasons, (id, reason) =>
+      logged.push([id, reason]),
+    );
 
     assert.equal(item.label, 'Got interrupted');
     assert.equal(item.submenu, undefined);

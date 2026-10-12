@@ -93,7 +93,7 @@ export const wrapUpProvider: PromptProvider = {
         body: `You have focused for ${minutesPhrase(seconds)} across ${blocksPhrase(blocks)} so far today.`,
         createdAt: iso(due),
         actions: [
-          { id: 'wrap-up', label: 'Wrap up', primary: true, open: '/wrap-up' },
+          { id: 'open', label: 'Wrap up', primary: true, open: '/wrap-up' },
           { id: 'dismiss', label: 'Not today' },
         ],
       },
@@ -145,7 +145,7 @@ export const weekReviewProvider: PromptProvider = {
         body: `The week of ${dayText(last)}, with ${minutesPhrase(seconds)} of focus.`,
         createdAt: iso(due),
         actions: [
-          { id: 'review', label: 'Review', primary: true, open: `/wrap-up/week?week=${last}` },
+          { id: 'open', label: 'Review', primary: true, open: `/wrap-up/week?week=${last}` },
           { id: 'dismiss', label: 'Not this week' },
         ],
       },
@@ -161,6 +161,8 @@ export const weekReviewProvider: PromptProvider = {
 /* ----------------------------------------------------- nothing on the clock */
 
 let startedAtOverride: number | null = null;
+/** Where the process's own start was put the last time it was worked out: see serverStartedAt. */
+let measuredStart: number | null = null;
 
 /**
  * Say the server began at this instant, or go back to the real one with null. For tests,
@@ -169,6 +171,7 @@ let startedAtOverride: number | null = null;
  */
 export function setServerStartedAt(ms: number | null): void {
   startedAtOverride = ms;
+  measuredStart = null;
 }
 
 /**
@@ -176,8 +179,21 @@ export function setServerStartedAt(ms: number | null): void {
  * clock. It is the process's uptime counted back from `now` rather than a time noted when the
  * module loaded, which comes to the same instant in a running app and is not thrown off by a
  * clock that is set to some other day, as a test's is.
+ *
+ * It has to be one instant, because the quiet stretch is named by it to the millisecond. `now`
+ * and the uptime are read a little apart, and a different amount apart each time (the
+ * providers before this one have run in between), so counting back afresh would put the start
+ * somewhere new on every poll: the same stretch would be a different prompt each time it is
+ * listed, and a notification would be shown for each. A reading therefore only replaces the one
+ * before it when it is more than a second away from it, which is the clock having been moved
+ * (or a Mac that slept, which the uptime does not count), and not the jitter.
  */
-const serverStartedAt = (now: number) => startedAtOverride ?? now - process.uptime() * 1000;
+function serverStartedAt(now: number): number {
+  if (startedAtOverride !== null) return startedAtOverride;
+  const reading = Math.floor(now - process.uptime() * 1000);
+  if (measuredStart === null || Math.abs(reading - measuredStart) > 1_000) measuredStart = reading;
+  return measuredStart;
+}
 
 /** The latest of the times a query finds, or 0 for none: a start nothing can come before. */
 function latestOf(sql: string, ...args: string[]): number {
@@ -255,7 +271,7 @@ export const idleProvider: PromptProvider = {
         body: `Since ${clockTime(iso(since))}. Start something?`,
         createdAt: iso(due),
         actions: [
-          { id: 'start', label: 'Start a block', primary: true, open: '/' },
+          { id: 'open', label: 'Start a block', primary: true, open: '/' },
           { id: 'dismiss', label: 'Not now' },
         ],
       },

@@ -53,10 +53,9 @@ function problemsWith(value: (key: Key) => string): Problems {
 
 /**
  * Prompts and nudges: when to ask about time you were away or a block left running, whether
- * to offer to pause for meetings, and the work days and hours that the nudge to start a block
- * and the wrap-up and weekly-review reminders keep to. It keeps its own draft and saves only
- * its own keys, so it can sit beside the other settings cards without either one overwriting
- * the other.
+ * to offer to pause for meetings, and the work days and hours the desktop app's nudges keep
+ * to. It keeps its own draft and saves only its own keys, so it can sit beside the other
+ * settings cards without either one overwriting the other.
  */
 export function PromptSettings() {
   const { data: settings } = useSettings();
@@ -130,8 +129,8 @@ export function PromptSettings() {
     >
       <p className="mb-4 rounded-lg border border-hairline bg-raised px-3 py-2 text-xs text-ink-2">
         Away detection and notifications need the desktop app: a browser tab cannot tell when you
-        have stepped away. Everything here also shows as a banner under the clock, in a browser
-        or in the app.
+        have stepped away. Everything here also shows as a banner under the clock, in a browser or
+        in the app.
       </p>
 
       <div className="grid gap-4 sm:grid-cols-2">

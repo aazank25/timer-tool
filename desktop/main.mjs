@@ -154,9 +154,12 @@ async function apiJson(pathname, method, body) {
     // Not JSON: the status says enough.
   }
   if (!res.ok) {
-    throw Object.assign(new Error(payload?.error ?? `${method} ${pathname} failed: ${res.status}`), {
-      status: res.status,
-    });
+    throw Object.assign(
+      new Error(payload?.error ?? `${method} ${pathname} failed: ${res.status}`),
+      {
+        status: res.status,
+      },
+    );
   }
   return payload;
 }
@@ -232,7 +235,9 @@ function renderTitle() {
   const waiting = attention?.pending() ?? 0;
   const mark = waiting > 0 ? '•' : '';
   const needs =
-    waiting > 0 ? `\n${waiting} ${waiting === 1 ? 'thing needs' : 'things need'} your attention` : '';
+    waiting > 0
+      ? `\n${waiting} ${waiting === 1 ? 'thing needs' : 'things need'} your attention`
+      : '';
 
   if (!s) {
     setTrayText(mark, `FocusDesk - nothing running${needs}`);
@@ -506,7 +511,12 @@ async function startAttention() {
     openPalette: () => palette.showPalette(),
     showError: (message) => {
       void dialog
-        .showMessageBox({ type: 'error', title: 'FocusDesk', message: 'That did not work', detail: message })
+        .showMessageBox({
+          type: 'error',
+          title: 'FocusDesk',
+          message: 'That did not work',
+          detail: message,
+        })
         .catch((err) => console.error('[focusdesk]', err));
     },
     onChange: () => {
@@ -523,14 +533,16 @@ async function startAttention() {
     getLive: () => live.session,
     getSettings: () => settings,
     report: async ({ sessionId, startedAt, endedAt }) => {
-      const entry = { sessionId, startedAt, endedAt, ok: false, error: null };
-      reports.push(entry);
+      const entry = { sessionId, startedAt, endedAt, ok: true, error: null };
       try {
         await apiJson(`/sessions/${sessionId}/away`, 'POST', { startedAt, endedAt });
-        entry.ok = true;
       } catch (err) {
+        entry.ok = false;
         entry.error = messageOf(err);
         throw err;
+      } finally {
+        // Noted once it has an outcome, so whoever sees an entry knows how it went.
+        reports.push(entry);
       }
       // The server now has a question about it: ask what it is, rather than in a quarter of a minute.
       void attention.refresh();
@@ -652,8 +664,9 @@ app.whenReady().then(async () => {
   palette = createPalette({
     serverUrl: server.url,
     backgroundColor: BACKGROUND,
-    // The box may have changed what is on the clock: show it in the menu bar now, not in 5s.
-    onClose: () => void poll(),
+    // The box may have changed what is on the clock, and a block that is started answers the
+    // nudge to start one: show both in the menu bar now, not in 5s and 15s.
+    onClose: () => void poll().then(() => attention?.refresh()),
   });
   if (process.env.FOCUSDESK_TEST === '1') {
     // What the end-to-end tests reach into the running app by, and nothing else does.

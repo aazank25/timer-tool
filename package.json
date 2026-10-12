@@ -18,6 +18,7 @@
     "desktop": "npm --prefix desktop ci && npm --prefix desktop start",
     "desktop:mac": "npm --prefix desktop ci && npm --prefix desktop run dist:mac",
     "desktop:mac:all": "npm --prefix desktop ci && npm --prefix desktop run dist:mac:all",
+    "dist:mac:all": "npm --prefix desktop ci && npm --prefix desktop run dist:mac:all",
     "desktop:win": "npm --prefix desktop ci && npm --prefix desktop run dist:win",
     "desktop:linux": "npm --prefix desktop ci && npm --prefix desktop run dist:linux"
   },

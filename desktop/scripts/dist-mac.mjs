@@ -95,4 +95,5 @@ function main() {
 }
 
 // Run as a script, and not when a test imports it for the functions above.
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main();
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href)
+  main();

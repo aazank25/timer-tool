@@ -759,7 +759,11 @@ function UnfinishedWithCarryOver({ view, dark }: { view: WrapUpWeek; dark: boole
     try {
       const { carried, weekOf } = await carryOver.mutateAsync();
       const into = `into the week of ${dayLabel(weekOf)}`;
-      setSaid(carried === 0 ? `Nothing was left to carry ${into}` : `Carried ${plural(carried, 'task')} ${into}`);
+      setSaid(
+        carried === 0
+          ? `Nothing was left to carry ${into}`
+          : `Carried ${plural(carried, 'task')} ${into}`,
+      );
       // The tasks sit in another week now, so what this page lists is out of date as well as the
       // Tasks tab, which useCarryOver has already told.
       void qc.invalidateQueries({ queryKey: wrapUpKeys.all });
@@ -795,7 +799,9 @@ function UnfinishedWithCarryOver({ view, dark }: { view: WrapUpWeek; dark: boole
                 there.
               </p>
             )}
-            <p role="status" className="mt-3 text-xs text-good empty:hidden">
+            {/* Out of sight and not out of the page while it is empty: a region that is not there
+                until it has something to say is often not read out when it appears. */}
+            <p role="status" className={said ? 'mt-3 text-xs text-good' : 'sr-only'}>
               {said}
             </p>
             {error && (

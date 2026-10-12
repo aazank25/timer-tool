@@ -199,7 +199,8 @@ export function createAttention({
     pending: () => prompts.length,
 
     /** What the section of the menu is made of, so it is only built again when that changes. */
-    signature: () => JSON.stringify(prompts.map((p) => [p.id, p.title, p.actions.map((a) => [a.id, a.label])])),
+    signature: () =>
+      JSON.stringify(prompts.map((p) => [p.id, p.title, p.actions.map((a) => [a.id, a.label])])),
 
     /** The section for the top of the menu: a heading and a submenu for each question, or nothing. */
     menuItems() {

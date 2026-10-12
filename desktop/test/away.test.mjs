@@ -98,7 +98,11 @@ describe('the screen locking', () => {
     tracker.onLock(min(40));
     world.settings = { away_minutes: 5 };
     await tracker.onUnlock(min(46));
-    assert.deepEqual(reports, [told(min(40), min(46))], 'and is plenty for five, given as a number');
+    assert.deepEqual(
+      reports,
+      [told(min(40), min(46))],
+      'and is plenty for five, given as a number',
+    );
   });
 
   it('reports nothing when away_minutes is 0, which is off', async () => {
@@ -234,16 +238,39 @@ describe('the machine sleeping', () => {
     assert.deepEqual(reports, [told(min(0), min(60))]);
   });
 
-  it('is over at wake-up only once the unlock has been seen too, whichever came first', async () => {
+  it('is over at the unlock even when the wake-up was never seen, and a wake-up after it changes nothing', async () => {
     const { tracker, reports } = setup();
 
     tracker.onLock(min(0));
     tracker.onSuspend(min(2));
+    // Somebody who has unlocked the screen is awake, whatever the events said.
     await tracker.onUnlock(min(30));
-    assert.deepEqual(reports, [], 'unlocked, but the machine is still asleep');
-    await tracker.onResume(min(31));
+    assert.deepEqual(reports, [told(min(0), min(30))]);
+    assert.equal(tracker.state().away, false);
 
-    assert.deepEqual(reports, [told(min(0), min(31))]);
+    await tracker.onResume(min(31));
+    assert.deepEqual(reports, [told(min(0), min(30))], 'nothing new began');
+  });
+
+  it('ends at the latest return it was told of, whichever order the events came in', async () => {
+    const { tracker, reports } = setup();
+
+    tracker.onLock(min(0));
+    tracker.onSuspend(min(2));
+    await tracker.onResume(min(40));
+    // The unlock is stamped before the wake-up: two clocks are never quite alike.
+    await tracker.onUnlock(min(38));
+
+    assert.deepEqual(reports, [told(min(0), min(40))]);
+  });
+
+  it('is over at the unlock for a sleep that had no lock before it, and no wake-up seen', async () => {
+    const { tracker, reports } = setup();
+
+    tracker.onSuspend(min(0));
+    await tracker.onUnlock(min(25));
+
+    assert.deepEqual(reports, [told(min(0), min(25))]);
   });
 
   it('begins at the sleep when there was no lock, and keeps the earlier start when there was', async () => {
@@ -294,6 +321,38 @@ describe('another user taking over the Mac', () => {
     tracker.onLock(min(1));
     await tracker.onBecomeActive(min(20));
     assert.deepEqual(reports, []);
+    await tracker.onUnlock(min(22));
+
+    assert.deepEqual(reports, [told(min(0), min(22))]);
+  });
+
+  it('is not over at a wake-up: the other user still has the Mac until this session is back', async () => {
+    const { tracker, reports } = setup();
+
+    tracker.onResignActive(min(0));
+    tracker.onSuspend(min(10));
+    await tracker.onResume(min(50));
+    assert.deepEqual(reports, []);
+    assert.equal(tracker.state().switched, true);
+    await tracker.onBecomeActive(min(60));
+
+    assert.deepEqual(reports, [told(min(0), min(60))]);
+  });
+
+  it('is over when this session is back even if the wake-up was never seen', async () => {
+    const { tracker, reports } = setup();
+
+    tracker.onSuspend(min(0));
+    await tracker.onBecomeActive(min(30));
+
+    assert.deepEqual(reports, [told(min(0), min(30))]);
+  });
+
+  it('is over at the unlock when the switch back was never seen', async () => {
+    const { tracker, reports } = setup();
+
+    tracker.onResignActive(min(0));
+    tracker.onLock(min(1));
     await tracker.onUnlock(min(22));
 
     assert.deepEqual(reports, [told(min(0), min(22))]);
@@ -376,7 +435,11 @@ describe('being idle', () => {
   });
 
   it('is reported only when a focus block was running as it began', async () => {
-    for (const live of [null, { ...FOCUS, status: 'paused' }, { id: 8, kind: 'break', status: 'running' }]) {
+    for (const live of [
+      null,
+      { ...FOCUS, status: 'paused' },
+      { id: 8, kind: 'break', status: 'running' },
+    ]) {
       const { world, tracker, reports } = setup({ live });
       world.now = min(30);
       world.idle = 600;
@@ -428,39 +491,38 @@ describe('being idle', () => {
     assert.deepEqual(reports, [told(min(0), min(16))]);
   });
 
-  it('is one stretch with the lock that came in the middle of it, from the first input after the unlock', async () => {
+  it('is one stretch with the lock that came in the middle of it, from the first input to the unlock', async () => {
     const { world, tracker, reports } = setup();
     // Untouched since 20 minutes past, noticed at half past.
     world.now = min(30);
     world.idle = 600;
     await tracker.tick();
     tracker.onLock(min(35));
+    assert.equal(tracker.state().since, min(20), 'the lock did not start another');
+    world.now = min(60);
     await tracker.onUnlock(min(60));
-    assert.deepEqual(reports, [], 'the machine has not been touched since the unlock was seen, as far as it has been asked');
 
-    // The next look: the unlock was typed at five seconds ago.
-    world.now = min(60) + 10_000;
-    world.idle = 5;
-    await tracker.tick();
-
-    assert.deepEqual(reports, [told(min(20), min(60) + 5_000)]);
+    assert.deepEqual(reports, [told(min(20), min(60))]);
+    assert.equal(tracker.state().away, false);
   });
 
-  it('is over at the unlock at the earliest, even if the machine says its last input was before that', async () => {
+  it('is over at the unlock, and the input that comes after it begins nothing new', async () => {
     const { world, tracker, reports } = setup();
     // Untouched since 20 minutes past, noticed at half past, and locked at 35.
     world.now = min(30);
     world.idle = 600;
     await tracker.tick();
     tracker.onLock(min(35));
-    // Unlocked with a fingerprint, which is not input: the machine still counts from long before.
+    world.now = min(60);
     await tracker.onUnlock(min(60));
 
+    // The next look: the password was typed five seconds ago.
     world.now = min(60) + 10_000;
-    world.idle = 40;
+    world.idle = 5;
     await tracker.tick();
 
     assert.deepEqual(reports, [told(min(20), min(60))]);
+    assert.equal(tracker.state().away, false);
   });
 
   it('takes an idle time it cannot read, while it is already away, as input: back now', async () => {

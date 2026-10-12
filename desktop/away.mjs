@@ -12,10 +12,13 @@
  *   - the machine having had no input for `away_minutes`, in which case it began at the last
  *     input, `idle time` ago, so nothing has to be watched for in the meantime.
  *
- * It ends when none of them is true any more: at unlock, at wake-up or when the user comes
- * back only if the screen is not still locked, and for being idle at the first input, when
- * it ended at that input. Locking, sleeping, waking and unlocking is one stretch, from the
- * earliest start to the last return, and not three.
+ * It ends at an unlock, whatever else was keeping you away: somebody who has just unlocked the
+ * screen is awake and in their own session, and a wake-up or a switch back that was never
+ * seen must not leave the stretch open for ever. At wake-up, or when the user comes back, it
+ * ends only if nothing else still keeps you away, which in practice is the screen being
+ * locked. Being idle ends at the first input, and it ended at that input. Locking, sleeping,
+ * waking and unlocking is one stretch, from the earliest start to the last return, and not
+ * three.
  *
  * When it ends it is reported if it was at least `away_minutes` long and a focus block was
  * running at the moment it began. A block that was paused, a break, and no block at all are
@@ -93,9 +96,9 @@ export function createAwayTracker({
     returnedAt = null;
   }
 
-  /** One thing that kept you away has stopped, at `at`. If it was the last, the stretch is over. */
-  function clear(name, at) {
-    cause[name] = false;
+  /** Some of what kept you away has stopped, at `at`. If that was the last of it, the stretch is over. */
+  function clear(names, at) {
+    for (const name of names) cause[name] = false;
     returnedAt = returnedAt == null ? at : Math.max(returnedAt, at);
     return isAway() ? Promise.resolve() : finish();
   }
@@ -143,9 +146,13 @@ export function createAwayTracker({
       begin(at);
     },
 
-    /** The screen was unlocked. Resolves once any report has been sent. */
+    /**
+     * The screen was unlocked, which is somebody at the machine, so the end of everything that
+     * kept you away (the machine cannot be asleep, nor another user's session on top of this
+     * one). Resolves once any report has been sent.
+     */
     onUnlock(at = now()) {
-      return clear('locked', at);
+      return clear(['locked', 'suspended', 'switched', 'idle'], at);
     },
 
     /** The system is going to sleep. */
@@ -156,7 +163,7 @@ export function createAwayTracker({
 
     /** The system woke up. It is only the end of the stretch if the screen is not locked as well. */
     onResume(at = now()) {
-      return clear('suspended', at);
+      return clear(['suspended'], at);
     },
 
     /** Another user's session took over (fast user switching on a Mac). */
@@ -165,9 +172,9 @@ export function createAwayTracker({
       begin(at);
     },
 
-    /** This user's session is back. */
+    /** This user's session is back, which it cannot be while the machine sleeps. */
     onBecomeActive(at = now()) {
-      return clear('switched', at);
+      return clear(['switched', 'suspended'], at);
     },
 
     /**
@@ -180,7 +187,7 @@ export function createAwayTracker({
       if (cause.idle) {
         // Input has come in since the stretch began if the machine has been idle for less
         // time than that, and the last input is then where the stretch ended.
-        if (idle < t - stretch.start - SLACK_MS) await clear('idle', t - idle);
+        if (idle < t - stretch.start - SLACK_MS) await clear(['idle'], t - idle);
         return;
       }
       // Already away for some other reason: whatever the idle time is, nothing new has begun.

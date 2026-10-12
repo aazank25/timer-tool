@@ -95,35 +95,74 @@ describe('a time of day in a timezone, as an instant', () => {
 
   it('moves with the clocks of New York when they go forward in March', async () => {
     // The clocks go forward at 02:00 on Sunday the 8th, so the same 17:30 is an hour earlier in UTC.
-    assert.equal(await instant('2026-03-07', '17:30', 'America/New_York'), '2026-03-07T22:30:00.000Z');
-    assert.equal(await instant('2026-03-08', '17:30', 'America/New_York'), '2026-03-08T21:30:00.000Z');
-    assert.equal(await instant('2026-03-09', '17:30', 'America/New_York'), '2026-03-09T21:30:00.000Z');
+    assert.equal(
+      await instant('2026-03-07', '17:30', 'America/New_York'),
+      '2026-03-07T22:30:00.000Z',
+    );
+    assert.equal(
+      await instant('2026-03-08', '17:30', 'America/New_York'),
+      '2026-03-08T21:30:00.000Z',
+    );
+    assert.equal(
+      await instant('2026-03-09', '17:30', 'America/New_York'),
+      '2026-03-09T21:30:00.000Z',
+    );
     // Either side of the change itself.
-    assert.equal(await instant('2026-03-08', '01:59', 'America/New_York'), '2026-03-08T06:59:00.000Z');
-    assert.equal(await instant('2026-03-08', '03:00', 'America/New_York'), '2026-03-08T07:00:00.000Z');
+    assert.equal(
+      await instant('2026-03-08', '01:59', 'America/New_York'),
+      '2026-03-08T06:59:00.000Z',
+    );
+    assert.equal(
+      await instant('2026-03-08', '03:00', 'America/New_York'),
+      '2026-03-08T07:00:00.000Z',
+    );
   });
 
   it('moves with the clocks of New York when they go back in November', async () => {
-    assert.equal(await instant('2026-10-31', '17:30', 'America/New_York'), '2026-10-31T21:30:00.000Z');
-    assert.equal(await instant('2026-11-01', '17:30', 'America/New_York'), '2026-11-01T22:30:00.000Z');
-    assert.equal(await instant('2026-11-01', '02:00', 'America/New_York'), '2026-11-01T07:00:00.000Z');
+    assert.equal(
+      await instant('2026-10-31', '17:30', 'America/New_York'),
+      '2026-10-31T21:30:00.000Z',
+    );
+    assert.equal(
+      await instant('2026-11-01', '17:30', 'America/New_York'),
+      '2026-11-01T22:30:00.000Z',
+    );
+    assert.equal(
+      await instant('2026-11-01', '02:00', 'America/New_York'),
+      '2026-11-01T07:00:00.000Z',
+    );
   });
 
   it('takes a time that the clocks skip as just after the gap', async () => {
     // 02:30 on the 8th of March does not exist in New York: it is read with the old offset.
-    assert.equal(await instant('2026-03-08', '02:30', 'America/New_York'), '2026-03-08T07:30:00.000Z');
-    assert.equal(await instant('2026-03-08', '02:00', 'America/New_York'), '2026-03-08T07:00:00.000Z');
+    assert.equal(
+      await instant('2026-03-08', '02:30', 'America/New_York'),
+      '2026-03-08T07:30:00.000Z',
+    );
+    assert.equal(
+      await instant('2026-03-08', '02:00', 'America/New_York'),
+      '2026-03-08T07:00:00.000Z',
+    );
   });
 
   it('takes a time that happens twice as the first time it happens', async () => {
     // 01:30 on the 1st of November is on the clock at 05:30 UTC and again at 06:30 UTC.
-    assert.equal(await instant('2026-11-01', '01:30', 'America/New_York'), '2026-11-01T05:30:00.000Z');
+    assert.equal(
+      await instant('2026-11-01', '01:30', 'America/New_York'),
+      '2026-11-01T05:30:00.000Z',
+    );
   });
 
   it('follows the southern hemisphere, where the clocks change the other way round', async () => {
     // Sydney goes forward at 02:00 on Sunday the 4th of October.
-    assert.equal(await instant('2026-10-03', '17:30', 'Australia/Sydney'), '2026-10-03T07:30:00.000Z');
-    assert.equal(await instant('2026-10-04', '17:30', 'Australia/Sydney'), '2026-10-04T06:30:00.000Z');
+    assert.equal(
+      await instant('2026-10-03', '17:30', 'Australia/Sydney'),
+      '2026-10-03T07:30:00.000Z',
+    );
+    assert.equal(
+      await instant('2026-10-04', '17:30', 'Australia/Sydney'),
+      '2026-10-04T06:30:00.000Z',
+    );
   });
 });
 
@@ -156,7 +195,7 @@ describe('the end-of-day reminder', () => {
     // The time it fell due, which stays the same however late it is read.
     assert.equal(prompt?.createdAt, at('17:30'));
     assert.deepEqual(prompt?.actions, [
-      { id: 'wrap-up', label: 'Wrap up', primary: true, open: '/wrap-up' },
+      { id: 'open', label: 'Wrap up', primary: true, open: '/wrap-up' },
       { id: 'dismiss', label: 'Not today' },
     ]);
 
@@ -285,7 +324,7 @@ describe('the end-of-day reminder', () => {
     freeze(at('18:00'));
     await logged(at('10:00'), 60);
 
-    assert.equal((await act(`wrapup:${DAY}`, 'wrap-up')).status, 400);
+    assert.equal((await act(`wrapup:${DAY}`, 'open')).status, 400);
     assert.equal((await act(`wrapup:${DAY}`, 'bogus')).status, 400);
     assert.equal((await act('wrapup:2026-10-11', 'dismiss')).status, 409);
     assert.equal((await wrapUps()).length, 1);
@@ -307,6 +346,23 @@ describe('the end-of-day reminder', () => {
 
     // At 04:00 it is Tuesday, which has no blocks on it and is not yet time to wrap it up.
     goTo(on('2026-10-13', '04:00'));
+    assert.deepEqual(await wrapUps(), []);
+  });
+
+  it('takes the day it belongs to from the focus day, so the small hours of a work day are its own and those of a rest day are not', async () => {
+    // Friday night, past midnight: it is Saturday on the calendar and still Friday's day.
+    freeze(on('2026-10-16', '20:00'));
+    await logged(on('2026-10-16', '19:00'), 60);
+    goTo(on('2026-10-17', '01:00'));
+    assert.deepEqual(
+      (await wrapUps()).map((p) => p.id),
+      ['wrapup:2026-10-16'],
+    );
+
+    // Sunday night, past midnight: a Monday on the calendar and still the rest day before it.
+    freeze(on('2026-10-18', '20:00'));
+    await logged(on('2026-10-18', '19:00'), 60);
+    goTo(on('2026-10-19', '01:00'));
     assert.deepEqual(await wrapUps(), []);
   });
 
@@ -407,7 +463,7 @@ describe('the review-of-last-week reminder', () => {
       body: `The week of ${dayText(LAST)}, with 2 h of focus.`,
       createdAt: at('09:00'),
       actions: [
-        { id: 'review', label: 'Review', primary: true, open: `/wrap-up/week?week=${LAST}` },
+        { id: 'open', label: 'Review', primary: true, open: `/wrap-up/week?week=${LAST}` },
         { id: 'dismiss', label: 'Not this week' },
       ],
     });
@@ -504,7 +560,7 @@ describe('the review-of-last-week reminder', () => {
     freeze(at('10:00'));
     await lastWeekBlock();
 
-    assert.equal((await act(`week-review:${LAST}`, 'review')).status, 400);
+    assert.equal((await act(`week-review:${LAST}`, 'open')).status, 400);
     assert.equal((await act('week-review:2026-09-28', 'dismiss')).status, 409);
     assert.equal((await reviews()).length, 1);
   });
@@ -589,7 +645,7 @@ describe('the nothing-on-the-clock nudge', () => {
     assert.match(prompt?.body ?? '', /^Since .*9:00.*\. Start something\?$/);
     assert.equal(prompt?.createdAt, at('09:15'));
     assert.deepEqual(prompt?.actions, [
-      { id: 'start', label: 'Start a block', primary: true, open: '/' },
+      { id: 'open', label: 'Start a block', primary: true, open: '/' },
       { id: 'dismiss', label: 'Not now' },
     ]);
     // The same list over HTTP.
@@ -790,6 +846,19 @@ describe('the nothing-on-the-clock nudge', () => {
     assert.equal(second?.createdAt, at('09:35'));
   });
 
+  it('is not moved by a dismissal on another day, and starts again from work_start', async () => {
+    freeze(on('2026-10-09', '15:00'));
+    const [yesterdays] = await nudges();
+    assert.ok(yesterdays, 'there was a nudge on the Friday');
+    assert.equal((await act(yesterdays.id, 'dismiss')).status, 200);
+
+    freeze(at('09:15'));
+    const [prompt] = await nudges();
+
+    assert.equal(prompt?.id, `idle:${at('09:00')}`);
+    assert.equal(prompt?.createdAt, at('09:15'));
+  });
+
   it('asks again after every dismissal, as often as it is dismissed', async () => {
     freeze(at('09:15'));
     const seen: string[] = [];
@@ -829,6 +898,53 @@ describe('the nothing-on-the-clock nudge', () => {
 
     setServerStartedAt(0);
     assert.equal((await nudges()).length, 1);
+  });
+
+  it("is the same prompt every time it is listed while the start is the process's own, however late the uptime is read", async () => {
+    const { setServerStartedAt } = await remindersMod();
+    setServerStartedAt(null);
+    // A server that began 100 seconds before the instant the clock is frozen at. Its uptime is
+    // read a different few milliseconds late each time, as it is once a request has been through
+    // the providers before this one, which put the start somewhere new on every poll.
+    let reads = 0;
+    const uptime = mock.method(process, 'uptime', () => 100 + (reads++ % 9) / 1000);
+    try {
+      await set({ nudge_minutes: 1 });
+      freeze(at('14:00'));
+      const seen = new Set<string>();
+      const due = new Set<string>();
+      for (let n = 0; n < 40; n++) {
+        const [prompt, ...others] = await nudges();
+        assert.ok(prompt, 'it has been quiet for 100 seconds, which is more than the minute');
+        assert.equal(others.length, 0);
+        seen.add(prompt.id);
+        due.add(prompt.createdAt);
+      }
+      assert.equal(seen.size, 1, [...seen].join(' '));
+      assert.equal(due.size, 1);
+      // Answering it by the id it was listed with works, which it did not when the id moved.
+      assert.equal((await act([...seen][0]!, 'dismiss')).status, 200);
+      assert.deepEqual(await nudges(), []);
+    } finally {
+      uptime.mock.restore();
+    }
+  });
+
+  it('takes a clock that has been moved as a new start, so a start that is its own never begins overdue', async () => {
+    const { setServerStartedAt } = await remindersMod();
+    setServerStartedAt(null);
+    const uptime = mock.method(process, 'uptime', () => 100);
+    try {
+      await set({ nudge_minutes: 1 });
+      freeze(at('14:00'));
+      assert.equal((await nudges())[0]?.id, `idle:${at('13:58:20')}`);
+
+      // Two hours on by the clock and no longer by the uptime: not two hours of quiet.
+      goTo(at('16:00'));
+      assert.equal((await nudges())[0]?.id, `idle:${at('15:58:20')}`);
+    } finally {
+      uptime.mock.restore();
+    }
   });
 
   it('takes the latest of the four, whichever that is', async () => {
@@ -872,7 +988,7 @@ describe('the nothing-on-the-clock nudge', () => {
     freeze(at('09:15'));
     const [prompt] = await nudges();
 
-    assert.equal((await act(prompt!.id, 'start')).status, 400);
+    assert.equal((await act(prompt!.id, 'open')).status, 400);
     assert.equal((await act(prompt!.id, 'bogus')).status, 400);
     assert.equal((await act(`idle:${at('08:00')}`, 'dismiss')).status, 409);
     assert.equal((await nudges()).length, 1);
@@ -900,7 +1016,11 @@ describe('the nothing-on-the-clock nudge', () => {
     await set({ timezone: 'Pacific/Auckland', work_days: '1' });
     // 09:15 on Tuesday the 13th in Auckland (UTC+13 in October) is 20:15 UTC on the Monday.
     freeze(at('20:14:59'));
-    assert.deepEqual(await nudges(), [], 'Monday here, but a Tuesday there, which is not a work day');
+    assert.deepEqual(
+      await nudges(),
+      [],
+      'Monday here, but a Tuesday there, which is not a work day',
+    );
     await set({ work_days: '2' });
     goTo(at('20:15'));
     assert.deepEqual(

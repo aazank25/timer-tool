@@ -550,7 +550,9 @@ is read-only and cheap, because it runs on every poll of every window.
   another `nudge_minutes` on, and the desktop app, which notifies once per id, tells
   again. `createdAt` is the start plus `nudge_minutes`. **Start a block** opens `/`
   (the desktop app opens quick switch instead of the window) and **Not now** dismisses.
-  The server's start is the process's uptime counted back from now, and
+  The server's start is the process's uptime counted back from now, held to one
+  instant (a new reading only replaces the last when it is more than a second away, since
+  the id is the start to the millisecond and the two clocks are read a little apart), and
   `setServerStartedAt` replaces it, which is what the tests do. A meeting that has
   just ended does not restart the quiet (only the four moments above do), so the nudge
   can come the moment a long meeting is over.
@@ -577,10 +579,12 @@ nothing from Electron: what they need of it is handed in, so `desktop/test/` (ru
   system sleeping, another user taking over (`user-did-resign-active`), or the
   machine having had no input for `away_minutes`, polled every 15 s, in which case it
   began at the last input (`now − idle time`), so nothing is watched in between. It
-  ends when none of those is true any more: at unlock, and at wake-up or the user
-  coming back only if the screen is not still locked; for idle, at the first input,
-  which is where it ended. Lock, sleep, wake and unlock is one stretch, from the
-  earliest start to the last return. When it ends it is reported (`POST
+  ends at an unlock, whatever else was keeping you away (somebody who has just unlocked
+  the screen is awake and in their own session, and a wake-up that was never seen must
+  not leave the stretch open for ever), and at wake-up or the user coming back only if
+  nothing else still keeps you away, which is the screen being locked; for idle, at the
+  first input, which is where it ended. Lock, sleep, wake and unlock is one stretch,
+  from the earliest start to the last return. When it ends it is reported (`POST
   /api/sessions/<id>/away`) if it was at least `away_minutes` and a focus block was
   running as it began (read from the menu bar's own poll of the live block); a paused
   block, a break or no block is not reported. The end is clamped to now. A refused
@@ -608,9 +612,12 @@ nothing from Electron: what they need of it is handed in, so `desktop/test/` (ru
   reason*, each posting `{ reason }`; on a break it is one item that logs at once, as in
   the window.
 - **Test hooks**, only with `FOCUSDESK_TEST=1`: `globalThis.__focusdesk` has the
-  tracker's state and events at chosen times (`away`), the latest prompts and the ids
-  notified about (`attention`), and the menu as plain data with a way to press an item
-  by its labels (`menuTemplate`, `clickMenu`), beside what quick switch put there.
+  tracker's state and events at chosen times, and the clock and idle time it goes by
+  (`away`), the latest prompts and the ids notified about (`attention`), the menu as
+  plain data with a way to press an item by its labels (`menuTemplate`, `clickMenu`),
+  the words of the menu-bar title and tooltip, which only a Mac shows (`trayText`), and
+  where the main window is (`showWindow`, `windowUrl`, `windowVisible`), beside what
+  quick switch put there.
 
 ---
 
