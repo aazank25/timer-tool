@@ -11,7 +11,7 @@ import {
   shell,
   dialog,
 } from 'electron';
-import { createPalette } from './palette.mjs';
+import { createPalette, isLocal } from './palette.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const isMac = process.platform === 'darwin';
@@ -76,7 +76,7 @@ function createWindow() {
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith(server.url)) {
+    if (!isLocal(url, server.url)) {
       event.preventDefault();
       void shell.openExternal(url);
     }

@@ -9,6 +9,9 @@ contextBridge.exposeInMainWorld('focusdesk', {
 
   /** Run `callback` each time the quick-switch window is shown. Returns what stops it. */
   onPaletteShow: (callback) => {
+    // Not a function, so there is nothing to run: it would otherwise throw from inside the
+    // listener on every show.
+    if (typeof callback !== 'function') return () => {};
     // The page is given no event: it carries the sender, which is not the page's to have.
     const listener = () => callback();
     ipcRenderer.on('palette:show', listener);

@@ -11,6 +11,21 @@ const HEIGHT = 420;
 const TOP = 0.25;
 
 /**
+ * Whether `url` is a page of the local app: the same origin as `serverUrl`, which is scheme, host
+ * and port together. Compared as parsed addresses and never as text, because text that begins with
+ * the app's address need not be on it: 'http://127.0.0.1:5000@elsewhere.example/' is the host
+ * elsewhere.example, logged in as a user named 127.0.0.1:5000, and 'http://127.0.0.1:50001/' is
+ * another port. Anything that does not parse is not local.
+ */
+export function isLocal(url, serverUrl) {
+  try {
+    return new URL(url).origin === new URL(serverUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The quick-switch box: a small frameless window that is raised over whatever app you are in by a
  * shortcut, takes a few letters, and goes away again. It is made the first time it is wanted and
  * then only hidden and shown, so it appears at once the second time and keeps no state of its own:
@@ -77,7 +92,7 @@ export function createPalette({ serverUrl, backgroundColor, onClose = () => {} }
     // with the bridge to this app still attached.
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', (event, url) => {
-      if (!url.startsWith(serverUrl)) event.preventDefault();
+      if (!isLocal(url, serverUrl)) event.preventDefault();
     });
     win.on('closed', () => {
       win = null;

@@ -334,9 +334,11 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   default_timer_mode: 'stopwatch',
   /**
    * The shortcut, in any app, that opens the quick-switch box. An Electron accelerator in
-   * the spelling lib/accelerator.ts stores it in; '' turns it off.
+   * the spelling lib/accelerator.ts stores it in; '' turns it off. Not Command+Shift+K:
+   * that is Browse DMs in Slack and Delete Line in VS Code, and a global shortcut takes
+   * the key from every app.
    */
-  quick_switch_hotkey: 'CommandOrControl+Shift+K',
+  quick_switch_hotkey: 'CommandOrControl+Alt+K',
   /** Day rolls over at this local hour, so a 1am block counts as the day before. */
   day_start_hour: '4',
   /** When the end-of-day wrap-up is due, as HH:MM on a 24-hour clock. '' means never. */

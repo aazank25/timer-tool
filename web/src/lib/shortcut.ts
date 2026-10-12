@@ -35,9 +35,9 @@ const OTHER_NAMES: Record<string, string> = {
 };
 
 /**
- * An Electron accelerator as it is written on the keys: CommandOrControl+Shift+K is ⌘⇧K. That is
+ * An Electron accelerator as it is written on the keys: CommandOrControl+Alt+K is ⌘⌥K. That is
  * how FocusDesk writes shortcuts everywhere (it is a Mac app first), so it is how they are shown
- * here; on another keyboard, which has no ⌘, the keys are named after it, as in ⌘⇧K (Ctrl+Shift+K).
+ * here; on another keyboard, which has no ⌘, the keys are named after it, as in ⌘⌥K (Ctrl+Alt+K).
  * Display only: what is stored and registered is the accelerator.
  */
 export function formatShortcut(accelerator: string): string {

@@ -1,12 +1,35 @@
 import { useEffect, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { api, reason } from '../../api';
+import { api, reason, type Settings } from '../../api';
 import { keys, useSettings } from '../../hooks';
 import { formatShortcut } from '../../lib/shortcut';
 import { Button, Card, Field, inputClass } from '../ui';
 
-/** What the shortcut is until it is changed, and what a switched-off one comes back as. */
-const DEFAULT_SHORTCUT = 'CommandOrControl+Shift+K';
+/**
+ * What the shortcut is until it is changed. Not Command+Shift+K: that is Browse DMs in Slack and
+ * Delete Line in VS Code, and a global shortcut takes the key from every app.
+ */
+const DEFAULT_SHORTCUT = 'CommandOrControl+Alt+K';
+
+/** Where the last shortcut that was saved is kept, so that Off and then On brings it back. */
+const REMEMBERED = 'focusdesk.quickSwitchShortcut';
+
+function remembered(): string | null {
+  try {
+    return localStorage.getItem(REMEMBERED) || null;
+  } catch {
+    // Storage is blocked: the card's own draft still has it for as long as the card is open.
+    return null;
+  }
+}
+
+function remember(shortcut: string) {
+  try {
+    localStorage.setItem(REMEMBERED, shortcut);
+  } catch {
+    // As above.
+  }
+}
 
 type Status = { tone: 'good' | 'bad' | 'plain'; text: string };
 
@@ -21,17 +44,37 @@ export function QuickSwitchSettings() {
   // Nothing can be typed until what is saved has arrived: it would be written over the draft.
   const loading = saved === undefined;
   const [on, setOn] = useState(true);
-  const [text, setText] = useState(DEFAULT_SHORTCUT);
+  // Starts from the last shortcut that was saved, so a card that opens with the shortcut off
+  // still has something to turn on with.
+  const [text, setText] = useState(() => remembered() ?? DEFAULT_SHORTCUT);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<Status | null>(null);
 
-  // The draft follows what is saved, when that arrives or is changed from elsewhere.
+  // The draft follows what is saved, when that arrives or is changed from elsewhere. When the
+  // shortcut is off there is nothing saved to follow, and the draft stays the last one there was.
   useEffect(() => {
     if (saved === undefined) return;
     setOn(saved !== '');
-    setText(saved || DEFAULT_SHORTCUT);
+    if (saved) {
+      remember(saved);
+      setText(saved);
+    }
   }, [saved]);
+
+  /** Take what the server has just stored as the saved shortcut, here and in the shared cache. */
+  function adopt(next: Settings) {
+    // Into the shared cache, so every card on the page reads the shortcut as it is now saved.
+    // The page's own Save sends only what was typed there, so this cannot be undone by it, and
+    // its unsaved edits stay as they are.
+    qc.setQueryData(keys.settings, next);
+    const shortcut = next.quick_switch_hotkey;
+    setOn(shortcut !== '');
+    if (shortcut) {
+      remember(shortcut);
+      setText(shortcut);
+    }
+  }
 
   /**
    * Ask the desktop app to read the setting again and register it, and say what came of it.
@@ -49,14 +92,27 @@ export function QuickSwitchSettings() {
         setStatus(
           active ? { tone: 'good', text: `Active: ${active}` } : { tone: 'plain', text: 'Turned off.' },
         );
-      } else {
-        setStatus({
-          tone: 'bad',
-          text: `${result.error ?? 'It could not be registered.'}${
-            active ? ` Still active: ${active}.` : ''
-          }`,
-        });
+        return;
       }
+      const why = result.error ?? 'It could not be registered.';
+      if (!afterSave) {
+        // Only looking: what is saved stays, because the app that holds it may let go of it.
+        setStatus({ tone: 'bad', text: `${why}${active ? ` Still active: ${active}.` : ''}` });
+        return;
+      }
+      // Just saved, and the app would not have it. What is saved is what the next start registers,
+      // so it goes back to the shortcut that works: left as it is, a restart would find one that
+      // cannot be had and end up with none.
+      let outcome: string;
+      try {
+        adopt(await api.updateSettings({ quick_switch_hotkey: result.accelerator ?? '' }));
+        outcome = active
+          ? `Not saved: ${active} is still your shortcut.`
+          : 'Not saved: quick switch is off until you save a shortcut that works.';
+      } catch (err) {
+        outcome = `It could not be put back either (${reason(err, 'the server did not answer')}), so the saved shortcut may not be the one that works.`;
+      }
+      setStatus({ tone: 'bad', text: `${why} ${outcome}` });
     } catch (err) {
       setStatus({ tone: 'bad', text: reason(err, 'The app did not answer.') });
     }
@@ -73,12 +129,7 @@ export function QuickSwitchSettings() {
     setError(null);
     setStatus(null);
     try {
-      const next = await api.updateSettings({ quick_switch_hotkey: on ? text.trim() : '' });
-      // The Timer card saves every setting it loaded, this one included, so it has to be handed
-      // the new value or its next Save would quietly put the old shortcut back. (That also
-      // resets whatever it had typed and not yet saved, which is the lesser harm.)
-      qc.setQueryData(keys.settings, next);
-      setText(next.quick_switch_hotkey || DEFAULT_SHORTCUT);
+      adopt(await api.updateSettings({ quick_switch_hotkey: on ? text.trim() : '' }));
       await activate(true);
     } catch (err) {
       setError(reason(err, 'Could not save the shortcut'));
@@ -100,7 +151,11 @@ export function QuickSwitchSettings() {
               variant={on ? 'primary' : 'default'}
               aria-pressed={on}
               disabled={loading}
-              onClick={() => setOn(true)}
+              onClick={() => {
+                setOn(true);
+                // Back to the last shortcut, unless the box was emptied while it was off.
+                setText((current) => (current.trim() ? current : (remembered() ?? DEFAULT_SHORTCUT)));
+              }}
             >
               On
             </Button>
@@ -118,7 +173,7 @@ export function QuickSwitchSettings() {
 
         <Field
           label="Shortcut"
-          hint="One or more modifiers and one key, joined with +. Modifiers: CommandOrControl, Command, Control, Alt, Option, Shift, Super. Keys: A–Z, 0–9, F1–F24, Space, Tab, Enter, Escape, Backspace, Delete, Insert, Up, Down, Left, Right, Home, End, PageUp, PageDown, Plus. For example CommandOrControl+Shift+K, Control+Alt+Space or Command+Shift+F5."
+          hint="One key and one or more modifiers, joined with +. Modifiers: CommandOrControl, Command, Control, Super, Alt, Option, Shift. At least one of the first four is needed, because Shift or Alt alone would take ordinary typing from every app; F1–F24 are the exception and can take any modifier. Keys: A–Z, 0–9, F1–F24, Space, Tab, Enter, Escape, Backspace, Delete, Insert, Up, Down, Left, Right, Home, End, PageUp, PageDown, Plus. For example CommandOrControl+Alt+K, Control+Alt+Space or Shift+F5. CommandOrControl+Shift+F and CommandOrControl+Shift+Space are FocusDesk's own."
         >
           <input
             className={inputClass}

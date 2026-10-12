@@ -358,11 +358,11 @@ blank clears it.
 
 **Quick switch — one box, any app.** Done.
 
-A Mac-wide shortcut (⌘⇧K by default) pops a Spotlight-like box over whatever app
+A Mac-wide shortcut (⌘⌥K by default) pops a Spotlight-like box over whatever app
 you are in. You type a few letters of a task or a saved timer and press Enter: the
-block on the clock is finished (rated 1–5 if you want) and the new one starts, the
-box disappears, and you are back where you were. Escape cancels. It works whenever
-FocusDesk is running, with its window open or not.
+block on the clock is finished (rated 1–5 if you want, unless it was a break) and
+the new one starts, the box disappears, and you are back where you were. Escape
+cancels. It works whenever FocusDesk is running, with its window open or not.
 
 - **One request, all or nothing.** `POST /api/sessions/switch` takes
   `{ start, rating? }`, where `start` is exactly the body that starting a block
@@ -375,47 +375,95 @@ FocusDesk is running, with its window open or not.
   with it, so the block that was on the clock is left exactly as it was, plan item
   and all. Two calls from the client could not promise that: a refused second one
   would leave you with nothing running.
-- **The shortcut is a setting.** `quick_switch_hotkey`, `CommandOrControl+Shift+K`
-  by default and empty for off. It is validated strictly, because Electron is not:
-  it drops a key name it does not know and registers what is left (`Foo+A` becomes
-  plain A, a key taken from every app), and it cannot say that another app already
-  owns a combination. `normalizeAccelerator` (`server/src/lib/accelerator.ts`)
-  accepts only the names Electron documents, with at least one modifier and exactly
-  one key. Two names for one key count as a repeat, and so does `CommandOrControl`
-  beside `Command` or `Control`, which is the same key on one platform. What it
-  returns is the one spelling that is saved. The desktop app imports the very same
-  function through the server bundle, so what the setting accepts and what the app
-  will register cannot drift apart.
+- **The shortcut is a setting.** `quick_switch_hotkey`, `CommandOrControl+Alt+K`
+  by default and empty for off. (Not `Shift+K`: ⌘⇧K is Browse DMs in Slack and Delete
+  Line in VS Code, and a global shortcut takes the key from every app.) It is
+  validated strictly, because Electron is not: it drops a key name it does not know
+  and registers what is left (`Foo+A` becomes plain A, a key taken from every app),
+  and it cannot say that another app already owns a combination.
+  `normalizeAccelerator` (`server/src/lib/accelerator.ts`) accepts a deliberate
+  subset of what Electron accepts, not everything it documents: A–Z, 0–9, F1–F24 and
+  Space, Tab, Enter, Escape, Backspace, Delete, Insert, the arrows, Home, End, PageUp,
+  PageDown and Plus. Refused on purpose are punctuation keys, the lock keys, the
+  numeric keypad, media and volume keys, PrintScreen and AltGr. It takes printable
+  ASCII only (`toLowerCase()` turns the Kelvin sign U+212A into a k, and `trim()`
+  takes no-break and em spaces off the ends, so text that only looks like a shortcut
+  would read as one), exactly one key, and a modifier that makes the key press a
+  command: one of Command, Control, CommandOrControl or Super. Shift and Alt (Option)
+  alone are refused, because Shift+A would take every capital A from every app and
+  on a Mac Option+A is å. F1–F24 type nothing, so they may take any modifier.
+  Two names for one key count as a repeat, and so does `CommandOrControl` beside
+  `Command` or `Control`, which is the same key on one platform. What it returns is
+  the one spelling that is saved. The desktop app imports the very same function
+  through the server bundle, so what the setting accepts and what the app will
+  register cannot drift apart.
+- **FocusDesk's own two shortcuts are refused.** ⌘⇧F (show the window) and ⌘⇧Space
+  (pause or resume) are registered first, and Electron answers false to a second
+  registration of the same keys. If the setting were saved first and refused after,
+  the next start would find a shortcut it cannot register and leave none. So the
+  settings route refuses them with a 400 that says what the shortcut is already for.
+  `usedByApp` compares the keys pressed, not the text, as Electron does:
+  `Shift+CommandOrControl+F` is the same shortcut, and so is `Control+Shift+F`
+  wherever `CommandOrControl` means Control (`Command+Shift+F` on a Mac). The list,
+  `APP_SHORTCUTS`, is checked by a test against what `desktop/main.mjs` registers.
 - **The box is a page.** `/palette` renders the palette and nothing else: no rail,
   no clock bar. It lists open tasks and saved timers together, filtered on title and
   project without regard to case, a title that starts with what was typed first,
-  then a word that does, then anywhere. A saved timer the history made for
+  then a word that does, then anywhere. With nothing typed the saved timers come
+  first, then the tasks: the timers are the fast path, and a long list of tasks
+  cannot push them past the 50 rows shown. A saved timer the history made for
   something that is already listed as a task is left out, because it would start
   the same work without the link to the task; a pinned one stays. The last row,
-  once something is typed, starts a new block with that text and no project. With a
-  block on the clock, picking asks how it went first (1–5, or Enter to skip, Escape
-  to go back), and a refusal from the server is shown in the box with everything
-  kept. In a browser, closing goes back to the app.
+  once something is typed, starts a new block with that text and no project, whether
+  or not anything else fits. An Enter pressed before the lists have arrived is kept
+  only when something is typed, and acts on the match once they do; on an empty box
+  it does nothing. With a focus block on the clock, picking asks how it went first
+  (1–5, or Enter to skip, Escape to go back); a break is just stopped. The step is
+  left alone for its first 300 ms, and a click the system counts as a repeat is not
+  an answer either, because the second click of a double-click on a row lands on a
+  rating button that was not there for the first. Keys are not clicks and are
+  unaffected. A refusal from the server is shown in the box with everything kept,
+  worded for a person (a 500 or a dead connection says "Couldn't switch — the server
+  had a problem", the server's own words are kept for a 4xx). If the box was put
+  away while the request was on its way, the refusal comes back into a page nobody
+  is looking at, and the next show opens on it, saying which switch it was about.
+  In a browser, closing goes back to the app.
 - **The window is a panel.** `desktop/palette.mjs` makes it once, the first time it
   is wanted: frameless, 640×420, on top, a quarter of the way down the display the
   pointer is on. On a Mac it is an `NSPanel`, which can take the keyboard without
   making FocusDesk the active app, so hiding it leaves you in the app you came from
   with nothing to hand back. It is shown with `showInactive()` and then focused,
   because on a Mac `show()` activates the app as well. It hides itself when it
-  loses focus.
+  loses focus. Both windows may only navigate within the app's own origin, compared
+  as parsed addresses and not as text: `http://127.0.0.1:PORT@elsewhere.example/`
+  begins with the app's address and is another host, and the bridge would go along
+  with the window if it were followed. (Anything else is refused in the box, and
+  handed to the real browser from the main window.)
 - **Three calls cross the bridge.** `desktop/preload.cjs` puts
   `window.focusdesk = { closePalette(), onPaletteShow(callback), reloadHotkey() }`
   on the main window and the palette, and nothing else of Electron or Node. The
   window is hidden, not closed, so the page starts itself over each time it is shown.
-  `reloadHotkey()` reads the setting again and answers `{ ok, accelerator, error? }`:
-  the shortcut registered afterwards, and when a new one could not be had, why. The
-  one that was working is kept.
+  `onPaletteShow` ignores anything that is not a function. `reloadHotkey()` reads the
+  setting again and answers `{ ok, accelerator, error? }`: the shortcut registered
+  afterwards, and when a new one could not be had, why. The one that was working is
+  kept, and it is kept across restarts too: when Settings saves a shortcut and
+  `reloadHotkey()` says no, the card puts the setting back to `accelerator` (or to
+  empty, when nothing was registered) and says so, so what is saved is always a
+  shortcut that was registered and a restart never finds one it cannot have.
+  Merely opening the card while another app holds the shortcut does not rewrite
+  what is saved: the other app may let go of it.
+- **Off remembers.** Turning the shortcut off and saving keeps the last one in the
+  card's draft and in `localStorage`, and turning it on again starts from that, not
+  from the default.
 
 > **Known limit:** macOS lets an app register a combination another app owns
 > without saying so. FocusDesk cannot detect it, which is why Settings shows the
 > shortcut that is registered, not just the one that was typed, and why a refusal
 > names the reason. If pressing it does nothing, pick another. As with a pause from
 > the menu bar, a main window that is open reads the new block on its next poll.
+> `localStorage` belongs to one origin and the desktop app serves on a different port
+> at every launch, so what Off remembers is kept for as long as the app runs, and a
+> restart falls back to the default (as the theme choice does).
 
 **Prompts — "needs your attention".** Done on the server and in the web app; the
 desktop app's end of it (reporting away time, notifications, nudges) follows.
@@ -560,7 +608,7 @@ loopback port and points a window at it.
 - **Closing the window parks the app in the menu bar** and the block keeps
   running; quitting is explicit.
 - **Global hotkeys:** Cmd+Shift+F to show, Cmd+Shift+Space to pause/resume, and
-  Cmd+Shift+K for quick switch (see section 2).
+  Cmd+Option+K for quick switch (see section 2).
 - **Launch at login**, off by default, toggled from the menu bar.
 - **Data in `~/Library/Application Support/FocusDesk/data`**, so reinstalling
   or rebuilding never touches your history.
