@@ -117,20 +117,45 @@ that URL and FocusDesk syncs it — no cloud project, no consent screen, no writ
 access. Recurring meetings are expanded (`RRULE`), cancelled instances honoured
 (`EXDATE`), and moved instances respected.
 
-- Attribute a meeting to a project once and **later instances of the same
-  meeting inherit it** on the next sync; a hand-made attribution always beats
-  an inherited guess.
+- Attribute a meeting to a project once and **instances of it that turn up in a
+  later sync inherit it**. Only a new row inherits, and a row that is in the
+  calendar already keeps whatever project it has, whoever gave it: a sync never
+  changes the project of a row that exists, a project taken off by hand included.
+  A new row looks first at its own series (the same UID in the same feed) and
+  then at a meeting of exactly the same title in the same feed, never in another
+  calendar; where they differ the latest one counts.
 - "Log as time spent" turns a meeting into a logged block, linked to it, so the
-  meeting shows what was logged on it and a second click cannot log it again.
+  meeting shows what was logged on it. A meeting is never logged twice: one that
+  has time logged on it already (by a block that was not thrown away) is refused
+  with a 409, *That meeting is already logged*, by `POST /api/sessions/manual`, and
+  the prompt is not offered for it and is a 409 if it is answered anyway.
+  **Known limitation:** a meeting that is moved to another time after it was handled
+  is a new one as far as the calendar can tell (an event's id has its start in it),
+  and so is everything a feed gives again after it was removed and added back, and
+  either can be logged a second time.
 - "Add to plan" turns a meeting into a plan item.
 - **A sync never undoes what you did by hand.** It upserts what the feed has and
   deletes only the window's rows the feed no longer has (it used to clear the whole
   window first, which wiped a meeting's project on every sync).
+- **A feed that is not a calendar is not read as one.** A body that does not hold
+  `BEGIN:VCALENDAR` and `END:VCALENDAR` (an error page that came back as a 200, an
+  empty answer, a download that stopped short) is a failed read: an error result
+  for that feed, and nothing written or deleted. A calendar that is valid but has no
+  meetings in the window, where the feed had some, keeps what it had and says so in
+  the log.
+- **A feed that is removed, switched off or given another address while it is being
+  read writes nothing** (the check is made in the write's own transaction).
 - **The feed is read in the background** — soon after start-up, then every 15
   minutes while a feed is switched on (`FOCUSDESK_CALENDAR_SYNC_MS`, 0 for off) —
-  and syncs run one at a time, whoever asks.
+  and syncs run one at a time, whoever asks. Closing the server cuts a read that is
+  under way short and waits for it, so nothing is written once `close()` has
+  returned, and the timer never keeps the process alive.
 - Feed URLs are bearer secrets: stored locally, never returned to the browser
-  (the UI sees only a label and a hostname).
+  (the UI sees only a label and a hostname). An address with a user name or
+  password in it is refused (400) when a feed is added or changed, and an address
+  is never put in a sync result or a log line: a feed is named by its label, and
+  any address in an error message is taken out of it. `webcal://` is read as
+  `https://`.
 
 > **Known limit:** a published ICS feed can lag the real calendar — Google in
 > particular refreshes the secret address lazily, sometimes by hours. Fine for
@@ -471,39 +496,75 @@ desktop app's end of it (reporting away time, notifications, nudges) follows.
 One list of questions the app has, served as `GET /api/prompts` and answered with
 `POST /api/prompts/act`. A prompt is `{ id, kind, title, body, createdAt, actions }`,
 oldest first by `createdAt`; an action is `{ id, label, primary?, open? }`, where
-`open` is a client route (`/?finish=1`) that the client goes to itself and never
-posts. A prompt that no longer applies is a 409 (*That prompt is no longer
-current*), an action it does not offer a 400. Each kind is a provider
-(`{ kind, list(now), act(id, action, now) }`) registered in `lib/prompts.ts`, so
-an end-of-day wrap-up or a weekly review is one more provider and nothing else.
-Prompts are worked out from the data as it stands, so they go away by themselves;
-what was dismissed is written to `prompt_state`, an answer runs in one
-transaction, and a provider that fails does not hide the others.
+`open` is a client route (`/?finish=12`) that the client goes to itself and never
+posts: the engine answers 400 to one whoever asks. A prompt that no longer applies is
+a 409 (*That prompt is no longer current*), and so is an action that this kind of
+prompt gives but this one no longer does (Resume, after the block was resumed by
+hand); an action the kind never gives is a 400. A provider says what its kind can
+ever give in `actionIds`, which is how the two are told apart. Each kind is a
+provider (`{ kind, actionIds?, list(now), act(id, action, now) }`) registered in
+`lib/prompts.ts`, so an end-of-day wrap-up or a weekly review is one more provider
+and nothing else. Prompts are worked out from the data as it stands, so they go away
+by themselves; what was dismissed is written to `prompt_state`, an answer runs in
+one transaction, and a provider that fails does not hide the others. A list reads
+each table once for the whole list and builds its time formatters once (1,000 pending
+stretches on a block of 200 runs took about 500 ms and takes about 40).
 
-- **`away:<id>`** — the desktop app reports a stretch it saw you were away
+An event's id can be up to 2,000 characters (`MAX_EVENT_ID_LENGTH`), on a block that
+is started for it, on a block logged by hand and in a prompt's id, which allows 100
+more for what goes round it, so a meeting with a long UID can be answered and logged.
+
+- **`away:<row>:<ms>`** — the desktop app reports a stretch it saw you were away
   (`POST /api/sessions/:id/away {startedAt, endedAt}`: at least a minute, not in
   the future (5 s of skew allowed), a focus block that was not discarded, start
-  clamped to the block's own). Overlapping or touching pending stretches of a
-  block merge into the earliest. **Keep it** marks it kept; **Drop** takes that
-  wall-clock stretch off the block (`dropInterval`): every run of the clock that
-  overlaps it is trimmed, split or removed, an open run becomes a closed one up to
-  the start of the stretch and a new open one from its end, and `active_seconds`
-  is worked out again from the closed runs, in one transaction, whether the block
-  is running, paused or finished. Only ticking time comes off, so a stretch that
-  was partly paused costs the block only the part that was running, and the prompt
-  says so when that is less than the whole.
+  clamped to the block's own and the end to the block's end if it is finished; one
+  wholly after a finished block's end is a 400). Row numbers are handed out again
+  once the newest row is gone (a report folded into an earlier one, a block deleted),
+  so the id carries the moment the stretch was first reported, and an answer is taken
+  only for the row that still has that moment, is pending and is on a focus block that
+  was not discarded; a banner left on screen for a stretch that is gone is a 409 and
+  cannot act on another. Overlapping or touching pending stretches of a block merge
+  into the earliest. What was kept or dropped already is not asked again, so the part
+  of a report that overlaps it is cut away and only what is new is held (each piece at
+  least a minute, merged as above); one with nothing new is `200 { "away": null }` and
+  holds nothing, and where several pieces are held the earliest is the one returned.
+  **Keep it** marks it kept; **Drop** takes that wall-clock stretch off the block
+  (`dropInterval`): every run of the clock that overlaps it is trimmed, split or
+  removed, an open run becomes a closed one up to the start of the stretch and a new
+  open one from its end, and `active_seconds` is worked out again from the closed
+  runs, in one transaction, whether the block is running, paused or finished. Only
+  ticking time comes off, so a stretch that was partly paused costs the block only the
+  part that was running, and the prompt says so when that is less than the whole.
+  When the time of a block is set by hand (`PATCH` with `activeSeconds`, finishing with
+  `activeSeconds`, rescheduling) its pending stretches are marked kept in the same
+  transaction: the time has been said, and a Drop would take the same minutes off
+  twice. The text names the day (`Sat, Oct 10, 2:00 PM to 2:30 PM`) when the stretch
+  is not today and both days when it crosses midnight. `away_minutes` 0 is away
+  detection off: no away prompts are listed (reports are still stored, and asked about
+  again if it is turned back on).
 - **`long-block:<block>:<n>`** — the running focus block has worked n ×
   `long_block_minutes`. Only the latest multiple is ever asked. **Finish block**
-  opens `/?finish=1` (the Focus page opens its finish dialog and takes the
-  parameter off the address); **Keep going** hides that multiple.
-- **`meeting-start:<event>`** — a timed event began 15 minutes ago or less, has not
-  ended, and a focus block is running that is not the time spent on it. **Pause**
-  pauses the block and writes its id into `prompt_state.data`.
-- **`meeting-end:<event>`** — a timed event ended an hour ago or less and is not
-  logged (no block linked to it) or the block paused for it is still paused:
-  **Log** (a finished focus block over the scheduled time, under the event's
-  project, linked), **Resume**, or **Log and resume** together. Logging never
-  creates a second block for a meeting that is logged already.
+  opens `/?finish=<block>`, the block the prompt is about (the Focus page opens its
+  finish dialog for that block, refuses another, and takes the parameter off the
+  address); **Keep going** hides that multiple and every one below it, so time taken
+  off the block does not ask again what it was told at a higher mark.
+- **`meeting-start:<event>:<block>`** — a timed event began 15 minutes ago or less,
+  has not ended, and a focus block is running that is not the time spent on it.
+  **Pause** pauses that block and writes its id into `prompt_state.data`; it is a 409
+  if that block is not the one running any more, so a banner that says "Pause First
+  block?" cannot pause another. What was done is kept under `meeting-start:<event>`,
+  so dismissing it dismisses it for the meeting whichever block is on the clock.
+- **`meeting-end:<event>`** — a timed event ended an hour ago or less and has time
+  left to log (no block linked to it) or the block paused for it is still paused:
+  **Log** (a finished focus block under the event's project, linked), **Resume**, or
+  **Log and resume** together. The block holds only the part of the scheduled time
+  that no other focus block (one that was not thrown away) ticked through, starting at
+  the first such instant: a block that was paused 14 minutes into a 30-minute meeting
+  leaves 16 minutes to log, from the moment it was paused, and the labels say those
+  minutes (`Log 16m`). With less than a minute left Log and Log and resume are not
+  offered, only Resume (when a block was paused for it) and Dismiss, and when a block
+  ran all through it there is nothing to ask. Logging never creates a second block for
+  a meeting that is logged already.
 
 Settings: `away_minutes` (10), `long_block_minutes` (120), `meeting_prompts`
 (true), `work_days` (1,2,3,4,5), `work_start` (09:00), `work_end` (18:00),

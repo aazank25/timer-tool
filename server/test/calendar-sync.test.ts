@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import fs from 'node:fs';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { after, afterEach, before, beforeEach, describe, it, mock } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import type { SyncResult } from '../src/lib/calendar.js';
 import {
   addEvent,
@@ -23,6 +28,24 @@ const dbMod = () => import('../src/db.js');
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** A turn of the event loop: long enough for a promise chain that waits on nothing to finish. */
 const flush = () => new Promise((r) => setImmediate(r));
+
+/** Wait, in real time, for a condition: these tests read a real feed on a real clock. */
+async function until(condition: () => boolean, what: string, limitMs = 5_000) {
+  for (let waited = 0; waited < limitMs; waited += 10) {
+    if (condition()) return;
+    await sleep(10);
+  }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
+/** How many meetings of a feed the calendar holds. */
+async function meetingsOf(sourceId: string): Promise<number> {
+  const { db } = await dbMod();
+  const row = db
+    .prepare('SELECT COUNT(*) AS n FROM calendar_events WHERE provider = ?')
+    .get(`ics:${sourceId}`) as { n: number };
+  return row.n;
+}
 
 /** 2026-10-13T14:00:00.000Z as an ICS date-time. */
 const stamp = (iso: string) => iso.replace(/[-:]/g, '').replace(/\.\d{3}/, '');
@@ -63,8 +86,13 @@ async function serveFeed(initial: FeedEvent[] = []) {
     hits: 0,
     inFlight: 0,
     mostAtOnce: 0,
+    /** Requests the reader gave up on before they were answered. */
+    abandoned: 0,
     delayMs: 0,
     status: 200,
+    /** What to answer with instead of the calendar, such as an error page. */
+    raw: null as string | null,
+    contentType: 'text/calendar',
     set: (events: FeedEvent[]) => {
       body = ics(events);
     },
@@ -73,12 +101,18 @@ async function serveFeed(initial: FeedEvent[] = []) {
     feed.hits++;
     feed.inFlight++;
     feed.mostAtOnce = Math.max(feed.mostAtOnce, feed.inFlight);
-    setTimeout(() => {
+    const answer = setTimeout(() => {
       res.statusCode = feed.status;
-      res.setHeader('content-type', 'text/calendar');
-      res.end(body);
+      res.setHeader('content-type', feed.contentType);
+      res.end(feed.raw ?? body);
       feed.inFlight--;
     }, feed.delayMs);
+    res.on('close', () => {
+      if (res.writableEnded) return;
+      clearTimeout(answer);
+      feed.abandoned++;
+      feed.inFlight--;
+    });
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -290,30 +324,246 @@ describe('syncing a calendar feed', () => {
     assert.deepEqual(titles, ['old', 'Design crit', 'Planning', 'far']);
   });
 
-  it('gives later instances of a series the project it was given, and keeps it on the one that has it', async () => {
-    const series: FeedEvent = {
-      uid: 'standup',
-      summary: 'Standup',
-      start: '2026-10-13T09:00:00.000Z',
-      end: '2026-10-13T09:15:00.000Z',
-      rrule: 'FREQ=WEEKLY;COUNT=2',
-    };
-    feeds.feed.set([series]);
+  /** A weekly standup of two instances, 13 and 20 October, that the feed can later extend. */
+  const STANDUP: FeedEvent = {
+    uid: 'standup',
+    summary: 'Standup',
+    start: '2026-10-13T09:00:00.000Z',
+    end: '2026-10-13T09:15:00.000Z',
+    rrule: 'FREQ=WEEKLY;COUNT=2',
+  };
+  const projectsOf = async (from: string, to: string) =>
+    (await eventsOn(from, to)).map((e) => [e.day, e.projectId]);
+
+  it('gives a new instance of a series the project the series was given', async () => {
+    feeds.feed.set([STANDUP]);
     await sync();
     const first = (await eventsOn('2026-10-13'))[0]!;
     await assign(first.id, alpha);
 
     // The series is extended: a third instance appears in the feed.
-    feeds.feed.set([{ ...series, rrule: 'FREQ=WEEKLY;COUNT=3' }]);
+    feeds.feed.set([{ ...STANDUP, rrule: 'FREQ=WEEKLY;COUNT=3' }]);
     await sync();
 
-    const all = await eventsOn('2026-10-13', '2026-10-27');
+    const third = (await eventsOn('2026-10-27'))[0];
+    assert.equal(third?.projectId, alpha);
+    assert.equal(third?.title, 'Standup');
+    // The first one still has what it was given.
+    assert.equal((await eventsOn('2026-10-13'))[0]?.projectId, alpha);
+  });
+
+  it('leaves the meetings that are in the calendar already as they are, however a later one was given its project', async () => {
+    feeds.feed.set([STANDUP]);
+    await sync();
+    // The second instance is given a project by hand; the first, which is earlier, is not.
+    const second = (await eventsOn('2026-10-20'))[0]!;
+    await assign(second.id, alpha);
+
+    feeds.feed.set([{ ...STANDUP, rrule: 'FREQ=WEEKLY;COUNT=3' }]);
+    await sync();
+    await sync();
+
+    // Earlier meetings do not take a project from a later one, as new ones do.
+    assert.deepEqual(await projectsOf('2026-10-13', '2026-10-27'), [
+      ['2026-10-13', null],
+      ['2026-10-20', alpha],
+      ['2026-10-27', alpha],
+    ]);
+  });
+
+  it('leaves a project that was taken off a meeting by hand off, when the feed is synced again', async () => {
+    feeds.feed.set([{ ...STANDUP, rrule: 'FREQ=WEEKLY;COUNT=3' }]);
+    await sync();
+    const [one, , three] = await eventsOn('2026-10-13', '2026-10-27');
+    // The project is given to the first and the last, and taken off the last by hand again.
+    await assign(one!.id, alpha);
+    await assign(three!.id, alpha);
+    const cleared = await assign(three!.id, null);
+    assert.equal(cleared.body.projectId, null);
+
+    await sync();
+    await sync();
+
+    // It is not given back, though the first instance still has it and the series would.
+    assert.deepEqual(await projectsOf('2026-10-13', '2026-10-27'), [
+      ['2026-10-13', alpha],
+      ['2026-10-20', null],
+      ['2026-10-27', null],
+    ]);
+  });
+
+  it('keeps the project each of two meetings with the same title was given by hand', async () => {
+    const beta = await makeProject('Beta');
+    const first: FeedEvent = { ...DESIGN_CRIT, uid: 'one-1', summary: '1:1' };
+    const second: FeedEvent = {
+      ...PLANNING,
+      uid: 'one-2',
+      summary: '1:1',
+    };
+    feeds.feed.set([first, second]);
+    await sync();
+    const [one, two] = await eventsOn('2026-10-13');
+    await assign(one!.id, alpha);
+    await assign(two!.id, beta);
+
+    for (let i = 0; i < 3; i++) await sync();
+
     assert.deepEqual(
-      all.map((e) => [e.day, e.projectId]),
+      (await eventsOn('2026-10-13')).map((e) => [e.title, e.projectName]),
       [
-        ['2026-10-13', alpha],
-        ['2026-10-20', alpha],
-        ['2026-10-27', alpha],
+        ['1:1', 'Alpha'],
+        ['1:1', 'Beta'],
+      ],
+    );
+  });
+
+  it('gives a new meeting the project of a meeting of the same title in the same calendar', async () => {
+    const weekly: FeedEvent = { ...PLANNING, uid: 'planning-a', summary: 'Weekly planning' };
+    feeds.feed.set([weekly]);
+    await sync();
+    await assign((await eventsOn('2026-10-13'))[0]!.id, alpha);
+
+    // A meeting of the same name that is not part of the same series.
+    feeds.feed.set([
+      weekly,
+      {
+        ...weekly,
+        uid: 'planning-b',
+        start: '2026-10-15T16:00:00.000Z',
+        end: '2026-10-15T16:30:00.000Z',
+      },
+    ]);
+    await sync();
+
+    assert.equal((await eventsOn('2026-10-15'))[0]?.projectId, alpha);
+  });
+
+  it('prefers the series a new meeting is part of to another of the same title', async () => {
+    const beta = await makeProject('Beta');
+    const adhoc: FeedEvent = {
+      uid: 'sync-a',
+      summary: 'Sync',
+      start: '2026-10-13T15:00:00.000Z',
+      end: '2026-10-13T15:30:00.000Z',
+    };
+    const series: FeedEvent = {
+      uid: 'sync-b',
+      summary: 'Sync',
+      start: '2026-10-13T09:00:00.000Z',
+      end: '2026-10-13T09:30:00.000Z',
+      rrule: 'FREQ=WEEKLY;COUNT=1',
+    };
+    feeds.feed.set([adhoc, series]);
+    await sync();
+    const [early, late] = await eventsOn('2026-10-13');
+    // The later one of the two (another meeting) is Alpha's and the series, earlier, is Beta's.
+    await assign(late!.id, alpha);
+    await assign(early!.id, beta);
+
+    feeds.feed.set([adhoc, { ...series, rrule: 'FREQ=WEEKLY;COUNT=2' }]);
+    await sync();
+
+    // By title alone the latest meeting called Sync, which is Alpha's, would have been taken.
+    assert.equal((await eventsOn('2026-10-20'))[0]?.projectName, 'Beta');
+  });
+
+  it('takes the project of the latest meeting of that title when meetings of the same title were given different ones', async () => {
+    const beta = await makeProject('Beta');
+    const named = (uid: string, day: string): FeedEvent => ({
+      uid,
+      summary: 'Office hours',
+      start: `${day}T10:00:00.000Z`,
+      end: `${day}T10:30:00.000Z`,
+    });
+    feeds.feed.set([named('oh-1', '2026-10-13'), named('oh-2', '2026-10-14')]);
+    await sync();
+    await assign((await eventsOn('2026-10-13'))[0]!.id, alpha);
+    await assign((await eventsOn('2026-10-14'))[0]!.id, beta);
+
+    feeds.feed.set([
+      named('oh-1', '2026-10-13'),
+      named('oh-2', '2026-10-14'),
+      named('oh-3', '2026-10-15'),
+    ]);
+    await sync();
+
+    // Beta was given to the later of the two, so that is the one a new meeting follows.
+    assert.equal((await eventsOn('2026-10-15'))[0]?.projectName, 'Beta');
+  });
+
+  it('does not give a new meeting the project of a meeting of the same title in another calendar', async () => {
+    const other = await serveFeed([{ ...DESIGN_CRIT, uid: 'theirs-1', summary: 'Standup' }]);
+    try {
+      feeds.feed.set([{ ...DESIGN_CRIT, uid: 'mine-1', summary: 'Standup' }]);
+      await sync();
+      await assign((await eventsOn('2026-10-13'))[0]!.id, alpha);
+
+      // Another calendar has a "Standup" of its own, and it is new.
+      const { addSource } = await calendarMod();
+      advance(1);
+      addSource('Home', other.feed.url);
+      await sync();
+
+      const standups = (await eventsOn('2026-10-13')).map((e) => [e.calendarLabel, e.projectId]);
+      assert.deepEqual(
+        standups.sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+        [
+          ['Home', null],
+          ['Work', alpha],
+        ],
+      );
+    } finally {
+      await other.close();
+    }
+  });
+
+  it('does not give a new meeting the project of another series whose UID only begins with its own', async () => {
+    // An id is the feed, the UID and the start, and a UID can have a colon in it.
+    const longer: FeedEvent = { ...DESIGN_CRIT, uid: 'team:retro', summary: 'Retro' };
+    feeds.feed.set([longer]);
+    await sync();
+    await assign((await eventsOn('2026-10-13'))[0]!.id, alpha);
+
+    // A series whose UID is the first part of that one is a series of its own, and new.
+    feeds.feed.set([longer, { ...PLANNING, uid: 'team', summary: 'Team sync' }]);
+    await sync();
+
+    assert.deepEqual(
+      (await eventsOn('2026-10-13')).map((e) => [e.title, e.projectId]),
+      [
+        ['Retro', alpha],
+        ['Team sync', null],
+      ],
+    );
+  });
+
+  it('does not give a new meeting the project of one whose title only resembles its own', async () => {
+    const named = (uid: string, summary: string, day: string): FeedEvent => ({
+      uid,
+      summary,
+      start: `${day}T10:00:00.000Z`,
+      end: `${day}T10:30:00.000Z`,
+    });
+    feeds.feed.set([named('a-1', 'Sync A', '2026-10-13')]);
+    await sync();
+    await assign((await eventsOn('2026-10-13'))[0]!.id, alpha);
+
+    // The same letters in another case, and titles a pattern would match, are other meetings.
+    feeds.feed.set([
+      named('a-1', 'Sync A', '2026-10-13'),
+      named('a-2', 'SYNC A', '2026-10-14'),
+      named('a-3', 'Sync %', '2026-10-15'),
+      named('a-4', 'Sync _', '2026-10-16'),
+    ]);
+    await sync();
+
+    assert.deepEqual(
+      (await eventsOn('2026-10-13', '2026-10-16')).map((e) => [e.title, e.projectId]),
+      [
+        ['Sync A', alpha],
+        ['SYNC A', null],
+        ['Sync %', null],
+        ['Sync _', null],
       ],
     );
   });
@@ -356,6 +606,254 @@ describe('syncing a calendar feed', () => {
     feeds.feed.status = 200;
     const fine = await syncCalendars();
     assert.equal(fine[0]?.ok, true);
+  });
+
+  it('leaves the calendar, and the projects given by hand, alone when a feed answers 200 with something that is not a calendar', async () => {
+    await sync();
+    const [crit] = await eventsOn('2026-10-13');
+    await assign(crit!.id, alpha);
+    const before = await eventsOn('2026-09-01', '2026-12-31');
+    assert.equal(before.length, 2);
+
+    const whole = ics([DESIGN_CRIT, PLANNING]);
+    const answers: [string, string, string][] = [
+      [
+        'an error page',
+        '<!doctype html><html><body>Your session has expired.</body></html>',
+        'text/html',
+      ],
+      ['nothing at all', '', 'text/calendar'],
+      ['JSON', '{"error":"invalid token"}', 'application/json'],
+      [
+        'a calendar that stops short of its end',
+        whole.slice(0, whole.indexOf('END:VCALENDAR')),
+        'text/calendar',
+      ],
+      ['a calendar cut off in a meeting', whole.slice(0, whole.indexOf('DTEND')), 'text/calendar'],
+      [
+        'the end of a calendar that has lost its beginning',
+        whole.slice(whole.indexOf('BEGIN:VEVENT')),
+        'text/calendar',
+      ],
+    ];
+    for (const [what, body, contentType] of answers) {
+      feeds.feed.raw = body;
+      feeds.feed.contentType = contentType;
+
+      const results = await sync();
+
+      assert.deepEqual(
+        results.map((r) => r.ok),
+        [false],
+        what,
+      );
+      assert.match(results[0]?.error ?? '', /complete calendar/, what);
+      assert.deepEqual(await eventsOn('2026-09-01', '2026-12-31'), before, what);
+    }
+
+    // Once the feed is a calendar again, the meetings and the project are as they were.
+    feeds.feed.raw = null;
+    assert.equal((await sync())[0]?.ok, true);
+    assert.deepEqual(await eventsOn('2026-09-01', '2026-12-31'), before);
+  });
+
+  it('keeps what the window held when a feed comes back as a calendar with nothing in it', async () => {
+    await sync();
+    const [crit] = await eventsOn('2026-10-13');
+    await assign(crit!.id, alpha);
+    const before = await eventsOn('2026-09-01', '2026-12-31');
+    const warned = mock.method(console, 'warn', () => {});
+    try {
+      feeds.feed.set([]);
+
+      const results = await sync();
+
+      assert.deepEqual(
+        results.map((r) => [r.ok, r.events]),
+        [[true, 0]],
+      );
+      assert.deepEqual(await eventsOn('2026-09-01', '2026-12-31'), before);
+      // It says so, naming the feed by its label and not by its address.
+      assert.equal(warned.mock.callCount(), 1);
+      const line = String(warned.mock.calls[0]?.arguments[0]);
+      assert.match(line, /"Work"/);
+      assert.ok(!line.includes('127.0.0.1'), line);
+
+      // A feed that has some meetings again is read as usual, and removes what it no longer has.
+      feeds.feed.set([DESIGN_CRIT]);
+      await sync();
+      assert.deepEqual(
+        (await eventsOn('2026-09-01', '2026-12-31')).map((e) => [e.title, e.projectName]),
+        [['Design crit', 'Alpha']],
+      );
+    } finally {
+      warned.mock.restore();
+    }
+  });
+
+  it('has nothing to keep, and says nothing, when an empty calendar comes back and the window was empty', async () => {
+    const warned = mock.method(console, 'warn', () => {});
+    try {
+      feeds.feed.set([]);
+
+      const results = await sync();
+
+      assert.deepEqual(
+        results.map((r) => [r.ok, r.events]),
+        [[true, 0]],
+      );
+      assert.equal(warned.mock.callCount(), 0);
+    } finally {
+      warned.mock.restore();
+    }
+  });
+
+  it('never removes the meetings of one feed while it syncs another', async () => {
+    const home = await serveFeed([{ ...PLANNING, uid: 'home-1', summary: 'Dentist' }]);
+    try {
+      const { addSource } = await calendarMod();
+      advance(1); // a second feed needs an id of its own
+      addSource('Home', home.feed.url);
+      await sync();
+      const dentist = (await eventsOn('2026-10-13')).find((e) => e.title === 'Dentist')!;
+      await assign(dentist.id, alpha);
+
+      // Work loses a meeting, and Home cannot be read.
+      feeds.feed.set([DESIGN_CRIT]);
+      home.feed.status = 500;
+      const results = await sync();
+
+      assert.deepEqual(
+        results.map((r) => [r.label, r.ok]),
+        [
+          ['Work', true],
+          ['Home', false],
+        ],
+      );
+      assert.deepEqual(
+        (await eventsOn('2026-10-13')).map((e) => [e.calendarLabel, e.title, e.projectName]),
+        [
+          ['Work', 'Design crit', null],
+          ['Home', 'Dentist', 'Alpha'],
+        ],
+      );
+
+      // And the other way about: Work cannot be read, and Home loses its meeting to another.
+      feeds.feed.status = 500;
+      home.feed.status = 200;
+      home.feed.set([{ ...PLANNING, uid: 'home-2', summary: 'Gym' }]);
+      await sync();
+
+      assert.deepEqual(
+        (await eventsOn('2026-10-13')).map((e) => [e.calendarLabel, e.title]),
+        [
+          ['Work', 'Design crit'],
+          ['Home', 'Gym'],
+        ],
+      );
+    } finally {
+      await home.close();
+    }
+  });
+
+  it('writes nothing for a feed that is removed while it is being read', async () => {
+    const { readSources, removeSource } = await calendarMod();
+    const [source] = readSources();
+    feeds.feed.delayMs = 200;
+    const syncing = sync();
+    await until(() => feeds.feed.hits >= 1, 'the feed to be asked');
+
+    removeSource(source!.id);
+    const results = await syncing;
+
+    // Nothing of it is left, and it has no result: there is no feed for one to be about.
+    assert.equal(await meetingsOf(source!.id), 0);
+    assert.deepEqual(results, []);
+    assert.deepEqual(readSources(), []);
+  });
+
+  it('does not read a feed that was removed before its turn came', async () => {
+    const home = await serveFeed([{ ...PLANNING, uid: 'home-1', summary: 'Dentist' }]);
+    try {
+      const { addSource, readSources, removeSource } = await calendarMod();
+      advance(1); // a second feed needs an id of its own
+      const second = addSource('Home', home.feed.url);
+      feeds.feed.delayMs = 200;
+      const syncing = sync();
+      await until(() => feeds.feed.hits >= 1, 'the first feed to be asked');
+
+      // Home is next in line, and is removed while Work is still being read.
+      removeSource(second.id);
+      const results = await syncing;
+
+      assert.deepEqual(
+        results.map((r) => r.label),
+        ['Work'],
+      );
+      assert.equal(home.feed.hits, 0, 'a feed that was removed was still asked');
+      assert.equal(readSources().length, 1);
+    } finally {
+      await home.close();
+    }
+  });
+
+  it('writes nothing when the server closes just as the feed has been read', async () => {
+    const { readSources, stopCalendarSyncs } = await calendarMod();
+    const [source] = readSources();
+    const lastSync = (await settingsMod()).getSetting('calendar_last_sync');
+    // A minute on, so that a sync that was stamped would be seen to have been.
+    advance(MINUTE);
+    let closing: Promise<void> | undefined;
+    // The whole answer arrives, and the server is closed in the moment between that and the write.
+    const answering = mock.method(globalThis, 'fetch', async () => ({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      text: async () => {
+        closing = stopCalendarSyncs();
+        return ics([DESIGN_CRIT, PLANNING]);
+      },
+    }));
+    try {
+      const results = await sync();
+      await closing;
+
+      assert.deepEqual(results, []);
+      assert.equal(await meetingsOf(source!.id), 0);
+      assert.equal((await settingsMod()).getSetting('calendar_last_sync'), lastSync);
+    } finally {
+      answering.mock.restore();
+    }
+  });
+
+  it('writes nothing for a feed that is switched off while it is being read', async () => {
+    const { readSources, updateSource } = await calendarMod();
+    const [source] = readSources();
+    feeds.feed.delayMs = 200;
+    const syncing = sync();
+    await until(() => feeds.feed.hits >= 1, 'the feed to be asked');
+
+    updateSource(source!.id, { enabled: false });
+    await syncing;
+
+    assert.equal(await meetingsOf(source!.id), 0);
+  });
+
+  it('writes nothing from the old address of a feed whose address is changed while it is being read', async () => {
+    const { readSources, updateSource } = await calendarMod();
+    const [source] = readSources();
+    feeds.feed.delayMs = 200;
+    const syncing = sync();
+    await until(() => feeds.feed.hits >= 1, 'the feed to be asked');
+
+    updateSource(source!.id, { url: `${feeds.feed.url}?moved=1` });
+    await syncing;
+    assert.equal(await meetingsOf(source!.id), 0);
+
+    // The next sync reads the new address.
+    feeds.feed.delayMs = 0;
+    assert.equal((await sync())[0]?.ok, true);
+    assert.equal(await meetingsOf(source!.id), 2);
   });
 });
 
@@ -425,11 +923,33 @@ describe('logging a meeting as time spent', () => {
   });
 
   it('refuses a meeting id that is not text, or is far too long', async () => {
-    for (const calendarEventId of [5, ['a'], 'x'.repeat(301)]) {
+    // Two thousand characters is as long as an id can be, so one more is too long.
+    for (const calendarEventId of [5, ['a'], 'x'.repeat(2001)]) {
       const res = await api.call('POST', '/sessions/manual', body({ calendarEventId }));
       assert.equal(res.status, 400, JSON.stringify(calendarEventId).slice(0, 20));
     }
     assert.equal(await sessionCount(), 0);
+  });
+
+  it('starts a block on a meeting whose id is as long as an id can be, and refuses a longer one', async () => {
+    const longest = 'x'.repeat(2000);
+
+    const refused = await api.call('POST', '/sessions', {
+      title: 'Design crit',
+      mode: 'stopwatch',
+      calendarEventId: `${longest}x`,
+    });
+    assert.equal(refused.status, 400);
+    assert.equal(await sessionCount(), 0);
+
+    const started = await api.call('POST', '/sessions', {
+      title: 'Design crit',
+      mode: 'stopwatch',
+      calendarEventId: longest,
+    });
+    assert.equal(started.status, 201);
+    assert.equal(started.body.calendarEventId, longest);
+    assert.equal(await sessionCount(), 1);
   });
 
   it('takes the meeting through the library as well', async () => {
@@ -454,6 +974,252 @@ describe('logging a meeting as time spent', () => {
         }),
       { status: 400, message: 'Unknown calendar event' },
     );
+  });
+
+  it('refuses with a 409 a meeting that already has time logged on it, and logs nothing more', async () => {
+    const event = await addEvent({ title: 'Design crit', start: at('09:00'), end: at('10:00') });
+    const first = await api.call('POST', '/sessions/manual', body({ calendarEventId: event }));
+    assert.equal(first.status, 201);
+    const before = await sessionCount();
+
+    const second = await api.call('POST', '/sessions/manual', body({ calendarEventId: event }));
+
+    assert.equal(second.status, 409);
+    assert.equal(second.body.error, 'That meeting is already logged');
+    assert.equal(await sessionCount(), before);
+    assert.equal((await eventsOn('2026-10-12'))[0]?.loggedSeconds, 3600);
+  });
+
+  it('refuses with a 409, through the library as well, a meeting that already has time logged on it', async () => {
+    const { logManualSession } = await import('../src/lib/sessions.js');
+    const event = await addEvent({ title: 'Design crit', start: at('09:00'), end: at('10:00') });
+    const log = () =>
+      logManualSession({
+        title: 'Design crit',
+        startedAt: at('09:00'),
+        minutes: 60,
+        calendarEventId: event,
+      });
+    log();
+
+    assert.throws(log, { status: 409, message: 'That meeting is already logged' });
+    assert.equal(await sessionCount(), 1);
+  });
+
+  it('refuses to log by hand a meeting that the prompt logged', async () => {
+    // Ended half an hour ago, so it is being asked about.
+    const event = await addEvent({ title: 'Design crit', start: at('11:00'), end: at('11:30') });
+    const logged = await api.call('POST', '/prompts/act', {
+      id: `meeting-end:${event}`,
+      action: 'log',
+    });
+    assert.equal(logged.status, 200);
+    assert.equal(await sessionCount(), 1);
+
+    const res = await api.call(
+      'POST',
+      '/sessions/manual',
+      body({ startedAt: at('11:00'), minutes: 30, calendarEventId: event }),
+    );
+
+    assert.equal(res.status, 409);
+    assert.equal(await sessionCount(), 1);
+  });
+
+  it('counts a block that is still on the clock as the meeting being logged', async () => {
+    const { startSession } = await import('../src/lib/sessions.js');
+    const event = await addEvent({ title: 'Design crit', start: at('09:00'), end: at('10:00') });
+    startSession({ title: 'Taking notes', calendarEventId: event });
+
+    const res = await api.call('POST', '/sessions/manual', body({ calendarEventId: event }));
+
+    assert.equal(res.status, 409);
+    assert.equal(await sessionCount(), 1);
+  });
+
+  it('does not count a block that was thrown away as the meeting being logged', async () => {
+    const { startSession, stopSession } = await import('../src/lib/sessions.js');
+    const event = await addEvent({ title: 'Design crit', start: at('09:00'), end: at('10:00') });
+    const notes = startSession({ title: 'Taking notes', calendarEventId: event });
+    stopSession(notes.id, 'abandoned');
+
+    const res = await api.call('POST', '/sessions/manual', body({ calendarEventId: event }));
+
+    assert.equal(res.status, 201);
+    assert.equal(res.body.calendarEventId, event);
+  });
+});
+
+/* ----------------------------------------------------------- the address of a feed */
+
+describe('the address of a feed', () => {
+  let api: Api;
+
+  before(async () => {
+    api = await serve();
+  });
+  beforeEach(async () => {
+    await reset();
+    await noFeeds();
+    freeze(at('12:00'));
+  });
+  afterEach(() => mock.timers.reset());
+  after(() => api.close());
+
+  const add = (url: string) => api.call('POST', '/calendar/sources', { label: 'Work', url });
+  const stored = async () => (await calendarMod()).readSources();
+
+  it('is refused when it has a user name or a password in it, when a feed is added', async () => {
+    for (const url of [
+      'https://alice:SECRETPW@example.com/feed.ics',
+      'https://alice@example.com/feed.ics',
+      'https://:SECRETPW@example.com/feed.ics',
+      'webcal://alice:SECRETPW@example.com/feed.ics',
+      'http://alice:SECRETPW@127.0.0.1:9/feed.ics?token=SECRETTOKEN',
+    ]) {
+      const res = await add(url);
+
+      assert.equal(res.status, 400, url);
+      assert.match(res.body.error, /user name or password/, url);
+      // The refusal does not repeat what it refuses.
+      assert.ok(!JSON.stringify(res.body).includes('SECRETPW'), url);
+    }
+    assert.deepEqual(await stored(), []);
+  });
+
+  it('is refused when it has a user name or a password in it, when a feed is changed', async () => {
+    const added = await add('https://example.com/feed.ics?token=abc');
+    assert.equal(added.status, 201);
+
+    const res = await api.call('PATCH', `/calendar/sources/${added.body.id}`, {
+      url: 'https://bob:SECRETPW@example.com/other.ics',
+      label: 'Renamed',
+    });
+
+    assert.equal(res.status, 400);
+    assert.ok(!JSON.stringify(res.body).includes('SECRETPW'));
+    // Nothing of the change was made, the label included.
+    const [source] = await stored();
+    assert.equal(source?.url, 'https://example.com/feed.ics?token=abc');
+    assert.equal(source?.label, 'Work');
+  });
+
+  it('is taken as it is when it has neither', async () => {
+    const res = await add('https://calendar.example.com/private/abc123/basic.ics');
+    assert.equal(res.status, 201);
+    assert.equal(res.body.host, 'calendar.example.com');
+    assert.equal((await stored())[0]?.url, 'https://calendar.example.com/private/abc123/basic.ics');
+  });
+
+  it('takes a webcal address as the https address it stands for', async () => {
+    const res = await add('webcal://example.com/cal/feed.ics?x=1');
+
+    assert.equal(res.status, 201);
+    assert.equal(res.body.host, 'example.com');
+    assert.equal((await stored())[0]?.url, 'https://example.com/cal/feed.ics?x=1');
+  });
+
+  it('is refused when it is not a web address, such as an ftp address or a file', async () => {
+    for (const url of ['ftp://example.com/feed.ics', 'file:///home/someone/calendar.ics']) {
+      const res = await add(url);
+
+      assert.equal(res.status, 400, url);
+      assert.match(res.body.error, /https, http or webcal/, url);
+    }
+    assert.deepEqual(await stored(), []);
+  });
+
+  it('answers 400, not 500, to text that is not an address', async () => {
+    const res = await add('this is not an address');
+
+    assert.equal(res.status, 400);
+    assert.deepEqual(await stored(), []);
+  });
+
+  /** What there is to be afraid of leaking: the parts of an address a calendar hands out as secrets. */
+  const SECRETS = ['SECRETPW', 'SECRETTOKEN', 'http://', 'https://'];
+  const leaksIn = (text: string) => SECRETS.filter((secret) => text.includes(secret));
+
+  it('is never in a sync result or a log line, even for one that was stored with a password in it', async () => {
+    const { setSettings } = await settingsMod();
+    const { syncCalendars, startCalendarSync } = await calendarMod();
+    // Stored before addresses like this were refused. Reading it fails, and says why.
+    setSettings({
+      calendar_sources: JSON.stringify([
+        {
+          id: 'cal_legacy',
+          label: 'Work',
+          url: 'http://alice:SECRETPW@127.0.0.1:9/feed.ics?token=SECRETTOKEN',
+          enabled: true,
+        },
+      ]),
+    });
+
+    const results = await syncCalendars();
+    assert.equal(results[0]?.ok, false);
+    assert.deepEqual(leaksIn(JSON.stringify(results)), []);
+    assert.deepEqual(leaksIn(JSON.stringify((await api.call('POST', '/calendar/sync')).body)), []);
+
+    // The same through the look that is made in the background.
+    const warned = mock.method(console, 'warn', () => {});
+    const clock = handClock();
+    const stop = startCalendarSync({ everyMs: 15 * MINUTE, timers: clock.timers });
+    try {
+      clock.tick(30_000);
+      await until(() => warned.mock.callCount() > 0, 'the failure to be logged');
+      const lines = warned.mock.calls.map((c) => c.arguments.map(String).join(' '));
+      assert.match(lines[0] ?? '', /could not sync "Work"/);
+      assert.deepEqual(leaksIn(lines.join('\n')), []);
+    } finally {
+      await stop();
+      warned.mock.restore();
+    }
+  });
+
+  it('is taken out of what is logged when the whole look fails, as well', async () => {
+    const { startCalendarSync, addSource } = await calendarMod();
+    addSource('Work', 'https://calendar.example.com/private/SECRETTOKEN/basic.ics');
+    const logged = mock.method(console, 'error', () => {});
+    const clock = handClock();
+    const stop = startCalendarSync({
+      everyMs: 15 * MINUTE,
+      timers: clock.timers,
+      sync: async () => {
+        throw new Error(
+          'broke while reading https://calendar.example.com/private/SECRETTOKEN/basic.ics',
+        );
+      },
+    });
+    try {
+      clock.tick(30_000);
+      await until(() => logged.mock.callCount() > 0, 'the failure to be logged');
+
+      const lines = logged.mock.calls.map((c) => c.arguments.map(String).join(' '));
+      assert.match(lines.join('\n'), /background sync failed/);
+      assert.deepEqual(leaksIn(lines.join('\n')), []);
+    } finally {
+      await stop();
+      logged.mock.restore();
+    }
+  });
+
+  it('is taken out of whatever an error says, whatever raised it', async () => {
+    const { addSource, syncCalendars } = await calendarMod();
+    addSource('Work', 'https://calendar.example.com/private/SECRETTOKEN/basic.ics');
+    const failing = mock.method(globalThis, 'fetch', async (input: unknown) => {
+      throw new TypeError(
+        `could not read ${String(input)} and then https://other.example.com/help?code=SECRETPW.`,
+      );
+    });
+    try {
+      const results = await syncCalendars();
+
+      assert.equal(results[0]?.ok, false);
+      // Both addresses are gone, and the full stop that ended the sentence is not part of one.
+      assert.equal(results[0]?.error, 'could not read the feed address and then the feed address.');
+    } finally {
+      failing.mock.restore();
+    }
   });
 });
 
@@ -805,15 +1571,6 @@ describe('syncing in the background', () => {
       await feeds.close();
     });
 
-    /** Wait, in real time, for a condition: these tests run the real timer on a short interval. */
-    async function until(condition: () => boolean, what: string) {
-      for (let waited = 0; waited < 5_000; waited += 10) {
-        if (condition()) return;
-        await sleep(10);
-      }
-      assert.fail(`timed out waiting for ${what}`);
-    }
-
     it('reads the feed on its own while the server is up, and stops when it closes', async () => {
       const { startServer } = await import('../src/app.js');
       const { db } = await dbMod();
@@ -826,8 +1583,8 @@ describe('syncing in the background', () => {
         await running.close();
       }
 
-      // A look that was already under way when the server closed is let finish; nothing
-      // new starts after it.
+      // A look that was under way when the server closed is cut short, and nothing new
+      // starts after it.
       await until(() => feeds.feed.inFlight === 0, 'the last look to finish');
       await sleep(100);
       const hits = feeds.feed.hits;
@@ -902,6 +1659,111 @@ describe('syncing in the background', () => {
         await running.close();
       }
       assert.equal(feeds.feed.mostAtOnce, 1);
+    });
+
+    it('cuts a read that is under way short when the server closes, and writes nothing once it has', async () => {
+      const { startServer } = await import('../src/app.js');
+      const { db } = await dbMod();
+      const { getSetting } = await settingsMod();
+      // A feed that would answer in three seconds, and a look that has started on it.
+      feeds.feed.delayMs = 3_000;
+      const lastSync = getSetting('calendar_last_sync');
+      const running = await startServer({ port: 0, calendarSyncMs: 20 });
+      await until(() => feeds.feed.hits >= 1, 'the feed to be asked');
+
+      const started = Date.now();
+      await running.close();
+      const took = Date.now() - started;
+
+      // It did not wait for the feed: the read was dropped, and the feed saw it dropped.
+      assert.ok(took < 1_500, `closing took ${took} ms with the feed answering in 3000`);
+      await until(() => feeds.feed.abandoned === 1, 'the feed to see the read dropped');
+      assert.equal(feeds.feed.hits, 1, 'nothing new was started');
+      // And nothing has been written for it, now or since.
+      await sleep(100);
+      assert.deepEqual(db.prepare('SELECT title FROM calendar_events').all(), []);
+      assert.equal(getSetting('calendar_last_sync'), lastSync);
+    });
+
+    it('does not wait for a Sync now that is still reading when the server closes', async () => {
+      const { startServer } = await import('../src/app.js');
+      feeds.feed.delayMs = 3_000;
+      const running = await startServer({ port: 0, calendarSyncMs: 0 });
+      const click = fetch(`${running.url}/api/calendar/sync`, { method: 'POST' }).then(
+        (res) => res.json() as Promise<{ results: unknown[] }>,
+      );
+      await until(() => feeds.feed.hits >= 1, 'the feed to be asked');
+
+      const started = Date.now();
+      await running.close();
+      const took = Date.now() - started;
+
+      assert.ok(took < 1_500, `closing took ${took} ms with the feed answering in 3000`);
+      // The click is still answered, and has nothing to report of the feed that was cut short.
+      assert.deepEqual((await click).results, []);
+      await until(() => feeds.feed.abandoned === 1, 'the feed to see the read dropped');
+    });
+
+    /** close-child.ts in a process of its own: what it has said, and when it ended. */
+    function spawnChild(mode: string, dataDir: string, feedUrl = '') {
+      const env = { ...process.env };
+      // Not a test of the test runner's, whatever it is run by.
+      delete env.NODE_TEST_CONTEXT;
+      const child = spawn(
+        process.execPath,
+        ['--import', 'tsx', 'close-child.ts', mode, dataDir, feedUrl],
+        {
+          cwd: path.dirname(fileURLToPath(import.meta.url)),
+          env,
+          stdio: ['pipe', 'pipe', 'inherit'],
+        },
+      );
+      const said = new Set<string>();
+      let partial = '';
+      child.stdout.on('data', (chunk: Buffer) => {
+        const lines = (partial + chunk.toString()).split('\n');
+        partial = lines.pop() ?? '';
+        for (const line of lines) said.add(line.trim());
+      });
+      const ended = new Promise<number | null>((resolve) => child.once('exit', resolve));
+      return { child, said, ended };
+    }
+    /** How a process ends within `ms`, or that it was still going. */
+    const endsWithin = (ended: Promise<number | null>, ms: number) =>
+      Promise.race([ended, sleep(ms).then(() => 'still running')]);
+
+    it('lets a process end by itself while the background sync is started and has not been stopped', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'focusdesk-timer-'));
+      const run = spawnChild('timer', dir);
+      try {
+        await until(() => run.said.has('ready'), 'the process to be set up', 30_000);
+
+        // The first look is thirty seconds away, and the process is not waiting for it.
+        assert.equal(await endsWithin(run.ended, 5_000), 0);
+      } finally {
+        run.child.kill('SIGKILL');
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('lets a process end promptly once the server is closed, though a feed was being read', async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'focusdesk-close-'));
+      // A feed that would answer in twenty seconds, far longer than anything here waits.
+      feeds.feed.delayMs = 20_000;
+      const run = spawnChild('close', dir, feeds.feed.url);
+      try {
+        await until(() => run.said.has('ready'), 'the process to be set up', 30_000);
+        await until(() => feeds.feed.hits >= 1, 'the feed to be asked', 10_000);
+
+        run.child.stdin.write('close\n');
+
+        assert.equal(await endsWithin(run.ended, 5_000), 0);
+        assert.ok(run.said.has('closed'));
+        assert.equal(feeds.feed.abandoned, 1);
+      } finally {
+        run.child.kill('SIGKILL');
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
     });
   });
 });

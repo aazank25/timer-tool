@@ -9,12 +9,41 @@ export interface Span {
   end: number | null;
 }
 
+/** A stretch of wall-clock time that has ended. */
+export interface Stretch {
+  start: number;
+  end: number;
+}
+
 /** A block's segment rows as spans. */
 export function toSpans(rows: { started_at: string; ended_at: string | null }[]): Span[] {
   return rows.map((r) => ({
     start: Date.parse(r.started_at),
     end: r.ended_at == null ? null : Date.parse(r.ended_at),
   }));
+}
+
+/**
+ * What is left of the wall-clock stretch [from, to] once the spans are taken out of it: the
+ * gaps between them, in time order, none of them empty. Spans may overlap each other and may
+ * lie partly or wholly outside the stretch. An open span is still ticking, so it takes up
+ * time as far as `now`.
+ */
+export function gapsIn(taken: Span[], from: number, to: number, now: number): Stretch[] {
+  const gaps: Stretch[] = [];
+  let cursor = from;
+  for (const s of [...taken].sort((a, b) => a.start - b.start)) {
+    const end = s.end ?? now;
+    // Nothing of it, or nothing of it that is not taken already.
+    if (end <= s.start || end <= cursor) continue;
+    // Sorted by start, so every span from here on begins after the stretch is over.
+    if (s.start >= to) break;
+    if (s.start > cursor) gaps.push({ start: cursor, end: s.start });
+    cursor = Math.max(cursor, end);
+    if (cursor >= to) break;
+  }
+  if (cursor < to) gaps.push({ start: cursor, end: to });
+  return gaps;
 }
 
 /** How long the clock has run in all, an open span counted up to `now`. */

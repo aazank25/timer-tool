@@ -10,13 +10,17 @@ import {
   addEvent,
   advance,
   at,
+  awayPromptId,
   type Api,
+  DAY,
+  failOnLoggedErrors,
   freeze,
   goTo,
   makeProject,
   MINUTE,
   reset,
   serve,
+  startPromptId,
 } from './prompt-helpers.js';
 
 const sessionsMod = () => import('../src/lib/sessions.js');
@@ -66,6 +70,7 @@ async function sessionRows(where = '1 = 1') {
 
 describe('the prompt engine', () => {
   let api: Api;
+  failOnLoggedErrors();
 
   before(async () => {
     api = await serve();
@@ -85,7 +90,7 @@ describe('the prompt engine', () => {
       startedAt: at('10:10'),
       endedAt: at('10:50'),
     });
-    return { block, id: `away:${res.body.away.id}` };
+    return { block, id: await awayPromptId(res.body.away.id) };
   }
 
   it('lists nothing when nothing needs your attention', async () => {
@@ -97,8 +102,9 @@ describe('the prompt engine', () => {
   it('lists every kind together, oldest first, whatever order the kinds are kept in', async () => {
     freeze(at('08:00'));
     const block = await startBlock('Deep work');
-    // The meeting that has just ended, and the one that has just started.
-    await addEvent({ title: 'Standup', start: at('09:40'), end: at('10:10') });
+    // The meeting that has just ended, which began before the block did so that some of it is
+    // not on the block, and the one that has just started.
+    await addEvent({ title: 'Workshop', start: at('07:00'), end: at('10:10') });
     await addEvent({ title: 'Roadmap review', start: at('10:20'), end: at('11:20') });
     goTo(at('10:30'));
     await api.call('POST', `/sessions/${block.id}/away`, {
@@ -230,7 +236,7 @@ describe('the prompt engine', () => {
     const [prompt] = await listed();
     assert.deepEqual(
       prompt?.actions.find((a) => a.id === 'finish'),
-      { id: 'finish', label: 'Finish block', open: '/?finish=1' },
+      { id: 'finish', label: 'Finish block', open: `/?finish=${block.id}` },
     );
 
     const res = await act(prompt!.id, 'finish');
@@ -261,19 +267,21 @@ describe('the prompt engine', () => {
     const block = await startBlock();
     goTo(at('11:00'));
     const away = async (from: string, to: string) =>
-      (
-        await api.call('POST', `/sessions/${block.id}/away`, {
-          startedAt: at(from),
-          endedAt: at(to),
-        })
-      ).body.away.id as number;
+      awayPromptId(
+        (
+          await api.call('POST', `/sessions/${block.id}/away`, {
+            startedAt: at(from),
+            endedAt: at(to),
+          })
+        ).body.away.id,
+      );
     const first = await away('10:10', '10:20');
     const second = await away('10:30', '10:40');
 
-    const res = await act(`away:${first}`, 'keep');
+    const res = await act(first, 'keep');
 
     assert.equal(res.status, 200);
-    assert.deepEqual(ids(res.body.prompts), [`away:${second}`]);
+    assert.deepEqual(ids(res.body.prompts), [second]);
     assert.deepEqual(res.body.prompts, (await api.call('GET', '/prompts')).body);
   });
 
@@ -330,12 +338,227 @@ describe('the prompt engine', () => {
     }
     assert.equal(await savedState('flaky:1'), undefined);
   });
+
+  it('never carries out an action that only opens a page, even for a provider that would accept it', async () => {
+    const { registerPromptProvider } = await promptsMod();
+    const answered: string[] = [];
+    const unregister = registerPromptProvider({
+      kind: 'opener',
+      list: () => [
+        {
+          id: 'opener:1',
+          kind: 'opener',
+          title: 'Open it',
+          body: 'It has a page of its own.',
+          createdAt: at('12:00'),
+          actions: [
+            { id: 'go', label: 'Go', open: '/somewhere' },
+            { id: 'dismiss', label: 'Dismiss' },
+          ],
+        },
+      ],
+      // Takes whatever it is given, so it is the engine that has to say no.
+      act: (_id, action) => void answered.push(action),
+    });
+    try {
+      const res = await act('opener:1', 'go');
+
+      assert.equal(res.status, 400);
+      assert.deepEqual(answered, []);
+      // The other action is carried out, so the provider is wired up and it is only this one.
+      assert.equal((await act('opener:1', 'dismiss')).status, 200);
+      assert.deepEqual(answered, ['dismiss']);
+    } finally {
+      unregister();
+    }
+  });
+
+  it('answers 409 to an action its kind gives but the prompt does not, and 400 to one the kind never gives', async () => {
+    const { registerPromptProvider } = await promptsMod();
+    const answered: string[] = [];
+    const prompt = (actions: string[]): Prompt => ({
+      id: 'two-step:1',
+      kind: 'two-step',
+      title: 'Two steps',
+      body: 'Offers what is left to do.',
+      createdAt: at('12:00'),
+      actions: actions.map((id) => ({ id, label: id })),
+    });
+    let offered = ['first', 'second'];
+    const unregister = registerPromptProvider({
+      kind: 'two-step',
+      actionIds: ['first', 'second'],
+      list: () => [prompt(offered)],
+      act: (_id, action) => void answered.push(action),
+    });
+    try {
+      // The first step has been done since the banner was drawn.
+      offered = ['second'];
+
+      const stale = await act('two-step:1', 'first');
+      assert.equal(stale.status, 409);
+      assert.equal(stale.body.error, 'That prompt is no longer current');
+      assert.equal((await act('two-step:1', 'third')).status, 400);
+      assert.deepEqual(answered, []);
+      assert.equal((await act('two-step:1', 'second')).status, 200);
+    } finally {
+      unregister();
+    }
+  });
+
+  it('answers 400 to every action it does not offer when its kind does not say what it gives', async () => {
+    const { registerPromptProvider } = await promptsMod();
+    const unregister = registerPromptProvider({
+      kind: 'silent',
+      list: () => [
+        {
+          id: 'silent:1',
+          kind: 'silent',
+          title: 'Silent',
+          body: 'Says nothing of what it can give.',
+          createdAt: at('12:00'),
+          actions: [{ id: 'ok', label: 'Ok' }],
+        },
+      ],
+      act: () => {},
+    });
+    try {
+      assert.equal((await act('silent:1', 'other')).status, 400);
+    } finally {
+      unregister();
+    }
+  });
+
+  /**
+   * How many statements `work` runs against the database, counted as they run. A list that
+   * asks the database once for every prompt shows as a count that grows with the list.
+   */
+  async function statementsRun(work: () => void): Promise<number> {
+    const { db } = await dbMod();
+    const prepare = db.prepare.bind(db);
+    let ran = 0;
+    const counting = mock.method(
+      db as unknown as { prepare: (sql: string) => unknown },
+      'prepare',
+      (sql: string) => {
+        const statement = prepare(sql) as unknown as Record<string, unknown>;
+        return new Proxy(statement, {
+          get(target, key) {
+            const value = target[key as string];
+            if (typeof value !== 'function') return value;
+            const counts = key === 'all' || key === 'get' || key === 'run' || key === 'iterate';
+            return (...args: unknown[]) => {
+              if (counts) ran++;
+              return (value as (...a: unknown[]) => unknown).apply(target, args);
+            };
+          },
+        });
+      },
+    );
+    try {
+      work();
+    } finally {
+      counting.mock.restore();
+    }
+    return ran;
+  }
+
+  it('reads what it needs once for the whole list, however many stretches there are to ask about', async () => {
+    const { db } = await dbMod();
+    const { listPrompts } = await promptsMod();
+    freeze(at('10:00'));
+    const block = await startBlock();
+    goTo(at('16:00'));
+    // A block of many runs, so that reading them over again for every stretch would show.
+    db.prepare('DELETE FROM session_segments WHERE session_id = ?').run(block.id);
+    const run = db.prepare(
+      'INSERT INTO session_segments (session_id, started_at, ended_at) VALUES (?, ?, ?)',
+    );
+    for (let i = 0; i < 20; i++) {
+      const from = Date.parse(at('10:00')) + i * 10 * MINUTE;
+      run.run(block.id, new Date(from).toISOString(), new Date(from + 8 * MINUTE).toISOString());
+    }
+    run.run(block.id, at('13:20'), null);
+    const stretches = db.prepare(
+      'INSERT INTO away_intervals (session_id, started_at, ended_at, created_at) VALUES (?, ?, ?, ?)',
+    );
+    let made = 0;
+    const addStretches = (n: number) => {
+      for (const end = made + n; made < end; made++) {
+        const from = Date.parse(at('10:00')) + made * 4 * MINUTE;
+        stretches.run(
+          block.id,
+          new Date(from).toISOString(),
+          new Date(from + 2 * MINUTE).toISOString(),
+          at('15:00'),
+        );
+      }
+    };
+    const statementsFor = async (n: number) => {
+      addStretches(n);
+      return statementsRun(() => {
+        assert.equal(listPrompts().filter((p) => p.kind === 'away').length, made);
+      });
+    };
+
+    const few = await statementsFor(3);
+    const many = await statementsFor(57);
+
+    assert.equal(made, 60);
+    assert.equal(many, few);
+  });
+
+  it('reads what it needs once for the whole list, however many meetings there are to ask about', async () => {
+    const { db } = await dbMod();
+    const { listPrompts } = await promptsMod();
+    freeze(at('15:00'));
+    // A block that was running before the meetings, which are all over by now.
+    const block = await startBlock();
+    goTo(at('15:10'));
+    (await sessionsMod()).pauseSession(block.id);
+    goTo(at('16:00'));
+    const insert = db.prepare(
+      `INSERT INTO calendar_events (id, provider, calendar_id, title, starts_at, ends_at, all_day, local_day, synced_at)
+       VALUES (?, 'ics:test', 'Test', ?, ?, ?, 0, ?, ?)`,
+    );
+    let made = 0;
+    const addMeetings = (n: number) => {
+      for (const end = made + n; made < end; made++) {
+        const to = Date.parse(at('15:05')) + (made % 50) * MINUTE;
+        const [from, finished] = [
+          new Date(to - 20 * MINUTE).toISOString(),
+          new Date(to).toISOString(),
+        ];
+        insert.run(
+          `ics:test:meeting-${made}:${from}`,
+          `Meeting ${made}`,
+          from,
+          finished,
+          DAY,
+          from,
+        );
+      }
+    };
+    const statementsFor = async (n: number) => {
+      addMeetings(n);
+      return statementsRun(() => {
+        assert.equal(listPrompts().filter((p) => p.kind === 'meeting-end').length, made);
+      });
+    };
+
+    const few = await statementsFor(3);
+    const many = await statementsFor(47);
+
+    assert.equal(made, 50);
+    assert.equal(many, few);
+  });
 });
 
 /* -------------------------------------------------------------- long blocks */
 
 describe('the long-block prompt', () => {
   let api: Api;
+  failOnLoggedErrors();
 
   before(async () => {
     api = await serve();
@@ -352,7 +575,12 @@ describe('the long-block prompt', () => {
 
   it('appears when the running block reaches the threshold, and not before', async () => {
     freeze(at('08:00'));
+    // An earlier block, so that the one asked about is not number 1 and a page that was
+    // told a fixed number would show.
+    const { stopSession } = await sessionsMod();
+    stopSession((await startBlock('Earlier')).id, 'completed');
     const block = await startBlock('Deep work');
+    assert.notEqual(block.id, 1);
 
     goTo(at('09:59:59'));
     assert.deepEqual(await listed(), []);
@@ -367,7 +595,8 @@ describe('the long-block prompt', () => {
       body: 'You have worked 2 h on this block.',
       createdAt: at('10:00'),
       actions: [
-        { id: 'finish', label: 'Finish block', open: '/?finish=1' },
+        // The page is told which block it is about.
+        { id: 'finish', label: 'Finish block', open: `/?finish=${block.id}` },
         { id: 'keep-going', label: 'Keep going' },
       ],
     });
@@ -508,6 +737,51 @@ describe('the long-block prompt', () => {
 
     assert.deepEqual(ids(await listed()), [`long-block:${second.id}:1`]);
   });
+
+  it('takes Keep going at a multiple to cover every multiple below it, so dropping time does not ask again', async () => {
+    freeze(at('08:00'));
+    const block = await startBlock();
+    goTo(at('14:10'));
+    // Six hours worked: the third multiple, kept going at.
+    assert.deepEqual(ids(await listed()), [`long-block:${block.id}:3`]);
+    await act(`long-block:${block.id}:3`, 'keep-going');
+    assert.deepEqual(await listed(), []);
+
+    // Two hours and five minutes of it were the person being away, and are dropped: the block
+    // has worked four hours and five minutes, which is the second multiple.
+    const away = await api.call('POST', `/sessions/${block.id}/away`, {
+      startedAt: at('10:00'),
+      endedAt: at('12:05'),
+    });
+    const dropped = await act(await awayPromptId(away.body.away.id), 'drop');
+    assert.equal(dropped.status, 200);
+    const { toView, getSessionRow } = await sessionsMod();
+    assert.equal(toView(getSessionRow(block.id)).elapsedSeconds, 4 * 3600 + 5 * 60);
+
+    // It had been told to keep going at the third, so it is not asked at the second.
+    assert.deepEqual(await listed(), []);
+    goTo(at('17:59:59'));
+    assert.deepEqual(await listed(), []);
+
+    // Eight hours worked is the fourth multiple, which nobody has answered.
+    goTo(at('18:05'));
+    const [again] = await listed();
+    assert.equal(again?.id, `long-block:${block.id}:4`);
+    assert.equal(again?.createdAt, at('18:05'));
+  });
+
+  it('does not take Keep going at a multiple to cover the ones above it', async () => {
+    freeze(at('08:00'));
+    const block = await startBlock();
+    goTo(at('10:00'));
+    await act(`long-block:${block.id}:1`, 'keep-going');
+    goTo(at('13:00'));
+
+    // Dismissed at two hours, and asked again at four and at six: the third multiple is new.
+    assert.deepEqual(ids(await listed()), [`long-block:${block.id}:2`]);
+    goTo(at('14:00'));
+    assert.deepEqual(ids(await listed()), [`long-block:${block.id}:3`]);
+  });
 });
 
 /* ----------------------------------------------------------------- meetings */
@@ -515,6 +789,7 @@ describe('the long-block prompt', () => {
 describe('meeting prompts', () => {
   let api: Api;
   let alpha = 0;
+  failOnLoggedErrors();
 
   before(async () => {
     api = await serve();
@@ -544,16 +819,29 @@ describe('meeting prompts', () => {
     return { block, event };
   }
 
+  /**
+   * The Roadmap review with nothing ticking through it: the block that was running since
+   * 13:30 is paused, by hand, before it begins. It is still the block on the clock, but it
+   * was not paused for the meeting, so there is nothing to pick back up afterwards.
+   */
+  async function reviewAfterPausing() {
+    const { pauseSession } = await sessionsMod();
+    const { block, event } = await reviewAndBlock();
+    goTo(at('13:59'));
+    pauseSession(block.id);
+    return { block, event };
+  }
+
   describe('when a meeting starts', () => {
     it('offers to pause the running block', async () => {
-      const { event } = await reviewAndBlock();
+      const { block, event } = await reviewAndBlock();
       goTo(at('14:02'));
 
       const [prompt, ...others] = await get();
 
       assert.equal(others.length, 0);
       assert.deepEqual(prompt, {
-        id: `meeting-start:${event}`,
+        id: startPromptId(event, block.id),
         kind: 'meeting-start',
         title: 'Roadmap review has started',
         body: 'Pause “Deep work” for it?',
@@ -580,16 +868,16 @@ describe('meeting prompts', () => {
 
     it('does not ask about a meeting that is already over', async () => {
       freeze(at('13:30'));
-      await startBlock();
+      const block = await startBlock();
       await addEvent({ title: 'Quick sync', start: at('14:00'), end: at('14:10') });
 
       goTo(at('14:09:59'));
-      assert.deepEqual(ids(await get()), [`meeting-start:ics:test:Quick sync:${at('14:00')}`]);
+      assert.deepEqual(ids(await get()), [
+        startPromptId(`ics:test:Quick sync:${at('14:00')}`, block.id),
+      ]);
+      // Over: nothing to pause for now, and none of it to log either, as the block ran all through it.
       goTo(at('14:10'));
-      assert.deepEqual(
-        (await get()).map((p) => p.kind),
-        ['meeting-end'],
-      );
+      assert.deepEqual(await get(), []);
     });
 
     it('needs a focus block that is running', async () => {
@@ -643,7 +931,7 @@ describe('meeting prompts', () => {
       const { block, event } = await reviewAndBlock();
       goTo(at('14:02'));
 
-      const res = await act(`meeting-start:${event}`, 'pause');
+      const res = await act(startPromptId(event, block.id), 'pause');
 
       assert.equal(res.status, 200);
       assert.deepEqual(res.body, { prompts: [] });
@@ -661,7 +949,7 @@ describe('meeting prompts', () => {
       const { block, event } = await reviewAndBlock();
       goTo(at('14:02'));
 
-      const res = await act(`meeting-start:${event}`, 'dismiss');
+      const res = await act(startPromptId(event, block.id), 'dismiss');
 
       assert.deepEqual(res.body, { prompts: [] });
       assert.equal((await savedState(`meeting-start:${event}`))?.status, 'dismissed');
@@ -673,13 +961,16 @@ describe('meeting prompts', () => {
 
     it('asks about two meetings that start together on their own, and pausing for one answers both', async () => {
       freeze(at('13:30'));
-      await startBlock('Deep work');
+      const block = await startBlock('Deep work');
       const a = await addEvent({ title: 'Design crit', start: at('14:00'), end: at('14:30') });
       const b = await addEvent({ title: 'Pipeline review', start: at('14:00'), end: at('14:30') });
       goTo(at('14:02'));
-      assert.deepEqual(ids(await get()), [`meeting-start:${a}`, `meeting-start:${b}`].sort());
+      assert.deepEqual(
+        ids(await get()),
+        [startPromptId(a, block.id), startPromptId(b, block.id)].sort(),
+      );
 
-      await act(`meeting-start:${a}`, 'pause');
+      await act(startPromptId(a, block.id), 'pause');
 
       // The block is paused, so nothing is left to ask for the other.
       assert.deepEqual(await get(), []);
@@ -708,14 +999,71 @@ describe('meeting prompts', () => {
       setSettings({ meeting_prompts: true });
       assert.equal((await get()).length, 1);
     });
+
+    it('does not pause a different block than the one the question named', async () => {
+      const { block, event } = await reviewAndBlock();
+      goTo(at('14:01'));
+      const [shown] = await get();
+      assert.equal(shown?.id, startPromptId(event, block.id));
+      assert.equal(shown?.body, 'Pause “Deep work” for it?');
+      // The block is swapped for another while the banner is still on screen.
+      const switched = await api.call('POST', '/sessions/switch', {
+        start: { title: 'Second block' },
+      });
+      assert.equal(switched.status, 201);
+
+      const res = await act(shown!.id, 'pause');
+
+      assert.equal(res.status, 409);
+      assert.equal(res.body.error, 'That prompt is no longer current');
+      const live = (await api.call('GET', '/sessions/active')).body.session;
+      assert.equal(live.title, 'Second block');
+      assert.equal(live.status, 'running');
+      assert.equal(await savedState(`meeting-start:${event}`), undefined);
+      // The meeting asks again, about the block that is on the clock now and under its own id.
+      const [now] = await get();
+      assert.equal(now?.id, startPromptId(event, switched.body.started.id));
+      assert.equal(now?.body, 'Pause “Second block” for it?');
+    });
+
+    it('keeps what was said about a meeting for the meeting, whichever block is on the clock', async () => {
+      const { block, event } = await reviewAndBlock();
+      goTo(at('14:01'));
+      await act(startPromptId(event, block.id), 'dismiss');
+
+      await api.call('POST', '/sessions/switch', { start: { title: 'Second block' } });
+
+      assert.deepEqual(await get(), []);
+      assert.equal((await savedState(`meeting-start:${event}`))?.status, 'dismissed');
+    });
+
+    it('refuses, in the provider itself, to pause a block other than the one the id names', async () => {
+      const { meetingStartProvider } = await meetingsMod();
+      const { block, event } = await reviewAndBlock();
+      goTo(at('14:01'));
+
+      for (const id of [
+        startPromptId(event, block.id + 1),
+        `meeting-start:${event}`,
+        `meeting-start:${event}:`,
+        `meeting-start:${event}:x`,
+        'meeting-start:',
+        'meeting-start:x',
+      ]) {
+        assert.throws(() => meetingStartProvider.act(id, 'pause', new Date()), { status: 409 }, id);
+      }
+
+      assert.equal((await sessionsMod()).getSessionRow(block.id).status, 'running');
+      assert.equal(await savedState(`meeting-start:${event}`), undefined);
+    });
   });
 
   describe('when a meeting ends', () => {
     it('offers to log a meeting that has no time on it', async () => {
-      const { event } = await reviewAndBlock();
+      const { event } = await reviewAfterPausing();
       goTo(at('14:46'));
 
-      // The running block is not paused for it, so there is nothing to resume.
+      // The block on the clock was not paused for it, so there is nothing to resume.
       const prompts = await get();
       const end = prompts.find((p) => p.kind === 'meeting-end');
 
@@ -733,7 +1081,7 @@ describe('meeting prompts', () => {
     });
 
     it('asks from the moment it ends for an hour, and not outside that', async () => {
-      await reviewAndBlock();
+      await reviewAfterPausing();
 
       goTo(at('14:44:59'));
       assert.deepEqual(
@@ -752,26 +1100,27 @@ describe('meeting prompts', () => {
     });
 
     it('offers to resume the block it paused, and to log the meeting and resume it in one', async () => {
-      const { event } = await reviewAndBlock();
+      const { block, event } = await reviewAndBlock();
       goTo(at('14:02'));
-      await act(`meeting-start:${event}`, 'pause');
+      await act(startPromptId(event, block.id), 'pause');
       goTo(at('14:46'));
 
       const [prompt, ...others] = await get();
 
       assert.equal(others.length, 0);
       assert.equal(prompt?.id, `meeting-end:${event}`);
-      assert.equal(prompt?.body, 'Log the 45m and resume “Deep work”?');
+      // The block ticked through the first two minutes of the meeting, so they are on it already.
+      assert.equal(prompt?.body, 'Log the 43m and resume “Deep work”?');
       assert.deepEqual(prompt?.actions, [
-        { id: 'log-resume', label: 'Log 45m and resume', primary: true },
-        { id: 'log', label: 'Log 45m under Alpha' },
+        { id: 'log-resume', label: 'Log 43m and resume', primary: true },
+        { id: 'log', label: 'Log 43m under Alpha' },
         { id: 'resume', label: 'Resume' },
         { id: 'dismiss', label: 'Dismiss' },
       ]);
     });
 
     it('logs the meeting as a finished focus block over its scheduled time, linked to it', async () => {
-      const { event } = await reviewAndBlock();
+      const { block, event } = await reviewAfterPausing();
       goTo(at('14:46'));
 
       const res = await act(`meeting-end:${event}`, 'log');
@@ -789,12 +1138,14 @@ describe('meeting prompts', () => {
       // The meeting now shows it, and the block on the clock is untouched.
       const events = (await api.call('GET', '/calendar/events?day=2026-10-12')).body;
       assert.equal(events[0].loggedSeconds, 45 * 60);
-      assert.equal((await sessionRows("status = 'running'")).length, 1);
+      const [untouched] = await sessionRows(`id = ${block.id}`);
+      assert.equal(untouched?.status, 'paused');
+      assert.equal(untouched?.active_seconds, 29 * 60);
       assert.deepEqual(res.body, { prompts: [] });
     });
 
     it('does not log a meeting twice', async () => {
-      const { event } = await reviewAndBlock();
+      const { event } = await reviewAfterPausing();
       const { meetingEndProvider } = await meetingsMod();
       goTo(at('14:46'));
       await act(`meeting-end:${event}`, 'log');
@@ -805,12 +1156,19 @@ describe('meeting prompts', () => {
       // ...and by a caller that did not look first.
       meetingEndProvider.act(`meeting-end:${event}`, 'log', new Date());
       meetingEndProvider.act(`meeting-end:${event}`, 'log-resume', new Date());
+      assert.equal((await sessionRows('calendar_event_id IS NOT NULL')).length, 1);
 
+      // Not even when the block that was logged has been made shorter since, so that some of
+      // the meeting is on no block: it is logged, and that is all that is asked.
+      const [logged] = await sessionRows('calendar_event_id IS NOT NULL');
+      await api.call('PATCH', `/sessions/${logged!.id}`, { activeSeconds: 10 * 60 });
+      meetingEndProvider.act(`meeting-end:${event}`, 'log', new Date());
+      meetingEndProvider.act(`meeting-end:${event}`, 'log-resume', new Date());
       assert.equal((await sessionRows('calendar_event_id IS NOT NULL')).length, 1);
     });
 
     it('does not ask to log a meeting that was logged by hand', async () => {
-      const { event } = await reviewAndBlock();
+      const { event } = await reviewAfterPausing();
       goTo(at('14:46'));
       assert.equal((await get()).length, 1);
 
@@ -838,13 +1196,16 @@ describe('meeting prompts', () => {
       stopSession(notes.id, 'abandoned');
       goTo(at('14:46'));
 
-      assert.deepEqual(actionIds((await get())[0]), ['log', 'dismiss']);
+      // Not a minute of it was ticked through by the block that was thrown away.
+      const [prompt] = await get();
+      assert.deepEqual(actionIds(prompt), ['log', 'dismiss']);
+      assert.equal(prompt?.body, 'Log the 45m as time spent?');
     });
 
     it('logs and resumes in one answer', async () => {
-      const { event } = await reviewAndBlock();
+      const { block, event } = await reviewAndBlock();
       goTo(at('14:02'));
-      await act(`meeting-start:${event}`, 'pause');
+      await act(startPromptId(event, block.id), 'pause');
       goTo(at('14:46'));
 
       const res = await act(`meeting-end:${event}`, 'log-resume');
@@ -857,18 +1218,18 @@ describe('meeting prompts', () => {
     });
 
     it('leaves the question of logging when only Resume is chosen', async () => {
-      const { event } = await reviewAndBlock();
+      const { block, event } = await reviewAndBlock();
       goTo(at('14:02'));
-      await act(`meeting-start:${event}`, 'pause');
+      await act(startPromptId(event, block.id), 'pause');
       goTo(at('14:46'));
 
       const res = await act(`meeting-end:${event}`, 'resume');
 
       assert.equal((await api.call('GET', '/sessions/active')).body.session.status, 'running');
       const [prompt] = res.body.prompts as Prompt[];
-      assert.equal(prompt?.body, 'Log the 45m as time spent?');
+      assert.equal(prompt?.body, 'Log the 43m as time spent?');
       assert.deepEqual(prompt?.actions, [
-        { id: 'log', label: 'Log 45m under Alpha', primary: true },
+        { id: 'log', label: 'Log 43m under Alpha', primary: true },
         { id: 'dismiss', label: 'Dismiss' },
       ]);
       assert.equal((await sessionRows('calendar_event_id IS NOT NULL')).length, 0);
@@ -877,7 +1238,7 @@ describe('meeting prompts', () => {
     it('leaves the question of resuming when only Log is chosen, until it is resumed', async () => {
       const { block, event } = await reviewAndBlock();
       goTo(at('14:02'));
-      await act(`meeting-start:${event}`, 'pause');
+      await act(startPromptId(event, block.id), 'pause');
       goTo(at('14:46'));
 
       const logged = await act(`meeting-end:${event}`, 'log');
@@ -900,7 +1261,7 @@ describe('meeting prompts', () => {
     it('is gone for good once it is dismissed, with the block left paused', async () => {
       const { block, event } = await reviewAndBlock();
       goTo(at('14:02'));
-      await act(`meeting-start:${event}`, 'pause');
+      await act(startPromptId(event, block.id), 'pause');
       goTo(at('14:46'));
 
       const res = await act(`meeting-end:${event}`, 'dismiss');
@@ -913,7 +1274,7 @@ describe('meeting prompts', () => {
     });
 
     it('does not stay once the logged meeting is deleted on purpose', async () => {
-      const { event } = await reviewAndBlock();
+      const { event } = await reviewAfterPausing();
       goTo(at('14:46'));
       await act(`meeting-end:${event}`, 'log');
       const { db } = await dbMod();
@@ -927,7 +1288,7 @@ describe('meeting prompts', () => {
       const { resumeSession, stopSession } = await sessionsMod();
       const { block, event } = await reviewAndBlock();
       goTo(at('14:02'));
-      await act(`meeting-start:${event}`, 'pause');
+      await act(startPromptId(event, block.id), 'pause');
       goTo(at('14:20'));
       resumeSession(block.id);
       goTo(at('14:46'));
@@ -943,7 +1304,7 @@ describe('meeting prompts', () => {
       const { db } = await dbMod();
       const { block, event } = await reviewAndBlock();
       goTo(at('14:02'));
-      await act(`meeting-start:${event}`, 'pause');
+      await act(startPromptId(event, block.id), 'pause');
       // The paused block is thrown away and the next is given its id, and is itself paused.
       db.prepare('DELETE FROM sessions WHERE id = ?').run(block.id);
       goTo(at('14:10'));
@@ -1014,13 +1375,316 @@ describe('meeting prompts', () => {
     });
 
     it('goes with the meeting when the sync removes it, and fails cleanly if it is gone mid-answer', async () => {
-      const { event } = await reviewAndBlock();
+      const { event } = await reviewAfterPausing();
       goTo(at('14:46'));
       const { db } = await dbMod();
       db.prepare('DELETE FROM calendar_events WHERE id = ?').run(event);
 
       assert.deepEqual(await get(), []);
       assert.equal((await act(`meeting-end:${event}`, 'log')).status, 409);
+    });
+
+    it('answers 409, and does nothing, to an answer the prompt offered a moment ago and no longer does', async () => {
+      const { resumeSession } = await sessionsMod();
+      const { block, event } = await reviewAndBlock();
+      goTo(at('14:02'));
+      await act(startPromptId(event, block.id), 'pause');
+      goTo(at('14:46'));
+      assert.deepEqual(actionIds((await get())[0]), ['log-resume', 'log', 'resume', 'dismiss']);
+      // The block is picked back up by hand while the question is on screen.
+      resumeSession(block.id);
+      assert.deepEqual(actionIds((await get())[0]), ['log', 'dismiss']);
+
+      for (const action of ['resume', 'log-resume']) {
+        const res = await act(`meeting-end:${event}`, action);
+        assert.equal(res.status, 409, action);
+        assert.equal(res.body.error, 'That prompt is no longer current');
+      }
+
+      assert.equal((await sessionRows('calendar_event_id IS NOT NULL')).length, 0);
+      // An answer this kind of prompt never gives is a mistake in the request, not a stale one.
+      for (const action of ['keep', 'pause', 'bogus']) {
+        assert.equal((await act(`meeting-end:${event}`, action)).status, 400, action);
+      }
+      assert.deepEqual(actionIds((await get())[0]), ['log', 'dismiss']);
+    });
+
+    describe('when blocks already hold some of its time', () => {
+      /** The Review, 14:00-14:30, and a block running since 13:30. */
+      async function reviewAndBlockShort() {
+        freeze(at('13:30'));
+        const block = await startBlock('Deep work');
+        const event = await addEvent({ title: 'Review', start: at('14:00'), end: at('14:30') });
+        return { block, event };
+      }
+
+      it('logs only the time after the block was paused, from the moment it was paused', async () => {
+        const { block, event } = await reviewAndBlockShort();
+        goTo(at('14:14'));
+        await act(startPromptId(event, block.id), 'pause');
+        goTo(at('14:31'));
+
+        const [prompt] = await get();
+        // Fourteen of its thirty minutes are on the block already.
+        assert.equal(prompt?.body, 'Log the 16m and resume “Deep work”?');
+        assert.deepEqual(
+          prompt?.actions.map((a) => a.label),
+          ['Log 16m and resume', 'Log 16m', 'Resume', 'Dismiss'],
+        );
+
+        const res = await act(`meeting-end:${event}`, 'log-resume');
+
+        assert.equal(res.status, 200);
+        const [logged] = await sessionRows('calendar_event_id IS NOT NULL');
+        assert.equal(logged?.title, 'Review');
+        assert.equal(logged?.status, 'completed');
+        assert.equal(logged?.started_at, at('14:14'));
+        assert.equal(logged?.ended_at, at('14:30'));
+        assert.equal(logged?.active_seconds, 16 * 60);
+        assert.equal((await sessionsMod()).getSessionRow(block.id).status, 'running');
+      });
+
+      it('never counts a minute twice, whatever the block does afterwards', async () => {
+        const { stopSession } = await sessionsMod();
+        const { block, event } = await reviewAndBlockShort();
+        goTo(at('14:14'));
+        await act(startPromptId(event, block.id), 'pause');
+        goTo(at('14:31'));
+        await act(`meeting-end:${event}`, 'log-resume');
+        goTo(at('15:00'));
+        stopSession(block.id, 'completed');
+
+        const rows = await sessionRows();
+        // From 13:30 to 15:00 is ninety minutes, and one of them (14:30 to 14:31) nobody worked.
+        assert.equal(
+          rows.reduce((sum, r) => sum + r.active_seconds, 0),
+          89 * 60,
+        );
+      });
+
+      it('counts a block that was logged by hand with a time that carries an offset', async () => {
+        freeze(at('13:30'));
+        const event = await addEvent({ title: 'Review', start: at('14:00'), end: at('14:30') });
+        // 16:00 to 16:30 in a zone two hours ahead is 14:00 to 14:30, the meeting exactly. Its
+        // start is stored as it was given, so as text it sorts later than the meeting's end.
+        const logged = await api.call('POST', '/sessions/manual', {
+          title: 'Taking notes',
+          startedAt: '2026-10-12T16:00:00+02:00',
+          minutes: 30,
+        });
+        assert.equal(logged.status, 201);
+        goTo(at('14:31'));
+
+        // All of it is on that block, so there is nothing to log.
+        assert.deepEqual(await get(), []);
+        assert.equal((await act(`meeting-end:${event}`, 'log')).status, 409);
+      });
+
+      it('does not count a break as time on the meeting', async () => {
+        freeze(at('13:30'));
+        await startBlock('Long rest', { kind: 'break' });
+        const event = await addEvent({ title: 'Review', start: at('14:00'), end: at('14:30') });
+        goTo(at('14:31'));
+
+        // The break ran all through it, and is not focus time: the meeting is still all to log.
+        const [prompt] = await get();
+        assert.equal(prompt?.id, `meeting-end:${event}`);
+        assert.equal(prompt?.body, 'Log the 30m as time spent?');
+      });
+
+      it('offers nothing to log when the block ran all through the meeting, and refuses to log it', async () => {
+        const { block, event } = await reviewAndBlockShort();
+        goTo(at('14:01'));
+        await act(startPromptId(event, block.id), 'dismiss');
+        goTo(at('14:31'));
+
+        // Everything it scheduled is on the block already.
+        assert.deepEqual(await get(), []);
+        assert.equal((await act(`meeting-end:${event}`, 'log')).status, 409);
+        assert.equal((await sessionRows('calendar_event_id IS NOT NULL')).length, 0);
+      });
+
+      it('logs only the time before a block that began partway through the meeting', async () => {
+        freeze(at('13:30'));
+        const event = await addEvent({ title: 'Review', start: at('14:00'), end: at('14:30') });
+        goTo(at('14:10'));
+        await startBlock('Deep work');
+        goTo(at('14:31'));
+
+        const [prompt] = await get();
+        assert.equal(prompt?.body, 'Log the 10m as time spent?');
+        assert.deepEqual(actionIds(prompt), ['log', 'dismiss']);
+
+        await act(`meeting-end:${event}`, 'log');
+
+        const [logged] = await sessionRows('calendar_event_id IS NOT NULL');
+        assert.equal(logged?.started_at, at('14:00'));
+        assert.equal(logged?.ended_at, at('14:10'));
+        assert.equal(logged?.active_seconds, 10 * 60);
+      });
+
+      it('leaves out the time before and after a block that ran through the middle of it', async () => {
+        const { pauseSession, resumeSession } = await sessionsMod();
+        freeze(at('13:30'));
+        const event = await addEvent({ title: 'Review', start: at('14:00'), end: at('14:30') });
+        const block = await startBlock('Deep work');
+        goTo(at('14:05'));
+        pauseSession(block.id);
+        goTo(at('14:10'));
+        resumeSession(block.id);
+        goTo(at('14:20'));
+        pauseSession(block.id);
+        goTo(at('14:31'));
+
+        // The block held 14:00-14:05 and 14:10-14:20, which leaves five and ten minutes.
+        const [prompt] = await get();
+        assert.equal(prompt?.body, 'Log the 15m as time spent?');
+        await act(`meeting-end:${event}`, 'log');
+        const [logged] = await sessionRows('calendar_event_id IS NOT NULL');
+        // From the first minute that nobody worked, for as long as there is of them.
+        assert.equal(logged?.started_at, at('14:05'));
+        assert.equal(logged?.active_seconds, 15 * 60);
+      });
+
+      it('offers only to resume when less than a minute of it is left, and takes exactly a minute', async () => {
+        const { block, event } = await reviewAndBlockShortMeeting();
+        // 14:00-14:10, and the block is paused 59.999 seconds before the end.
+        goTo(new Date(Date.parse(at('14:09:00')) + 1).toISOString());
+        await act(startPromptId(event, block.id), 'pause');
+        goTo(at('14:11'));
+
+        const [prompt] = await get();
+        assert.equal(prompt?.body, 'Resume “Deep work”?');
+        assert.deepEqual(actionIds(prompt), ['resume', 'dismiss']);
+        // The log is not on offer, so it is out of date to ask for it, and nothing is logged.
+        assert.equal((await act(`meeting-end:${event}`, 'log')).status, 409);
+        assert.equal((await act(`meeting-end:${event}`, 'log-resume')).status, 409);
+        assert.equal((await sessionRows('calendar_event_id IS NOT NULL')).length, 0);
+        // The block can still be picked back up, and the question is gone with it.
+        const resumed = await act(`meeting-end:${event}`, 'resume');
+        assert.deepEqual(resumed.body, { prompts: [] });
+      });
+
+      it('offers to log exactly a minute of it', async () => {
+        const { block, event } = await reviewAndBlockShortMeeting();
+        goTo(at('14:09'));
+        await act(startPromptId(event, block.id), 'pause');
+        goTo(at('14:11'));
+
+        const [prompt] = await get();
+
+        assert.equal(prompt?.body, 'Log the 1m and resume “Deep work”?');
+        await act(`meeting-end:${event}`, 'log');
+        const [logged] = await sessionRows('calendar_event_id IS NOT NULL');
+        assert.equal(logged?.started_at, at('14:09'));
+        assert.equal(logged?.active_seconds, 60);
+      });
+
+      /** The Standup, 14:00-14:10, and a block running since 13:30. */
+      async function reviewAndBlockShortMeeting() {
+        freeze(at('13:30'));
+        const block = await startBlock('Deep work');
+        const event = await addEvent({ title: 'Standup', start: at('14:00'), end: at('14:10') });
+        return { block, event };
+      }
+
+      it('counts the time another meeting logged, when two meetings overlap', async () => {
+        freeze(at('09:00'));
+        const first = await addEvent({ title: 'First', start: at('10:00'), end: at('10:30') });
+        const second = await addEvent({ title: 'Second', start: at('10:10'), end: at('10:40') });
+        goTo(at('10:31'));
+        await act(`meeting-end:${first}`, 'log');
+        goTo(at('10:41'));
+
+        const [prompt] = await get();
+        // Twenty of its thirty minutes are in the first meeting, which was logged.
+        assert.equal(prompt?.id, `meeting-end:${second}`);
+        assert.equal(prompt?.body, 'Log the 10m as time spent?');
+        await act(prompt!.id, 'log');
+
+        const logged = await sessionRows('calendar_event_id IS NOT NULL');
+        assert.deepEqual(
+          logged.map((r) => [r.title, r.started_at, r.ended_at, r.active_seconds]),
+          [
+            ['First', at('10:00'), at('10:30'), 30 * 60],
+            ['Second', at('10:30'), at('10:40'), 10 * 60],
+          ],
+        );
+      });
+    });
+
+    it('asks about every meeting however many there are, and leaves out the ones that were dismissed or logged', async () => {
+      const { db } = await dbMod();
+      freeze(at('16:00'));
+      const insert = db.prepare(
+        `INSERT INTO calendar_events (id, provider, calendar_id, title, starts_at, ends_at, all_day, local_day, synced_at)
+         VALUES (?, 'ics:test', 'Test', ?, ?, ?, 0, ?, ?)`,
+      );
+      const ids: string[] = [];
+      for (let i = 0; i < 1100; i++) {
+        const end = Date.parse(at('15:05')) + (i % 50) * MINUTE;
+        const from = new Date(end - 20 * MINUTE).toISOString();
+        const id = `ics:test:meeting-${i}:${from}`;
+        insert.run(id, `Meeting ${i}`, from, new Date(end).toISOString(), DAY, from);
+        ids.push(id);
+      }
+      // Ones from the far end of the list, past every batch the database is asked in.
+      const dismissed = [ids[505]!, ids[1020]!];
+      const logged = [ids[510]!, ids[1030]!];
+      for (const id of dismissed) {
+        db.prepare(
+          "INSERT INTO prompt_state (key, status, updated_at) VALUES (?, 'dismissed', ?)",
+        ).run(`meeting-end:${id}`, at('15:30'));
+      }
+      for (const id of logged) {
+        db.prepare(
+          `INSERT INTO sessions (title, kind, planned_minutes, started_at, ended_at, local_day,
+             active_seconds, status, calendar_event_id, created_at, updated_at)
+           VALUES ('Logged', 'focus', 20, ?, ?, ?, 1200, 'completed', ?, ?, ?)`,
+        ).run(at('15:00'), at('15:20'), DAY, id, at('15:20'), at('15:20'));
+      }
+
+      const asked = (await get()).filter((p) => p.kind === 'meeting-end');
+
+      assert.equal(asked.length, 1100 - 4);
+      const askedIds = new Set(asked.map((p) => p.id));
+      for (const id of [...dismissed, ...logged]) assert.ok(!askedIds.has(`meeting-end:${id}`), id);
+    });
+
+    it('answers and logs a meeting whose id is long', async () => {
+      freeze(at('13:30'));
+      // A UID of 1,400 characters, and one that makes the id as long as an id can be.
+      const long = await addEvent({
+        title: 'Long uid',
+        id: `ics:cal_x:${'u'.repeat(1400)}:${at('13:00')}`,
+        start: at('13:00'),
+        end: at('13:20'),
+      });
+      const longest = await addEvent({
+        title: 'Longest uid',
+        id: `ics:cal_x:${'v'.repeat(2000 - 'ics:cal_x::'.length - at('13:00').length)}:${at('13:00')}`,
+        start: at('13:00'),
+        end: at('13:20'),
+      });
+      assert.equal(longest.length, 2000);
+      const shown = await get();
+      assert.ok(shown.some((p) => p.id === `meeting-end:${long}` && p.id.length > 1000));
+
+      // Answered from the prompt, which carries the whole id...
+      assert.equal((await act(`meeting-end:${longest}`, 'dismiss')).status, 200);
+      // ...and logged by hand, which carries it as well.
+      const manual = await api.call('POST', '/sessions/manual', {
+        title: 'Long uid',
+        startedAt: at('13:00'),
+        minutes: 20,
+        calendarEventId: long,
+      });
+      assert.equal(manual.status, 201);
+      assert.equal(manual.body.calendarEventId, long);
+      assert.deepEqual(
+        (await get()).map((p) => p.id),
+        [],
+      );
     });
   });
 });

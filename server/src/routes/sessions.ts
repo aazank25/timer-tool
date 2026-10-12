@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../db.js';
 import { reportAway } from '../lib/away.js';
+import { MAX_EVENT_ID_LENGTH } from '../lib/calendar.js';
 import { badRequest, handler, intParam, notFound, parse } from '../lib/http.js';
 import { INTERRUPTION_REASON_KEYS } from '../lib/interruptions.js';
 import { dayStartHour, tz } from '../lib/settings.js';
@@ -9,6 +10,7 @@ import {
   addInterruption,
   extendSession,
   getSessionRow,
+  keepPendingAway,
   listSessions,
   liveSessionRow,
   logManualSession,
@@ -41,7 +43,7 @@ const startSchema = z.object({
   estimatedMinutes: estimate,
   kind: z.enum(['focus', 'break']).optional(),
   planItemId: z.number().int().positive().nullish(),
-  calendarEventId: z.string().max(300).nullish(),
+  calendarEventId: z.string().max(MAX_EVENT_ID_LENGTH).nullish(),
 });
 
 /** The block to start is the start body itself, so the two can never disagree about what one is. */
@@ -68,8 +70,9 @@ const manualSchema = z.object({
   focusRating: rating.nullish(),
   notes: z.string().max(20_000).nullish(),
   kind: z.enum(['focus', 'break']).optional(),
-  // The meeting this is the time spent on. It has to exist; logManualSession checks.
-  calendarEventId: z.string().max(300).nullish(),
+  // The meeting this is the time spent on. It has to exist, and not be logged already;
+  // logManualSession checks.
+  calendarEventId: z.string().max(MAX_EVENT_ID_LENGTH).nullish(),
 });
 
 const awaySchema = z.object({
@@ -167,14 +170,16 @@ sessionsRouter.post(
 
 /**
  * The desktop app reports time you were away while this block ran. It is kept as a prompt
- * until you keep it or drop it (see lib/away.ts), not decided here.
+ * until you keep it or drop it (see lib/away.ts), not decided here. A report with nothing
+ * new in it, because the stretch was kept or dropped already, holds nothing: 200 and
+ * `{ away: null }` rather than 201 and the stretch.
  */
 sessionsRouter.post(
   '/:id/away',
   handler((req, res) => {
     const body = parse(awaySchema, req.body);
     const away = reportAway(intParam(req.params.id, 'session id'), body.startedAt, body.endedAt);
-    res.status(201);
+    res.status(away ? 201 : 200);
     return { away };
   }),
 );
@@ -288,13 +293,17 @@ sessionsRouter.post(
     }
     const endedAt = new Date(Date.parse(startedAt) + row.active_seconds * 1000).toISOString();
     db.transaction(() => {
+      const now = nowIso();
       db.prepare(
         'UPDATE sessions SET started_at = ?, ended_at = ?, local_day = ?, updated_at = ? WHERE id = ?',
-      ).run(startedAt, endedAt, focusDay(startedAt, tz(), dayStartHour()), nowIso(), id);
+      ).run(startedAt, endedAt, focusDay(startedAt, tz(), dayStartHour()), now, id);
       db.prepare('DELETE FROM session_segments WHERE session_id = ?').run(id);
       db.prepare(
         'INSERT INTO session_segments (session_id, started_at, ended_at) VALUES (?, ?, ?)',
       ).run(id, startedAt, endedAt);
+      // Moved to the time it really was: the stretches reported against where it stood
+      // before no longer line up with it, and the person has said where it belongs.
+      keepPendingAway(id, now);
     })();
     return toView(getSessionRow(id));
   }),

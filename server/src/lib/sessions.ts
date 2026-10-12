@@ -362,7 +362,21 @@ export function overwriteActiveSeconds(id: number, seconds: number, now = nowIso
       now,
       id,
     );
+    keepPendingAway(id, now);
   })();
+}
+
+/**
+ * Answer, as Keep it, the away stretches of a block that are still waiting for one. It is
+ * for the moment its time has been set by hand (typed in, given when finishing, or the block
+ * moved to another time): whoever did that has said what the time was, and a stretch dropped
+ * from it afterwards would take the same minutes off twice, or cut the wrong ones. Not a
+ * transaction of its own: it belongs to the write that set the time.
+ */
+export function keepPendingAway(sessionId: number, now: string): void {
+  db.prepare(
+    "UPDATE away_intervals SET status = 'kept', resolved_at = ? WHERE session_id = ? AND status = 'pending'",
+  ).run(now, sessionId);
 }
 
 /**
@@ -466,7 +480,8 @@ export function switchSession(input: SwitchInput): {
 /**
  * Log a block that happened away from the timer. Given a calendar event it is the time
  * spent on that meeting: the block is linked to it, so the meeting shows what was logged
- * on it and cannot be logged a second time by mistake.
+ * on it, and a meeting that has time logged on it already (by a block that was not thrown
+ * away) is refused with a 409 rather than logged a second time.
  */
 export function logManualSession(input: {
   projectId?: number | null;
@@ -482,13 +497,22 @@ export function logManualSession(input: {
   const seconds = Math.round(input.minutes * 60);
   const endedAt = new Date(Date.parse(input.startedAt) + seconds * 1000).toISOString();
   return db.transaction(() => {
-    // Nothing enforces the link, so a meeting that is not there is refused here, ahead of
-    // the write, rather than left pointing at nothing.
-    if (
-      input.calendarEventId != null &&
-      !db.prepare('SELECT 1 FROM calendar_events WHERE id = ?').get(input.calendarEventId)
-    ) {
-      throw badRequest('Unknown calendar event');
+    if (input.calendarEventId != null) {
+      // Nothing enforces the link, so a meeting that is not there is refused here, ahead of
+      // the write, rather than left pointing at nothing.
+      if (!db.prepare('SELECT 1 FROM calendar_events WHERE id = ?').get(input.calendarEventId)) {
+        throw badRequest('Unknown calendar event');
+      }
+      // Looked up in the same transaction as the write, so two requests cannot both pass.
+      if (
+        db
+          .prepare(
+            "SELECT 1 FROM sessions WHERE calendar_event_id = ? AND status <> 'abandoned' LIMIT 1",
+          )
+          .get(input.calendarEventId)
+      ) {
+        throw conflict('That meeting is already logged');
+      }
     }
     const info = db
       .prepare(

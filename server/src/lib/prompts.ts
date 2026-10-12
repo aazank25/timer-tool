@@ -18,14 +18,17 @@ export interface PromptAction {
   /** The answer most people want. */
   primary?: boolean;
   /**
-   * A route of the client to go to, such as '/?finish=1'. The client handles it itself and
+   * A route of the client to go to, such as '/?finish=12'. The client handles it itself and
    * never sends it here: there is nothing for the server to do.
    */
   open?: string;
 }
 
 export interface Prompt {
-  /** Stays the same for as long as the same thing is pending: 'away:12', 'long-block:345:1'. */
+  /**
+   * Stays the same for as long as the same thing is pending, and is not given to anything
+   * else afterwards: 'away:12:1760263200000', 'long-block:345:1'.
+   */
   id: string;
   /** What sort of question it is, and so which provider answers for it. */
   kind: string;
@@ -42,6 +45,13 @@ export interface Prompt {
 export interface PromptProvider {
   /** The kind of every prompt it lists. */
   kind: string;
+  /**
+   * Every action a prompt of this kind can ever offer, whether or not the one on screen does
+   * now. It is how an answer that has gone out of date (Resume, after the block was resumed
+   * by hand) is told from one that was never an answer to this kind (a 409, not a 400). A
+   * provider that leaves it out gets a 400 for every action its prompt does not offer.
+   */
+  actionIds?: readonly string[];
   /** What is due now. Worked out from the data as it stands, so it asks nothing twice. */
   list(now: Date): Prompt[];
   /**
@@ -100,16 +110,20 @@ export function listPrompts(now: Date = new Date()): Prompt[] {
  * Answer a prompt, and hand back the list as it is now. The prompt is looked up in what is
  * due this moment and not taken on trust from the caller: one that has been answered
  * elsewhere, or has stopped being true, is a 409, so a notification left on screen cannot
- * act on something that no longer applies.
+ * act on something that no longer applies. So is an action that this kind of prompt gives
+ * but this one no longer does; an action the kind never gives is a 400.
  */
 export function actOnPrompt(id: string, action: string, now: Date = new Date()): Prompt[] {
   const prompt = listPrompts(now).find((p) => p.id === id);
   if (!prompt) throw conflict('That prompt is no longer current');
+  const provider = providers.find((p) => p.kind === prompt.kind);
   const chosen = prompt.actions.find((a) => a.id === action);
-  if (!chosen) throw badRequest(`Unknown action: ${action}`);
+  if (!chosen) {
+    if (provider?.actionIds?.includes(action)) throw conflict('That prompt is no longer current');
+    throw badRequest(`Unknown action: ${action}`);
+  }
   // Opening a page is the client's own business.
   if (chosen.open) throw badRequest('That action is carried out by the app, not the server');
-  const provider = providers.find((p) => p.kind === prompt.kind);
   if (!provider) throw conflict('That prompt is no longer current');
   db.transaction(() => provider.act(id, action, now))();
   return listPrompts(now);
