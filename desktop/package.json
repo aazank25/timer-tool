@@ -8,7 +8,8 @@
   "scripts": {
     "payload": "node scripts/build.mjs",
     "start": "npm run payload && electron .",
-    "dist:mac": "npm run payload && electron-builder --mac",
+    "dist:mac": "npm run payload && node scripts/dist-mac.mjs",
+    "dist:mac:all": "npm run payload && node scripts/dist-mac.mjs --all",
     "dist:win": "npm run payload && electron-builder --win",
     "dist:linux": "npm run payload && electron-builder --linux",
     "pack": "npm run payload && electron-builder --dir"
@@ -31,6 +32,8 @@
     "files": [
       "main.mjs",
       "palette.mjs",
+      "away.mjs",
+      "attention.mjs",
       "preload.cjs",
       "dist/**/*",
       "web/**/*",

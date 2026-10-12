@@ -10,7 +10,12 @@ import {
   nativeImage,
   shell,
   dialog,
+  Notification,
+  powerMonitor,
+  session as electronSession,
 } from 'electron';
+import { createAttention, interruptedItem } from './attention.mjs';
+import { createAwayTracker } from './away.mjs';
 import { createPalette, isLocal } from './palette.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -83,14 +88,44 @@ function createWindow() {
   });
 }
 
-function showWindow() {
+/**
+ * The address of a page of the app, with the flag that tells the page it is inside this
+ * shell (see IS_DESKTOP in web/src/App.tsx). A route that does not stay on the local server
+ * is not one of the app's, and goes to the front page instead.
+ */
+function routeUrl(route) {
+  const base = new URL(server.url);
+  const url = new URL(route, base);
+  if (url.origin !== base.origin) return routeUrl('/');
+  url.searchParams.set('desktop', '1');
+  return url.toString();
+}
+
+/**
+ * Show the main window. With a route ('/wrap-up', '/wrap-up/week?week=2026-10-05') it is taken
+ * there first and shown once the page is up, so it never opens on the page it was last left
+ * on. Electron hands an event to the handlers that call this as they are (the tray, the
+ * hotkey, the dock icon), so only a string is a route.
+ */
+function showWindow(route) {
   // A second launch during startup can ask for the window before the server
   // is up. The first copy opens it itself once the server is ready.
   if (!server) return;
   if (!win) createWindow();
-  if (isMac) void app.dock?.show();
-  win.show();
-  win.focus();
+  const reveal = () => {
+    if (isMac) void app.dock?.show();
+    win.show();
+    win.focus();
+  };
+  if (typeof route !== 'string') {
+    reveal();
+    return;
+  }
+  win
+    .loadURL(routeUrl(route))
+    // A page that is replaced by another before it has loaded is not a failure to show it.
+    .catch((err) => console.error('[focusdesk] could not open', route, err.message))
+    .finally(reveal);
 }
 
 /* ------------------------------------------------------------------ api */
@@ -101,6 +136,34 @@ async function api(pathname, method = 'GET') {
   return res.status === 204 ? null : res.json();
 }
 
+/**
+ * The same with a JSON body, and with the server's own words for what went wrong, which is
+ * what a person is shown when an answer is refused ("That prompt is no longer current").
+ */
+async function apiJson(pathname, method, body) {
+  const res = await fetch(`${server.url}/api${pathname}`, {
+    method,
+    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  let payload = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    // Not JSON: the status says enough.
+  }
+  if (!res.ok) {
+    throw Object.assign(
+      new Error(payload?.error ?? `${method} ${pathname} failed: ${res.status}`),
+      {
+        status: res.status,
+      },
+    );
+  }
+  return payload;
+}
+
 /* ----------------------------------------------------------------- tray */
 
 /**
@@ -109,6 +172,14 @@ async function api(pathname, method = 'GET') {
  * interpolates in between rather than keeping its own count.
  */
 const live = { session: null, elapsedAtPoll: 0, polledAt: 0 };
+
+// Made once the server is up, and left null (so the menu is as it always was) until then.
+/** What needs your attention: the notifications, and the top of the menu. */
+let attention = null;
+/** Whether you left the machine while a block was running. */
+let away = null;
+/** What "Got interrupted" offers. It comes from the server, so the two cannot drift apart. */
+let interruptionReasons = [];
 
 async function poll() {
   try {
@@ -147,13 +218,29 @@ function formatClock(seconds) {
  */
 let menuSignature = null;
 
+/** What the menu-bar item says, as last set: the tests read it, since only a Mac has a title to see. */
+let trayText = { title: '', toolTip: '' };
+
+function setTrayText(title, toolTip) {
+  trayText = { title, toolTip };
+  if (isMac) tray.setTitle(title);
+  tray.setToolTip(toolTip);
+}
+
 function renderTitle() {
   if (!tray) return;
   const s = live.session;
+  // A dot before the clock while something is waiting for an answer: it is seen without being
+  // read, and the clock beside it is as it was. Without a clock it stands alone.
+  const waiting = attention?.pending() ?? 0;
+  const mark = waiting > 0 ? '•' : '';
+  const needs =
+    waiting > 0
+      ? `\n${waiting} ${waiting === 1 ? 'thing needs' : 'things need'} your attention`
+      : '';
 
   if (!s) {
-    if (isMac) tray.setTitle('');
-    tray.setToolTip('FocusDesk - nothing running');
+    setTrayText(mark, `FocusDesk - nothing running${needs}`);
     return;
   }
 
@@ -167,12 +254,17 @@ function renderTitle() {
     const remaining = s.plannedSeconds - elapsedNow();
     label = remaining >= 0 ? formatClock(remaining) : `+${formatClock(-remaining)}`;
   }
-  if (isMac) tray.setTitle(s.status === 'paused' ? `|| ${label}` : ` ${label}`);
   const project = s.projectName ?? 'No project';
-  tray.setToolTip(
-    stopwatch ? `${s.title}\n${project} · stopwatch ${label}` : `${s.title}\n${project} - ${label}`,
+  setTrayText(
+    s.status === 'paused' ? `${mark ? `${mark} ` : ''}|| ${label}` : `${mark} ${label}`,
+    (stopwatch
+      ? `${s.title}\n${project} · stopwatch ${label}`
+      : `${s.title}\n${project} - ${label}`) + needs,
   );
 }
+
+/** The menu as it was last built, as data that still has its click handlers: what the tests press. */
+let builtMenu = null;
 
 function renderMenu() {
   if (!tray) return;
@@ -181,62 +273,72 @@ function renderMenu() {
   const signature = JSON.stringify([
     s?.id ?? null,
     s?.status ?? null,
+    s?.kind ?? null,
     s?.title ?? null,
     s?.projectName ?? null,
     app.getLoginItemSettings().openAtLogin,
+    attention?.signature() ?? null,
+    interruptionReasons.length,
   ]);
   if (signature === menuSignature) return;
   menuSignature = signature;
 
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      ...(s
-        ? [
-            { label: s.title.slice(0, 60), enabled: false },
-            {
-              label: s.projectName ? `Project: ${s.projectName}` : 'No project',
-              enabled: false,
-            },
-            { type: 'separator' },
-            s.status === 'paused'
-              ? { label: 'Resume', click: () => void act(`/sessions/${s.id}/resume`) }
-              : { label: 'Pause', click: () => void act(`/sessions/${s.id}/pause`) },
-            {
-              label: 'Got interrupted',
-              click: () => void act(`/sessions/${s.id}/interruption`),
-            },
-            { label: 'Finish block...', click: showWindow },
-            { type: 'separator' },
-          ]
-        : [{ label: 'Nothing running', enabled: false }, { type: 'separator' }]),
-      { label: 'Open FocusDesk', accelerator: 'CommandOrControl+Shift+F', click: showWindow },
-      { type: 'separator' },
-      {
-        label: 'Launch at login',
-        type: 'checkbox',
-        checked: app.getLoginItemSettings().openAtLogin,
-        click: (item) => {
-          app.setLoginItemSettings({ openAtLogin: item.checked });
-          renderMenu();
-        },
+  builtMenu = [
+    // What is waiting for an answer goes first: it is why the menu-bar item has a dot.
+    ...(attention?.menuItems() ?? []),
+    ...(s
+      ? [
+          { label: s.title.slice(0, 60), enabled: false },
+          {
+            label: s.projectName ? `Project: ${s.projectName}` : 'No project',
+            enabled: false,
+          },
+          { type: 'separator' },
+          s.status === 'paused'
+            ? { label: 'Resume', click: () => void act(`/sessions/${s.id}/resume`) }
+            : { label: 'Pause', click: () => void act(`/sessions/${s.id}/pause`) },
+          interruptedItem(s, interruptionReasons, (id, reason) =>
+            act(`/sessions/${id}/interruption`, reason ? { reason } : {}),
+          ),
+          { label: 'Finish block...', click: showWindow },
+          { type: 'separator' },
+        ]
+      : [{ label: 'Nothing running', enabled: false }, { type: 'separator' }]),
+    { label: 'Open FocusDesk', accelerator: 'CommandOrControl+Shift+F', click: showWindow },
+    { type: 'separator' },
+    {
+      label: 'Launch at login',
+      type: 'checkbox',
+      checked: app.getLoginItemSettings().openAtLogin,
+      click: (item) => {
+        app.setLoginItemSettings({ openAtLogin: item.checked });
+        renderMenu();
       },
-      {
-        label: 'Reveal data folder',
-        click: () => void shell.openPath(process.env.FOCUSDESK_DATA_DIR),
-      },
-      { type: 'separator' },
-      { label: 'Quit FocusDesk', accelerator: 'CommandOrControl+Q', click: () => app.quit() },
-    ]),
-  );
+    },
+    {
+      label: 'Reveal data folder',
+      click: () => void shell.openPath(process.env.FOCUSDESK_DATA_DIR),
+    },
+    { type: 'separator' },
+    { label: 'Quit FocusDesk', accelerator: 'CommandOrControl+Q', click: () => app.quit() },
+  ];
+  tray.setContextMenu(Menu.buildFromTemplate(builtMenu));
 }
 
-async function act(pathname) {
+/**
+ * POST to the server for something chosen in the menu, then read the clock and what is pending
+ * again: pausing a block can answer a question about a meeting, and an answer can move the clock.
+ * Resolves when that is done, and never rejects.
+ */
+async function act(pathname, body) {
   try {
-    await api(pathname, 'POST');
+    if (body === undefined) await api(pathname, 'POST');
+    else await apiJson(pathname, 'POST', body);
   } catch (err) {
     console.error('[focusdesk]', err);
   }
   await poll();
+  void attention?.refresh();
 }
 
 function createTray() {
@@ -340,6 +442,201 @@ function syncHotkey() {
   return run;
 }
 
+/* ------------------------------------------------ away, and needs attention */
+
+/** How often the machine is asked how long it has been without input. */
+const IDLE_POLL_MS = 15_000;
+/** How often the server is asked what needs attention. */
+const PROMPT_POLL_MS = 15_000;
+/** How often the settings are read again, which away detection goes by, besides when one is saved. */
+const SETTINGS_POLL_MS = 60_000;
+
+/** What the tests put in place of the clock and the idle time, to stand in for hours of waiting. */
+const stubbed = { now: null, idleSeconds: null };
+
+function systemIdleSeconds() {
+  if (stubbed.idleSeconds != null) return stubbed.idleSeconds;
+  try {
+    return powerMonitor.getSystemIdleTime();
+  } catch {
+    // Not every platform can say. Never idle is the safe answer: nothing is reported or held back for it.
+    return 0;
+  }
+}
+
+/** The settings as last read. Away detection goes by them, and is off until they have been. */
+let settings = null;
+
+async function readSettings() {
+  try {
+    settings = await api('/settings');
+  } catch (err) {
+    console.error('[focusdesk] could not read the settings', err);
+  }
+}
+
+/** Find an item of the menu by the labels leading to it: ['Needs attention', ...] is not one, a prompt's title is. */
+function menuItemAt(path) {
+  let items = builtMenu ?? [];
+  let found = null;
+  for (const label of path) {
+    found = items.find((item) => item.label === label) ?? null;
+    if (!found) return null;
+    items = found.submenu ?? [];
+  }
+  return found;
+}
+
+/**
+ * Look for what needs your attention and for time you were away, and put each where you will
+ * see it. Needs the server (it is what they ask) but not the window, so it runs in the menu bar
+ * with the window closed, which is when it is wanted.
+ */
+async function startAttention() {
+  ({ INTERRUPTION_REASONS: interruptionReasons } = await import('./dist/server.mjs'));
+  /** What was reported to the server and how it went: for the tests, which cannot see the request. */
+  const reports = [];
+
+  attention = createAttention({
+    fetchPrompts: () => api('/prompts'),
+    actOnPrompt: (id, action) => apiJson('/prompts/act', 'POST', { id, action }),
+    Notification,
+    getIdleSeconds: systemIdleSeconds,
+    // Locked, or another user has the Mac: nobody is there to be told.
+    isLocked: () => {
+      const state = away?.state();
+      return !!state && (state.locked || state.suspended || state.switched);
+    },
+    openWindow: showWindow,
+    openPalette: () => palette.showPalette(),
+    showError: (message) => {
+      void dialog
+        .showMessageBox({
+          type: 'error',
+          title: 'FocusDesk',
+          message: 'That did not work',
+          detail: message,
+        })
+        .catch((err) => console.error('[focusdesk]', err));
+    },
+    onChange: () => {
+      renderTitle();
+      renderMenu();
+    },
+    afterAction: poll,
+    log: (...args) => console.error('[focusdesk]', ...args),
+  });
+
+  away = createAwayTracker({
+    now: () => stubbed.now ?? Date.now(),
+    getIdleSeconds: systemIdleSeconds,
+    getLive: () => live.session,
+    getSettings: () => settings,
+    report: async ({ sessionId, startedAt, endedAt }) => {
+      const entry = { sessionId, startedAt, endedAt, ok: true, error: null };
+      try {
+        await apiJson(`/sessions/${sessionId}/away`, 'POST', { startedAt, endedAt });
+      } catch (err) {
+        entry.ok = false;
+        entry.error = messageOf(err);
+        throw err;
+      } finally {
+        // Noted once it has an outcome, so whoever sees an entry knows how it went.
+        reports.push(entry);
+      }
+      // The server now has a question about it: ask what it is, rather than in a quarter of a minute.
+      void attention.refresh();
+    },
+    // A block that is gone, or a stretch the server will not take, is no news: it is only logged.
+    log: (...args) => console.warn('[focusdesk]', ...args),
+  });
+
+  // Each of these is the system telling us something; none of them may throw into Electron.
+  const onPower = (event, handler) =>
+    powerMonitor.on(event, () => {
+      Promise.resolve()
+        .then(handler)
+        .catch((err) => console.error('[focusdesk]', event, err));
+    });
+  onPower('lock-screen', () => away.onLock());
+  onPower('suspend', () => away.onSuspend());
+  onPower('user-did-resign-active', () => away.onResignActive());
+  // Coming back is when what was asked in the meantime is read, and said if you are there to hear it.
+  const comeBack = async (end) => {
+    await end();
+    void readSettings();
+    await attention.refresh();
+  };
+  onPower('unlock-screen', () => comeBack(() => away.onUnlock()));
+  onPower('resume', () => comeBack(() => away.onResume()));
+  onPower('user-did-become-active', () => comeBack(() => away.onBecomeActive()));
+
+  // Saving the settings in either window: the thresholds may be different now.
+  electronSession.defaultSession.webRequest.onCompleted((details) => {
+    if (
+      details.method === 'PATCH' &&
+      details.statusCode < 400 &&
+      details.url.startsWith(`${server.url}/api/settings`)
+    ) {
+      void readSettings();
+    }
+  });
+
+  await readSettings();
+  await attention.refresh();
+  setInterval(() => void away.tick(), IDLE_POLL_MS);
+  setInterval(() => void attention.refresh(), PROMPT_POLL_MS);
+  setInterval(() => void readSettings(), SETTINGS_POLL_MS);
+
+  if (process.env.FOCUSDESK_TEST === '1' && globalThis.__focusdesk) {
+    const events = {
+      lock: 'onLock',
+      unlock: 'onUnlock',
+      suspend: 'onSuspend',
+      resume: 'onResume',
+      'resign-active': 'onResignActive',
+      'become-active': 'onBecomeActive',
+    };
+    Object.assign(globalThis.__focusdesk, {
+      away: {
+        state: () => away.state(),
+        reports: () => reports.map((r) => ({ ...r })),
+        settings: () => settings && { ...settings },
+        readSettings,
+        tick: () => away.tick(),
+        /** One of lock, unlock, suspend, resume, resign-active, become-active, as if it had been seen at `at`. */
+        event: (name, at) => away[events[name]](at),
+        /** Pretend it is this time, as epoch milliseconds, or the real one again with null. */
+        setClock: (ms) => {
+          stubbed.now = ms;
+        },
+        /** Pretend the machine has been idle this many seconds, or let it say for itself with null. */
+        setIdle: (seconds) => {
+          stubbed.idleSeconds = seconds;
+        },
+      },
+      attention: {
+        prompts: () => attention.prompts(),
+        notified: () => attention.notified(),
+        refresh: () => attention.refresh(),
+      },
+      /** The menu-bar menu as plain data, without its click handlers. */
+      menuTemplate: () => JSON.parse(JSON.stringify(builtMenu ?? [])),
+      /** What the menu-bar item says: { title, toolTip }. */
+      trayText: () => ({ ...trayText }),
+      /** Choose an item of the menu by the labels leading to it, as a click on it would. */
+      clickMenu: (path) => {
+        const item = menuItemAt(path);
+        if (!item?.click) throw new Error(`There is no menu item ${path.join(' > ')}`);
+        return item.click(item, win, {});
+      },
+      showWindow: (route) => showWindow(route),
+      windowUrl: () => win?.webContents.getURL() ?? null,
+      windowVisible: () => !!win?.isVisible(),
+    });
+  }
+}
+
 /* ----------------------------------------------------------------- boot */
 
 app.whenReady().then(async () => {
@@ -367,8 +664,9 @@ app.whenReady().then(async () => {
   palette = createPalette({
     serverUrl: server.url,
     backgroundColor: BACKGROUND,
-    // The box may have changed what is on the clock: show it in the menu bar now, not in 5s.
-    onClose: () => void poll(),
+    // The box may have changed what is on the clock, and a block that is started answers the
+    // nudge to start one: show both in the menu bar now, not in 5s and 15s.
+    onClose: () => void poll().then(() => attention?.refresh()),
   });
   if (process.env.FOCUSDESK_TEST === '1') {
     // What the end-to-end tests reach into the running app by, and nothing else does.
@@ -408,6 +706,13 @@ app.whenReady().then(async () => {
   );
 
   app.on('activate', showWindow);
+
+  // Last, and on its own: the menu bar clock and the shortcuts above work without it.
+  try {
+    await startAttention();
+  } catch (err) {
+    console.error('[focusdesk] away detection and notifications could not start', err);
+  }
 });
 
 app.on('second-instance', showWindow);

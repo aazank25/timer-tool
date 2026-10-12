@@ -128,15 +128,16 @@ export function PromptSettings() {
       subtitle="Questions FocusDesk asks instead of letting the clock run on unattended"
     >
       <p className="mb-4 rounded-lg border border-hairline bg-raised px-3 py-2 text-xs text-ink-2">
-        Away detection and nudges need the desktop app: a browser tab cannot tell when you have
-        stepped away. The long-block reminder and meeting prompts work in either.
+        Away detection and notifications need the desktop app: a browser tab cannot tell when you
+        have stepped away. Everything here also shows as a banner under the clock, in a browser or
+        in the app.
       </p>
 
       <div className="grid gap-4 sm:grid-cols-2">
         <NumberRow
           id={`${base}-away`}
           label="Away after (minutes)"
-          hint="Desktop app only. Locked, asleep or idle this long while a block runs, and you are asked whether to keep that time or drop it. 0 turns it off."
+          hint="Desktop app only. If the screen was locked, the computer asleep or untouched for at least this long while a focus block was running, you are asked whether to keep that time or drop it. Shorter absences are ignored. 0 turns it off."
           value={value('away_minutes')}
           max={MAX_MINUTES.away_minutes}
           error={problems.away_minutes}
@@ -224,7 +225,8 @@ export function PromptSettings() {
             </label>
           </div>
           <p id={`${base}-hours-hint`} className="mt-1 text-[11px] text-muted">
-            The desktop app&rsquo;s nudges keep to these days and hours.
+            The nudge below keeps to these days and hours. The wrap-up reminder keeps to the work
+            days too, and the review of last week comes when work starts on the first of them.
           </p>
           {problems.hours && (
             <p id={`${base}-hours-error`} role="alert" className="mt-1 text-[11px] text-critical">
@@ -236,7 +238,7 @@ export function PromptSettings() {
         <NumberRow
           id={`${base}-nudge`}
           label="Nudge after (minutes)"
-          hint="Desktop app only. In your work hours, how long nothing may be running before you are nudged to start a block. 0 turns nudges off."
+          hint="In work hours, when nothing has been on the clock for this long, FocusDesk nudges you: a banner, and a notification from the menu-bar app. 0 turns it off."
           value={value('nudge_minutes')}
           max={MAX_MINUTES.nudge_minutes}
           error={problems.nudge_minutes}

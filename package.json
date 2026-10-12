@@ -14,11 +14,13 @@
     "build": "npm run build -w web && npm run build -w server",
     "start": "npm run start -w server",
     "typecheck": "npm run typecheck -w server && npm run typecheck -w web",
-    "test": "npm run test -w server",
-    "desktop": "npm --prefix desktop install && npm --prefix desktop start",
-    "desktop:mac": "npm --prefix desktop install && npm --prefix desktop run dist:mac",
-    "desktop:win": "npm --prefix desktop install && npm --prefix desktop run dist:win",
-    "desktop:linux": "npm --prefix desktop install && npm --prefix desktop run dist:linux"
+    "test": "npm run test -w server && node --test \"desktop/test/*.test.mjs\"",
+    "desktop": "npm --prefix desktop ci && npm --prefix desktop start",
+    "desktop:mac": "npm --prefix desktop ci && npm --prefix desktop run dist:mac",
+    "desktop:mac:all": "npm --prefix desktop ci && npm --prefix desktop run dist:mac:all",
+    "dist:mac:all": "npm --prefix desktop ci && npm --prefix desktop run dist:mac:all",
+    "desktop:win": "npm --prefix desktop ci && npm --prefix desktop run dist:win",
+    "desktop:linux": "npm --prefix desktop ci && npm --prefix desktop run dist:linux"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

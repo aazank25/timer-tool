@@ -3,6 +3,7 @@ import { awayProvider } from './away.js';
 import { badRequest, conflict } from './http.js';
 import { longBlockProvider } from './long-block.js';
 import { meetingEndProvider, meetingStartProvider } from './meetings.js';
+import { idleProvider, weekReviewProvider, wrapUpProvider } from './reminders.js';
 
 /**
  * "Needs your attention": the things the app has a question about, as one list. The web
@@ -70,6 +71,9 @@ for (const provider of [
   longBlockProvider,
   meetingStartProvider,
   meetingEndProvider,
+  wrapUpProvider,
+  weekReviewProvider,
+  idleProvider,
 ]) {
   registerPromptProvider(provider);
 }
