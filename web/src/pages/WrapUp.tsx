@@ -1,4 +1,5 @@
-import { useState, type ReactNode } from 'react';
+import { useId, useState, type ReactNode } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import { reason, type Session, type TaskStatus } from '../api';
 import { BarsByName, Columns, Hero, StatTile } from '../components/charts';
@@ -14,6 +15,7 @@ import {
   useDraft,
 } from '../components/wrapup';
 import { useActiveSession, useSessionActions, useToday } from '../hooks';
+import { useCarryOver } from '../insights';
 import { addDays, dayLabel, timeOfDay } from '../lib/format';
 import { seriesColor } from '../lib/palette';
 import { defaultWeek, realDay, weekStart } from '../lib/weeks';
@@ -23,6 +25,7 @@ import {
   useWrapUpActions,
   useWrapUpDay,
   useWrapUpWeek,
+  wrapUpKeys,
   type WrapUpDay,
   type WrapUpDayTask,
   type WrapUpWeek,
@@ -573,8 +576,7 @@ function WeekScreen({ view, dark }: { view: WrapUpWeek; dark: boolean }) {
         )}
       </Card>
 
-      {/* Carrying them forward is done on the Tasks tab; a button for it goes in this card. */}
-      <UnfinishedFromWeek tasks={view.unfinished} dark={dark} />
+      <UnfinishedWithCarryOver view={view} dark={dark} />
 
       <Card
         title="Next week's focus"
@@ -685,22 +687,26 @@ function WeekTaskRow({
 /**
  * The tasks from this week's sheet that are still open: what a carry-over is about.
  *
- * Carrying them forward is done on the Tasks tab (its banner says *Carry into this week*).
- * A button for it here is being added separately, and this is where it goes. The list
- * already takes a button for each task (`renderCarryOver`, drawn at the end of the row)
- * and one for the whole list (`carryAll`, drawn in the card's header); give it either
- * and it is shown, leave them out and nothing is.
+ * Carrying them forward is `UnfinishedWithCarryOver`'s button, given to this card as `carryAll`
+ * (drawn in its header) with what it says about it as `carryNote` (drawn under the list); with
+ * neither the card only lists. It is one button for the lot and not one for each task, because
+ * the carry-over is the Tasks tab's own action and moves every unfinished task together, and
+ * because a button that moved a single task by changing its week would be filing it by hand,
+ * which is not carrying it and takes off the mark that says it was. `renderCarryOver` is the
+ * slot for a button on each row, which nothing fills for that reason.
  */
 export function UnfinishedFromWeek({
   tasks,
   dark,
   renderCarryOver,
   carryAll,
+  carryNote,
 }: {
   tasks: WrapUpWeekTask[];
   dark: boolean;
   renderCarryOver?: (task: WrapUpWeekTask) => ReactNode;
   carryAll?: ReactNode;
+  carryNote?: ReactNode;
 }) {
   return (
     <Card
@@ -717,6 +723,89 @@ export function UnfinishedFromWeek({
           ))}
         </ul>
       )}
+      {carryNote}
     </Card>
+  );
+}
+
+/**
+ * The unfinished tasks of a week that is over, with the button that brings them into this one.
+ * It is only there for a week before the current one: the current week has nothing behind it
+ * to carry, and a week with none left open has nothing to offer. The button is the Tasks tab's
+ * *Carry into this week* and does exactly what that does, which is more than this list: it
+ * carries every unfinished task of every earlier week, so the hint under the list says so
+ * rather than let the button promise only what is shown.
+ *
+ * What it did is said in words, to the screen and to a screen reader. The status is a live
+ * region that is on the page before anything is said, and is kept when the button goes (once
+ * they are carried there is nothing left to offer), or the announcement would go with it.
+ */
+function UnfinishedWithCarryOver({ view, dark }: { view: WrapUpWeek; dark: boolean }) {
+  const qc = useQueryClient();
+  const carryOver = useCarryOver();
+  const hintId = useId();
+  const today = useToday().data?.today;
+  const [said, setSaid] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  // The week it would go into is the one the server is in, which turns over at the day-start hour.
+  const thisWeek = today === undefined ? undefined : weekStart(today);
+  const isPast = thisWeek !== undefined && view.week < thisWeek;
+  const offered = isPast && view.unfinished.length > 0;
+
+  async function carry() {
+    setError(null);
+    setSaid('');
+    try {
+      const { carried, weekOf } = await carryOver.mutateAsync();
+      const into = `into the week of ${dayLabel(weekOf)}`;
+      setSaid(carried === 0 ? `Nothing was left to carry ${into}` : `Carried ${plural(carried, 'task')} ${into}`);
+      // The tasks sit in another week now, so what this page lists is out of date as well as the
+      // Tasks tab, which useCarryOver has already told.
+      void qc.invalidateQueries({ queryKey: wrapUpKeys.all });
+    } catch (err) {
+      setError(reason(err, 'Could not carry the tasks into this week'));
+    }
+  }
+
+  return (
+    <UnfinishedFromWeek
+      tasks={view.unfinished}
+      dark={dark}
+      carryAll={
+        offered ? (
+          <Button
+            size="sm"
+            variant="primary"
+            disabled={carryOver.isPending}
+            aria-describedby={hintId}
+            onClick={() => void carry()}
+          >
+            {carryOver.isPending ? 'Carrying…' : 'Carry into this week'}
+          </Button>
+        ) : undefined
+      }
+      carryNote={
+        isPast ? (
+          <>
+            {offered && thisWeek !== undefined && (
+              <p id={hintId} className="mt-3 text-[11px] text-muted">
+                Moves every unfinished task from any earlier week, not only the ones listed here,
+                into the current week (the week of {dayLabel(thisWeek)}), below what is already
+                there.
+              </p>
+            )}
+            <p role="status" className="mt-3 text-xs text-good empty:hidden">
+              {said}
+            </p>
+            {error && (
+              <p role="alert" className="mt-3 text-xs text-critical">
+                {error}
+              </p>
+            )}
+          </>
+        ) : undefined
+      }
+    />
   );
 }

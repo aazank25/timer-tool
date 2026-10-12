@@ -18,6 +18,7 @@ export interface RunningServer {
 }
 
 export { normalizeAccelerator } from './lib/accelerator.js';
+export { INTERRUPTION_REASONS } from './lib/interruptions.js';
 
 /** How often the calendar feeds are read in the background. */
 const DEFAULT_CALENDAR_SYNC_MS = 15 * 60_000;
