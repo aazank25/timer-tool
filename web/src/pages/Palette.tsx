@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, reason, type SavedTimer, type Session, type Task } from '../api';
+import { ApiError, api, reason, type SavedTimer, type Session, type Task } from '../api';
 import { RatingPicker } from '../components/pickers';
 import { Button } from '../components/ui';
 import { duration } from '../lib/format';
@@ -28,6 +28,14 @@ interface Entry {
 
 /** The longest list shown. Anything past it is a few more letters away. */
 const MAX_ROWS = 50;
+
+/**
+ * How long the rating step is left alone after it opens. Nobody reads a question and answers it
+ * with the pointer faster than this, so a press inside it is the second half of the click that
+ * opened the step. The system's own count of a repeated click catches the double-clicks it
+ * recognises; this is for the ones it does not.
+ */
+const SETTLE_MS = 300;
 
 const pairKey = (projectId: number | null, title: string) => `${projectId ?? 'none'}:${title}`;
 
@@ -104,6 +112,15 @@ function search(entries: Entry[], query: string): Entry[] {
   return fits.sort((a, b) => a.rank - b.rank || a.order - b.order).map((fit) => fit.entry);
 }
 
+/** What to tell the person about a switch that did not go through. */
+function problemWith(err: unknown): string {
+  // The server's own words for a refusal say what to change: no such task, a rating out of range.
+  // A fault on its side ("Internal error"), or an answer that is not even JSON, says nothing a
+  // person can use.
+  if (err instanceof ApiError && err.status < 500) return reason(err, 'Could not switch blocks');
+  return "Couldn't switch — the server had a problem";
+}
+
 /** "Now: Competitor teardown · ROI Dashboard · 12m", and "· paused" when it is. */
 function nowLine(live: Session): string {
   // Whole minutes: a block started a moment ago is at 0m, not a count of seconds.
@@ -153,6 +170,14 @@ export function PalettePage({ dark: initialDark }: { dark: boolean }) {
   // True from the moment a switch is sent until it is answered. A ref, not state: a second Enter
   // can arrive before any render could show it, and it is what stops a switch going out twice.
   const sending = useRef(false);
+  // When the rating step last opened, and when the pointer last went down on it, on the clock that
+  // events are stamped with. A click on the step is judged by how soon after it opened it began.
+  const stepOpenedAt = useRef(0);
+  const pressedAt = useRef(0);
+  // A refusal that came back after the box was put away, so that nobody has read it. Starting over
+  // on the next show would clear it with everything else, and the person would believe the switch
+  // had gone through, so it is held here and is what the box opens on.
+  const unseen = useRef<string | null>(null);
 
   // Read again on every show: what is on the clock and in the lists has moved on since.
   const tasks = useQuery({
@@ -173,7 +198,7 @@ export function PalettePage({ dark: initialDark }: { dark: boolean }) {
   const live = active.data?.session ?? null;
   const loading = tasks.isPending || timers.isPending || active.isPending;
 
-  const entries = useMemo(() => {
+  const lists = useMemo(() => {
     const openTasks = tasks.data ?? [];
     const taskPairs = new Set(openTasks.map((t) => pairKey(t.projectId, t.title)));
     // A timer the history made for something already listed as a task would start the same work
@@ -181,12 +206,20 @@ export function PalettePage({ dark: initialDark }: { dark: boolean }) {
     const savedTimers = (timers.data ?? []).filter(
       (t) => t.pinned || !taskPairs.has(pairKey(t.projectId, t.title)),
     );
-    return [...openTasks.map(taskEntry), ...savedTimers.map(timerEntry)];
+    const taskRows = openTasks.map(taskEntry);
+    const timerRows = savedTimers.map(timerEntry);
+    return {
+      // What is searched, tasks first: of two equal fits, the task is the better thing to start.
+      entries: [...taskRows, ...timerRows],
+      // What is shown before anything is typed. The saved timers are the fast path, so they lead,
+      // and a long list of tasks cannot push them past the cap.
+      idle: [...timerRows, ...taskRows],
+    };
   }, [tasks.data, timers.data]);
 
   const typed = query.trim();
   const rows = useMemo(() => {
-    const found = search(entries, query).slice(0, MAX_ROWS);
+    const found = (typed ? search(lists.entries, query) : lists.idle).slice(0, MAX_ROWS);
     if (!typed) return found;
     // What was typed, started as it stands: no task, no project.
     const fresh: Entry = {
@@ -199,7 +232,7 @@ export function PalettePage({ dark: initialDark }: { dark: boolean }) {
       start: { title: typed, projectId: null },
     };
     return [...found, fresh];
-  }, [entries, query, typed]);
+  }, [lists, query, typed]);
   const at = rows.length ? Math.min(cursor, rows.length - 1) : -1;
 
   /** Back to a clean first step, and the lists read again, ready for the next time it is shown. */
@@ -207,7 +240,8 @@ export function PalettePage({ dark: initialDark }: { dark: boolean }) {
     setQuery('');
     setCursor(0);
     setRating(null);
-    setError(null);
+    setError(unseen.current);
+    unseen.current = null;
     setPickWhenLoaded(false);
     sending.current = false;
     setShown((n) => n + 1);
@@ -262,8 +296,15 @@ export function PalettePage({ dark: initialDark }: { dark: boolean }) {
       close();
     } catch (err) {
       // Everything stays as it was, so another pick is a keystroke away.
-      setError(reason(err, 'Could not switch blocks'));
+      const problem = problemWith(err);
+      setError(problem);
       sending.current = false;
+      // A click elsewhere puts the box away while this is on its way. The message is then in a
+      // page nobody is looking at, and it is the next show that has to carry it, saying what it
+      // was about because by then the box has started over and the typing is gone.
+      if (document.visibilityState === 'hidden') {
+        unseen.current = `Switching to “${entry.title}” did not go through: ${problem}`;
+      }
     }
   }
 
@@ -271,8 +312,11 @@ export function PalettePage({ dark: initialDark }: { dark: boolean }) {
     // Until the block on the clock is known there is no telling whether to ask about it.
     if (loading || sending.current) return;
     setError(null);
-    if (live) setRating({ entry, liveTitle: live.title });
-    else void send(entry, null);
+    // A break is a rest, not work to be rated, so it is just stopped.
+    if (live && live.kind !== 'break') {
+      stepOpenedAt.current = performance.now();
+      setRating({ entry, liveTitle: live.title });
+    } else void send(entry, null);
   }
 
   function move(step: number) {
@@ -310,7 +354,9 @@ export function PalettePage({ dark: initialDark }: { dark: boolean }) {
       e.preventDefault();
       if (e.repeat) return;
       if (loading) {
-        setPickWhenLoaded(true);
+        // Only with something typed: it is the person's own words that say what to pick once
+        // the lists are there. An empty box would pick whatever happens to come first.
+        if (typed) setPickWhenLoaded(true);
         return;
       }
       const entry = rows[at];
@@ -340,9 +386,33 @@ export function PalettePage({ dark: initialDark }: { dark: boolean }) {
     <div className="mx-auto flex h-dvh max-w-[640px] flex-col overflow-hidden border border-hairline bg-plane text-ink">
       {rating ? (
         <>
-          <div className="flex min-h-0 flex-1 flex-col justify-center gap-5 px-6">
+          <div
+            className="flex min-h-0 flex-1 flex-col justify-center gap-5 px-6"
+            // The second click of a double-click on a row lands here: the first opened this step,
+            // and a rating button or Skip has come up under the pointer by the time the second
+            // arrives. That was never an answer to a question nobody had seen yet, so a click
+            // counts only when the system did not count it as a repeat of the last one (a detail
+            // above 1), and its press began after the step had been on screen long enough to be
+            // read, which also catches a repeat the system did not count, one made with the pointer
+            // a little off. A click made from the keyboard has a detail of 0 and is always an
+            // answer, and the keys 1–5 and Enter are not clicks at all.
+            onPointerDownCapture={(e) => {
+              pressedAt.current = e.timeStamp;
+            }}
+            onClickCapture={(e) => {
+              const tooSoon = pressedAt.current - stepOpenedAt.current < SETTLE_MS;
+              if (e.detail > 1 || (e.detail > 0 && tooSoon)) {
+                e.preventDefault();
+                e.stopPropagation();
+              }
+            }}
+          >
             <div>
-              <h1 className="text-lg font-semibold text-ink">How did “{rating.liveTitle}” go?</h1>
+              {/* A title can be 300 characters, with no space in it to break at: it wraps, and
+                  stops at three lines so that it cannot push the buttons out of the box. */}
+              <h1 className="line-clamp-3 break-words text-lg font-semibold text-ink">
+                How did “{rating.liveTitle}” go?
+              </h1>
               <p className="mt-1 truncate text-xs text-muted">
                 Then starting {rating.entry.title}
                 {rating.entry.projectName && ` · ${rating.entry.projectName}`}

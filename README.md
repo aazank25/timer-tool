@@ -40,13 +40,13 @@ To run it without packaging, for a quick look: `npm run desktop`.
   the window.
 - **Closing the window doesn't stop the clock** — the app parks in the menu bar
   and keeps counting. Quit properly from the menu-bar item or ⌘Q.
-- **Quick switch.** ⌘⇧K, from any app, pops a small box over whatever you are
+- **Quick switch.** ⌘⌥K, from any app, pops a small box over whatever you are
   doing. Type a few letters of a task or saved timer and press Enter: the block
   on the clock is finished and the new one starts, and the box is gone and you
-  are back where you were. If a block was running it asks how it went first
-  (1–5, or Enter to skip). Escape backs out. It works whenever FocusDesk is
-  running, with its window open or not. Change the shortcut, or turn it off, in
-  Settings → Quick switch.
+  are back where you were. If a focus block was running it asks how it went
+  first (1–5, or Enter to skip); a break is just stopped. Escape backs out. It
+  works whenever FocusDesk is running, with its window open or not. Change the
+  shortcut, or turn it off, in Settings → Quick switch.
 - **Global hotkeys.** ⌘⇧F shows the window; ⌘⇧Space pauses or resumes the
   running block from anywhere.
 - **Launch at login**, off by default — the menu-bar item has the toggle.
@@ -151,20 +151,34 @@ project + task pairs you keep returning to, so it is useful on day two without
 anyone curating it; pin one to hold it at the top.
 
 **Quick switch** is the faster one, for moving between things without going back
-to the window: ⌘⇧K, a few letters, Enter. It searches your open tasks and saved
-timers by title and project, best match first; when nothing fits, the last row
-starts a new block with what you typed. Starting a task files the block under
-the task's project and moves the task along, exactly as starting it from the
-Tasks tab does. Finishing the old block and starting the new one is one step on
-the server, so a start that is refused (a task deleted in the meantime) leaves
-the block you were on running, as it was.
+to the window: ⌘⌥K, a few letters, Enter. With nothing typed it lists your saved
+timers first and then your open tasks. Typing searches both by title and project,
+best match first, and once there is anything typed the last row starts a new
+block with exactly what you typed, whether or not anything else fits. Starting a
+task files the block under the task's project and moves the task along, exactly
+as starting it from the Tasks tab does. Finishing the old block and starting the
+new one is one step on the server, so a start that is refused (a task deleted in
+the meantime) leaves the block you were on running, as it was. If the box was put
+away while that was on its way, the refusal is what it opens on the next time.
 
 An app cannot be told that another app already owns a keyboard shortcut, so if
 pressing yours does nothing, pick another in Settings. What you type there is
-checked against the key names Electron documents (one it does not know would be
-dropped without a word, and the rest registered, so a typo would grab some other
-key), and the card shows the shortcut that is really registered, or why a new
-one could not be.
+checked, because Electron is not: a name it does not know is dropped without a
+word and the rest registered, so a typo would grab some other key. FocusDesk
+accepts a deliberate subset of what Electron does: letters, digits, F1–F24 and
+Space, Tab, Enter, Escape, Backspace, Delete, Insert, the arrows, Home, End,
+PageUp, PageDown and Plus. It refuses punctuation keys, the lock keys (Caps
+Lock, Num Lock, Scroll Lock), the numeric keypad, media and volume keys,
+PrintScreen and AltGr. It also wants at least one of Command, Control,
+CommandOrControl or Super in the shortcut, because Shift or Alt (Option) on
+their own would take ordinary typing from every app: ⇧A is a capital A, and on a
+Mac ⌥A is å. The function keys type nothing, so F1–F24 may use any modifier
+(Shift+F5 is fine; Shift+A is not). ⌘⇧F and ⌘⇧Space are FocusDesk's own
+shortcuts, and are refused here too. The default is ⌘⌥K, not ⌘⇧K, which is Browse
+DMs in Slack and Delete Line in VS Code. The card shows the shortcut that is
+really registered, or why a new one could not be, and when the app cannot
+register what you saved it puts the setting back to the one that works, so a
+restart never finds a shortcut it cannot have.
 
 **Tasks** are the weekly priorities list that replaces a spreadsheet: a row for
 each thing that needs doing, with its project (or none), priority, status,

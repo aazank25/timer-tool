@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { normalizeAccelerator } from '../lib/accelerator.js';
+import { normalizeAccelerator, usedByApp } from '../lib/accelerator.js';
 import { handler, parse } from '../lib/http.js';
 import { allSettings, setSettings } from '../lib/settings.js';
 
@@ -10,19 +10,31 @@ export const settingsRouter = Router();
  * '' turns the shortcut off. Anything else has to be a combination Electron will read as it
  * was typed, and is kept in the one spelling normalizeAccelerator gives it. Refused here, not
  * left to the app that registers it: Electron drops a name it does not know and registers
- * what is left, so a typo would go on to grab some other key in every app.
+ * what is left, so a typo would go on to grab some other key in every app. FocusDesk's own
+ * shortcuts are refused here too. The app would turn them down at registration, but by then
+ * the setting is saved, and the next start would find a shortcut it cannot register.
  */
 const hotkey = z
   .string()
   .max(80)
   .transform((value, ctx) => {
-    if (value.trim() === '') return '';
+    // Only spaces are blank. trim() would also take a no-break space, which is not what
+    // anyone means by "off".
+    if (/^ *$/.test(value)) return '';
     const accelerator = normalizeAccelerator(value);
     if (accelerator === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          'Use one or more modifiers and one key joined with +, like CommandOrControl+Shift+K, or leave it empty to turn the shortcut off',
+          'Use one key with at least one of Command, Control, CommandOrControl or Super, joined with +, like CommandOrControl+Alt+K (F1–F24 may use Shift or Alt alone), or leave it empty to turn the shortcut off',
+      });
+      return z.NEVER;
+    }
+    const purpose = usedByApp(accelerator);
+    if (purpose !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${accelerator} is already the shortcut FocusDesk uses to ${purpose}. Pick a different one`,
       });
       return z.NEVER;
     }
