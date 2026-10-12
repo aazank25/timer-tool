@@ -79,6 +79,7 @@ const schema = z
     work_start: clockTime,
     work_end: clockTime,
     nudge_minutes: offOrMinutes(240),
+    close_behavior: z.enum(['ask', 'menu-bar', 'quit']),
   })
   .partial();
 

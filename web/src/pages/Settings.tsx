@@ -3,6 +3,7 @@ import { ModePicker } from '../components/pickers';
 import { QuickSwitchSettings } from '../components/settings/QuickSwitchSettings';
 import { WrapUpSettings } from '../components/settings/WrapUpSettings';
 import { PromptSettings } from '../components/settings/PromptSettings';
+import { WindowSettings } from '../components/settings/WindowSettings';
 import { Button, Card, Empty, Field, inputBase, inputClass } from '../components/ui';
 import { keys, useCalendarSources, useSettings, useTheme } from '../hooks';
 import { api } from '../api';
@@ -149,6 +150,7 @@ export function SettingsPage() {
       </Card>
 
       <QuickSwitchSettings />
+      <WindowSettings />
       <PromptSettings />
 
       <CalendarSettings />

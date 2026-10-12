@@ -902,3 +902,40 @@ describe('the quick_switch_hotkey setting', () => {
     await api.call('PATCH', '/settings', { focus_minutes: 45 });
   });
 });
+
+describe('the close_behavior setting', () => {
+  let api: Awaited<ReturnType<typeof serve>>;
+
+  before(async () => {
+    await reset();
+    api = await serve();
+  });
+
+  beforeEach(async () => {
+    const { db } = await dbMod();
+    db.exec("DELETE FROM settings WHERE key = 'close_behavior'");
+  });
+
+  after(() => api.close());
+
+  it('asks by default, so the close button never quits or hides the app by surprise', async () => {
+    assert.equal((await api.call('GET', '/settings')).body.close_behavior, 'ask');
+  });
+
+  it('takes each of the three answers and keeps it', async () => {
+    for (const value of ['menu-bar', 'quit', 'ask']) {
+      const res = await api.call('PATCH', '/settings', { close_behavior: value });
+      assert.equal(res.status, 200, value);
+      assert.equal((await api.call('GET', '/settings')).body.close_behavior, value);
+    }
+  });
+
+  it('refuses anything else and writes nothing', async () => {
+    await api.call('PATCH', '/settings', { close_behavior: 'quit' });
+    for (const value of ['hide', '', 'Quit', 1, null]) {
+      const res = await api.call('PATCH', '/settings', { close_behavior: value });
+      assert.equal(res.status, 400, JSON.stringify(value));
+    }
+    assert.equal((await api.call('GET', '/settings')).body.close_behavior, 'quit');
+  });
+});

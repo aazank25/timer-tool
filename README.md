@@ -71,8 +71,11 @@ To run it without packaging, for a quick look: `npm run desktop`.
   starts with a *Needs attention* section, a submenu for each question with the
   same answers as the banners, and a dot comes before the clock. An answer that
   is refused (it was answered in the window a moment ago) is shown, not dropped.
-- **Closing the window doesn't stop the clock** — the app parks in the menu bar
-  and keeps counting. Quit properly from the menu-bar item or ⌘Q.
+- **Closing the window is your call.** The first time you press the close button
+  it asks whether to keep FocusDesk running in the menu bar (where the clock, away
+  detection and the reminders keep going while the window is closed) or to quit.
+  Tick *Don't ask again* to keep the answer; Settings → *Closing the window*
+  changes it later. Quit any time from the menu-bar item or ⌘Q.
 - **Quick switch.** ⌘⌥K, from any app, pops a small box over whatever you are
   doing. Type a few letters of a task or saved timer and press Enter: the block
   on the clock is finished and the new one starts, and the box is gone and you

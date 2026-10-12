@@ -359,6 +359,11 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
    * out, so it is on in a browser too. 0 = off.
    */
   nudge_minutes: '15',
+  /**
+   * What the desktop app's close button does: 'ask' (the first time, with "Don't ask again"),
+   * 'menu-bar' (hide the window and keep running there) or 'quit'.
+   */
+  close_behavior: 'ask',
 };
 
 /**

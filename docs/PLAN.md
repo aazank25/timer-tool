@@ -877,8 +877,11 @@ loopback port and points a window at it.
   On a Mac the first notification may need allowing under System Settings →
   Notifications. A notification has no action buttons of its own, in a signed build or
   not; clicking it opens the app, where the answers are.
-- **Closing the window parks the app in the menu bar** and the block keeps
-  running; quitting is explicit.
+- **The close button asks, once.** Until told, closing the window asks whether to keep
+  the app running in the menu bar (the block keeps running, and away detection and the
+  reminders with it) or to quit, with *Don't ask again*; the answer is the setting
+  `close_behavior` (`ask`, `menu-bar`, `quit`), which Settings → *Closing the window*
+  changes. Escape is Cancel and leaves the window open. ⌘Q always quits.
 - **Global hotkeys:** Cmd+Shift+F to show, Cmd+Shift+Space to pause/resume, and
   Cmd+Option+K for quick switch (see section 2).
 - **Launch at login**, off by default, toggled from the menu bar.

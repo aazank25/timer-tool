@@ -33,6 +33,7 @@
       "main.mjs",
       "palette.mjs",
       "away.mjs",
+      "close-window.mjs",
       "attention.mjs",
       "menu-bar.mjs",
       "requests.mjs",

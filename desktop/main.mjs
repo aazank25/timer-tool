@@ -16,6 +16,7 @@ import {
 } from 'electron';
 import { createAttention, interruptedItem, trimLabel } from './attention.mjs';
 import { createAwayTracker } from './away.mjs';
+import { afterAsking, ASK_BUTTONS, CANCEL, onClose } from './close-window.mjs';
 import { elapsedSeconds, menuBarText } from './menu-bar.mjs';
 import { createPalette, isLocal } from './palette.mjs';
 import { rereadAfter } from './requests.mjs';
@@ -70,12 +71,12 @@ function createWindow() {
   win.loadURL(`${server.url}/?desktop=1`);
   win.once('ready-to-show', () => win.show());
 
-  // Closing the window parks the app in the menu bar; the timer keeps running.
+  // The close button keeps the app running in the menu bar, quits it, or asks which, as the
+  // setting says (see closeWindow). Quitting closes the window too, and that is let through.
   win.on('close', (event) => {
     if (isQuitting) return;
     event.preventDefault();
-    win.hide();
-    if (isMac) app.dock?.hide();
+    void closeWindow();
   });
 
   // Anything not served by the local app opens in the real browser.
@@ -89,6 +90,53 @@ function createWindow() {
       void shell.openExternal(url);
     }
   });
+}
+
+/** Hide the window and the Dock icon: the app goes on in the menu bar, and the clock with it. */
+function parkInMenuBar() {
+  win?.hide();
+  if (isMac) app.dock?.hide();
+}
+
+/** A question about closing is on screen: a second press of the button does not ask twice. */
+let askingAboutClose = false;
+
+/**
+ * The close button was pressed. The setting says whether that keeps the app in the menu bar or
+ * quits it; until it has been told, the app asks, and "Don't ask again" makes the answer the
+ * setting (Settings can change it back). Asked, Cancel leaves the window as it was.
+ */
+async function closeWindow() {
+  const what = onClose(settings?.close_behavior);
+  if (what === 'menu-bar') return parkInMenuBar();
+  // Not from inside the window's close event, which has just been refused: a quit started there
+  // finds that window still refusing and stops.
+  if (what === 'quit') return void setImmediate(() => app.quit());
+  if (askingAboutClose) return;
+  askingAboutClose = true;
+  try {
+    const answer = await dialog.showMessageBox(win, {
+      type: 'question',
+      buttons: ASK_BUTTONS,
+      defaultId: 0,
+      cancelId: CANCEL,
+      message: 'Keep FocusDesk running in the menu bar?',
+      detail: `In the menu bar it keeps the clock, away detection and the reminders going while the window is closed. Quit it any time from its menu-bar icon${isMac ? ', or with ⌘Q' : ''}.`,
+      checkboxLabel: "Don't ask again",
+    });
+    const { action, remember } = afterAsking(answer);
+    if (remember) {
+      try {
+        settings = await apiJson('/settings', 'PATCH', { close_behavior: remember });
+      } catch (err) {
+        console.error('[focusdesk] could not keep the answer about closing', err);
+      }
+    }
+    if (action === 'menu-bar') parkInMenuBar();
+    else if (action === 'quit') app.quit();
+  } finally {
+    askingAboutClose = false;
+  }
 }
 
 /**
