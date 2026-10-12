@@ -81,6 +81,18 @@ const dayText = (day: string) =>
 
 /* ----------------------------------------------------- local times as instants */
 
+describe('a time of day as minutes into the day', () => {
+  it('counts from midnight, so times compare as the clock does', async () => {
+    const { minutesOfDay } = await localTimeMod();
+    assert.equal(minutesOfDay('00:00'), 0);
+    assert.equal(minutesOfDay('00:01'), 1);
+    assert.equal(minutesOfDay('03:59'), 239);
+    assert.equal(minutesOfDay('04:00'), 240);
+    assert.equal(minutesOfDay('17:30'), 1050);
+    assert.equal(minutesOfDay('23:59'), 1439);
+  });
+});
+
 describe('a time of day in a timezone, as an instant', () => {
   const instant = async (day: string, time: string, zone: string) =>
     new Date((await localTimeMod()).instantAt(day, time, zone)).toISOString();
@@ -379,6 +391,72 @@ describe('the end-of-day reminder', () => {
     assert.deepEqual(
       (await wrapUps()).map((p) => [p.id, p.createdAt]),
       [[`wrapup:${DAY}`, on('2026-10-13', '02:00')]],
+    );
+  });
+
+  it('reads a time at the hour the day starts as the end of the day, which it never reaches, and not as the first minute of it', async () => {
+    // Day start 04:00 and wrapup_time 04:00: that is the moment this day turns into the next, so
+    // it is not the day's own first minute (which asked to wrap up from the first block of the
+    // morning), and by the time it comes it is the next day that is being asked about.
+    await set({ wrapup_time: '04:00' });
+    freeze(at('10:00'));
+    await logged(at('09:00'), 30);
+    for (const when of [
+      at('10:01'),
+      at('17:30'),
+      at('23:59'),
+      on('2026-10-13', '02:00'),
+      on('2026-10-13', '03:59:59'),
+    ]) {
+      goTo(when);
+      assert.deepEqual(await wrapUps(), [], when);
+    }
+    goTo(on('2026-10-13', '04:00'));
+    assert.deepEqual(await wrapUps(), [], 'the next day has nothing on it yet');
+    await logged(on('2026-10-13', '04:05'), 30);
+    goTo(on('2026-10-13', '12:00'));
+    assert.deepEqual(await wrapUps(), [], 'and its own 04:00 is a whole day away');
+  });
+
+  it('reads a minute before the hour the day starts as the small hours of the night after', async () => {
+    await set({ wrapup_time: '03:59' });
+    freeze(at('23:00'));
+    await logged(at('10:00'), 60);
+    assert.deepEqual(await wrapUps(), [], 'it is not 03:59 of this morning');
+    goTo(on('2026-10-13', '03:58:59'));
+    assert.deepEqual(await wrapUps(), []);
+    goTo(on('2026-10-13', '03:59'));
+    assert.deepEqual(
+      (await wrapUps()).map((p) => [p.id, p.createdAt]),
+      [[`wrapup:${DAY}`, on('2026-10-13', '03:59')]],
+    );
+  });
+
+  it('reads a minute after the hour the day starts as a time of the day itself', async () => {
+    await set({ wrapup_time: '04:01' });
+    freeze(at('04:30'));
+    await logged(at('04:05'), 20);
+    assert.deepEqual(
+      (await wrapUps()).map((p) => [p.id, p.createdAt]),
+      [[`wrapup:${DAY}`, at('04:01')]],
+      'the day has started, so it is due as soon as there is something to wrap up',
+    );
+  });
+
+  it('reads 00:00 as the end of the day when the day starts at midnight, so it never comes, and 00:01 as the first minute of it', async () => {
+    await set({ day_start_hour: 0, wrapup_time: '00:00' });
+    freeze(at('10:00'));
+    await logged(at('09:00'), 30);
+    for (const when of [at('10:01'), at('23:59:59'), on('2026-10-13', '00:00')]) {
+      goTo(when);
+      assert.deepEqual(await wrapUps(), [], when);
+    }
+
+    await set({ wrapup_time: '00:01' });
+    freeze(at('10:01'));
+    assert.deepEqual(
+      (await wrapUps()).map((p) => [p.id, p.createdAt]),
+      [[`wrapup:${DAY}`, at('00:01')]],
     );
   });
 
@@ -707,21 +785,50 @@ describe('the nothing-on-the-clock nudge', () => {
     assert.deepEqual(await nudges(), [], 'no work days at all');
   });
 
-  it('takes the hours as the clock reads and the work day as the focus day, so night work stays with its day', async () => {
-    // Friday nights: work from 02:00 to 08:00, and the day is not over until 04:00.
+  it('takes the work day from the calendar day the hours are on, so the small hours are the day the clock is on', async () => {
+    // Fridays only, 02:00 to 08:00, and the focus day is not over until 04:00.
     await set({ work_days: '5', work_start: '02:00', work_end: '08:00' });
-    freeze(on('2026-10-17', '02:14:59'));
-    assert.deepEqual(await nudges(), []);
-    goTo(on('2026-10-17', '02:15'));
-    // It is Saturday on the calendar and still Friday's day, which is a work day.
+    freeze(on('2026-10-16', '02:14:59'));
+    assert.deepEqual(await nudges(), [], 'Friday, before the quiet has lasted');
+    goTo(on('2026-10-16', '02:15'));
     assert.deepEqual(
       (await nudges()).map((p) => [p.id, p.createdAt]),
-      [[`idle:${on('2026-10-17', '02:00')}`, on('2026-10-17', '02:15')]],
+      [[`idle:${on('2026-10-16', '02:00')}`, on('2026-10-16', '02:15')]],
     );
 
-    // From 04:00 it is Saturday's day, which is not, although the hours go on.
-    goTo(on('2026-10-17', '04:00'));
+    // The next night is Saturday on the calendar: not a work day, although it is still Friday's
+    // focus day until 04:00. The hours it is asked in and the day it is asked on are the same day.
+    freeze(on('2026-10-17', '02:15'));
     assert.deepEqual(await nudges(), []);
+    goTo(on('2026-10-17', '05:00'));
+    assert.deepEqual(await nudges(), []);
+  });
+
+  it('goes by the weekday of the day the hours are on, however late the day starts', async () => {
+    // The day starts at noon, so the morning hours are inside the focus day before.
+    await set({ day_start_hour: 12 });
+
+    // Saturday morning is Saturday's: not a work day, whatever the focus day (Friday) is.
+    freeze(on('2026-10-17', '10:00'));
+    assert.deepEqual(await nudges(), [], 'Saturday 10:00 is not work');
+    goTo(on('2026-10-17', '15:00'));
+    assert.deepEqual(await nudges(), [], 'nor is Saturday 15:00');
+
+    // Monday morning is Monday's: work, although the focus day (Sunday) is not.
+    freeze(on('2026-10-19', '10:00'));
+    assert.deepEqual(
+      (await nudges()).map((p) => [p.id, p.createdAt]),
+      [[`idle:${on('2026-10-19', '09:00')}`, on('2026-10-19', '09:15')]],
+      'Monday 10:00 is work',
+    );
+    freeze(on('2026-10-19', '13:00'));
+    assert.equal((await nudges()).length, 1, 'and Monday 13:00');
+
+    // Friday morning is Friday's, so it is work, as it is on the afternoon after the day turns over.
+    freeze(on('2026-10-16', '10:00'));
+    assert.equal((await nudges()).length, 1, 'Friday 10:00');
+    freeze(on('2026-10-16', '13:00'));
+    assert.equal((await nudges()).length, 1, 'Friday 13:00');
   });
 
   it('is not asked while a block is running', async () => {
@@ -846,6 +953,40 @@ describe('the nothing-on-the-clock nudge', () => {
     assert.equal(second?.createdAt, at('09:35'));
   });
 
+  it('is moved by a dismissal of its own and not by one of some other prompt', async () => {
+    // A block from 09:30 to 10:00 puts the start of the quiet at 10:00, and the wrap-up is due at
+    // 10:05 with it: two prompts are asking at once, and only one of them is this nudge.
+    await set({ wrapup_time: '10:05' });
+    freeze(at('10:00'));
+    await logged(at('09:30'), 30);
+    goTo(at('10:10'));
+    assert.deepEqual(
+      (await wrapUps()).map((p) => p.id),
+      [`wrapup:${DAY}`],
+    );
+
+    assert.equal((await act(`wrapup:${DAY}`, 'dismiss')).status, 200);
+    assert.equal((await savedState(`wrapup:${DAY}`))?.status, 'dismissed');
+    goTo(at('10:15'));
+    // The quiet still began at 10:00 and is still due at 10:15: that dismissal was not of this.
+    assert.deepEqual(
+      (await nudges()).map((p) => [p.id, p.createdAt]),
+      [[`idle:${at('10:00')}`, at('10:15')]],
+    );
+
+    // Nor by the review of last week being put away.
+    await logged(on('2026-10-07', '10:00'), 60);
+    assert.deepEqual(
+      (await reviews()).map((p) => p.id),
+      ['week-review:2026-10-05'],
+    );
+    assert.equal((await act('week-review:2026-10-05', 'dismiss')).status, 200);
+    assert.deepEqual(
+      (await nudges()).map((p) => p.id),
+      [`idle:${at('10:00')}`],
+    );
+  });
+
   it('is not moved by a dismissal on another day, and starts again from work_start', async () => {
     freeze(on('2026-10-09', '15:00'));
     const [yesterdays] = await nudges();
@@ -893,8 +1034,8 @@ describe('the nothing-on-the-clock nudge', () => {
     freeze(at('14:00'));
     // The process in this test has been up for a few seconds, however late the clock says it is.
     assert.deepEqual(await nudges(), []);
-    goTo(at('16:00'));
-    assert.deepEqual(await nudges(), []);
+    goTo(at('14:10'));
+    assert.deepEqual(await nudges(), [], 'ten minutes of quiet is less than the fifteen');
 
     setServerStartedAt(0);
     assert.equal((await nudges()).length, 1);
@@ -930,7 +1071,7 @@ describe('the nothing-on-the-clock nudge', () => {
     }
   });
 
-  it('takes a clock that has been moved as a new start, so a start that is its own never begins overdue', async () => {
+  it('takes a clock that has been moved back past the start as a new start, so a start of its own is never ahead of the clock', async () => {
     const { setServerStartedAt } = await remindersMod();
     setServerStartedAt(null);
     const uptime = mock.method(process, 'uptime', () => 100);
@@ -939,9 +1080,49 @@ describe('the nothing-on-the-clock nudge', () => {
       freeze(at('14:00'));
       assert.equal((await nudges())[0]?.id, `idle:${at('13:58:20')}`);
 
-      // Two hours on by the clock and no longer by the uptime: not two hours of quiet.
-      goTo(at('16:00'));
-      assert.equal((await nudges())[0]?.id, `idle:${at('15:58:20')}`);
+      // A clock that steps back a little, to a time that is still after the start, changes nothing.
+      freeze(at('13:59:59'));
+      assert.equal((await nudges())[0]?.id, `idle:${at('13:58:20')}`);
+
+      // Put back two hours, the start it had is in the future, which would hold the nudge off
+      // until the clock got there: the server has been up for 100 seconds as of this clock.
+      freeze(at('12:00'));
+      assert.equal((await nudges())[0]?.id, `idle:${at('11:58:20')}`);
+    } finally {
+      uptime.mock.restore();
+    }
+  });
+
+  it('does not move the start when the Mac sleeps: the uptime stops and the clock does not, and it is still the same stretch', async () => {
+    const { setServerStartedAt } = await remindersMod();
+    setServerStartedAt(null);
+    // The process has been up for as long as it has been awake, as the real uptime is.
+    let awake = 0;
+    const uptime = mock.method(process, 'uptime', () => awake / 1000);
+    try {
+      freeze(at('10:00'));
+      assert.deepEqual(await nudges(), [], 'it has only just started');
+      goTo(at('10:20'));
+      awake = 20 * MINUTE;
+      const before = await nudges();
+      assert.deepEqual(
+        before.map((p) => [p.id, p.createdAt]),
+        [[`idle:${at('10:00')}`, at('10:15')]],
+      );
+
+      // The lid is shut at 10:20 and opened at 11:20: an hour on by the clock, none by the uptime.
+      // Counting the start back from the uptime put it at 11:00, a new prompt (and a second
+      // notification) that said "Since 11:00 AM" about a quiet that had begun at 10:00.
+      goTo(at('11:20'));
+      assert.deepEqual(await nudges(), before);
+      assert.match(before[0]?.body ?? '', /^Since .*10:00.*\. Start something\?$/);
+
+      // And on until a block ends it, like any other quiet.
+      goTo(at('13:00'));
+      assert.deepEqual(
+        (await nudges()).map((p) => [p.id, p.createdAt]),
+        [[`idle:${at('10:00')}`, at('10:15')]],
+      );
     } finally {
       uptime.mock.restore();
     }

@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from 'react';
+import { useId, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import { reason, type Session, type TaskStatus } from '../api';
@@ -747,6 +747,11 @@ function UnfinishedWithCarryOver({ view, dark }: { view: WrapUpWeek; dark: boole
   const today = useToday().data?.today;
   const [said, setSaid] = useState('');
   const [error, setError] = useState<string | null>(null);
+  // Whether a carry-over is on its way. The button is disabled while the mutation is pending, but
+  // that only shows once React has drawn it again, and two clicks inside one task (a double click,
+  // or a script) both get in before it: two requests, the second answered "Nothing was left to
+  // carry", and that said in place of what the first one did.
+  const carrying = useRef(false);
 
   // The week it would go into is the one the server is in, which turns over at the day-start hour.
   const thisWeek = today === undefined ? undefined : weekStart(today);
@@ -754,6 +759,8 @@ function UnfinishedWithCarryOver({ view, dark }: { view: WrapUpWeek; dark: boole
   const offered = isPast && view.unfinished.length > 0;
 
   async function carry() {
+    if (carrying.current) return;
+    carrying.current = true;
     setError(null);
     setSaid('');
     try {
@@ -769,6 +776,8 @@ function UnfinishedWithCarryOver({ view, dark }: { view: WrapUpWeek; dark: boole
       void qc.invalidateQueries({ queryKey: wrapUpKeys.all });
     } catch (err) {
       setError(reason(err, 'Could not carry the tasks into this week'));
+    } finally {
+      carrying.current = false;
     }
   }
 

@@ -87,3 +87,9 @@ export function isoWeekday(day: string): number {
 export function clockSetting(value: string | undefined): string | null {
   return value !== undefined && /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : null;
 }
+
+/** How far into the day an `HH:MM` time is, in minutes: 00:00 is 0 and 23:59 is 1439. */
+export function minutesOfDay(time: string): number {
+  const [hour, minute] = time.split(':').map(Number);
+  return hour! * 60 + minute!;
+}

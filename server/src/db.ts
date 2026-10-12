@@ -353,7 +353,11 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   work_days: '1,2,3,4,5',
   work_start: '09:00',
   work_end: '18:00',
-  /** Minutes of work hours with no block running before the desktop app nudges you to start one. 0 = off. */
+  /**
+   * Minutes of work hours with nothing on the clock before FocusDesk asks whether to start a
+   * block: a banner in the window (and a notification in the desktop app). The server works it
+   * out, so it is on in a browser too. 0 = off.
+   */
   nudge_minutes: '15',
 };
 

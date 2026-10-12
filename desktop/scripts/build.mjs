@@ -64,4 +64,4 @@ const bytes = Object.values(result.metafile.outputs)[0]?.bytes ?? 0;
 console.log(`  dist/server.mjs - ${(bytes / 1024).toFixed(0)} kB`);
 
 step('done');
-console.log('  next: npm run dist:mac   (or dist:win / dist:linux)');
+console.log('  next, from the repo root: npm run desktop:mac   (or desktop:win / desktop:linux)');

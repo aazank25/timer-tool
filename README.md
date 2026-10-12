@@ -26,7 +26,10 @@ Needs **Node 22 or newer** (`node -v`). Nothing gets compiled: SQLite arrives as
 a prebuilt Node-API binary, which is why no Xcode, Python or build toolchain is
 required and why the same binary works under both Node and Electron. `npm ci`
 installs exactly what the lockfiles say and never rewrites them, which is why it
-is used everywhere here, in the desktop scripts too.
+is used everywhere here, in the desktop scripts too. Those run it only when
+`desktop/node_modules` is missing or was installed from another
+`package-lock.json` (or on another platform), so running `npm run desktop` a
+second time starts at once instead of installing Electron again.
 
 The installer lands in `desktop/release/`. On macOS `desktop:mac` makes **one**
 disk image, for the chip of the Mac you build it on: on Apple silicon (M1 and
@@ -47,14 +50,23 @@ To run it without packaging, for a quick look: `npm run desktop`.
 - **Away detection.** If the screen locks, the Mac goes to sleep, another user
   takes over, or you leave it untouched for `away_minutes` (ten by default) while
   a focus block is running, the app tells the server when you are back, and
-  FocusDesk asks whether to keep that time or drop it. A paused block, a break
-  and no block at all are not reported, and neither is anything shorter than the
-  threshold. Locking, sleeping, waking and unlocking is one stretch, not three.
+  FocusDesk asks whether to keep that time or drop it. The stretch starts at the
+  last time you touched the machine, so a Mac that locks itself after five
+  minutes of nobody there counts those five, and it ends at your return: the
+  unlock, the wake-up, or your first keystroke. If an unlock or wake-up is
+  missed, input at a screen that is no longer locked ends it, and no stretch is
+  reported as longer than twelve hours. The block it is held against is the one
+  on the clock when it begins. A paused block, a break and no block at all are
+  not reported, and neither is anything shorter than the threshold. Locking,
+  sleeping, waking and unlocking is one stretch, not three.
 - **Notifications.** What needs your attention (see below) is a notification
   the first time it is asked, if you are there to see it: the screen unlocked and
   the Mac touched in the last two minutes. If you are not, it waits until you are
-  back. Clicking one opens the window at the page it is about; the nudge to start
-  a block opens quick switch instead.
+  back. Clicking one opens the window; the end-of-day and last-week ones take it to
+  the page they are about (the wrap-up, last week's review), and the nudge to
+  start a block opens quick switch instead. A notification is taken down when its
+  question goes away. What the app has told you is kept only while it runs, so
+  after a restart whatever is still waiting is told once more.
 - **Needs attention, in the menu bar.** While anything is waiting, the menu
   starts with a *Needs attention* section, a submenu for each question with the
   same answers as the banners, and a dot comes before the clock. An answer that
@@ -92,10 +104,9 @@ properly and skips all of that. To force an unsigned build:
 
 **Notifications.** The first time FocusDesk has something to say, macOS may ask
 whether it may; if you said no, or never saw the question, switch it on in System
-Settings → Notifications → FocusDesk. A build that is unsigned, or only
-signed ad hoc as above, shows plain banners without action buttons (those need a
-properly signed app), so a notification says that something is waiting and
-clicking it opens the app, where the buttons are. It is the same list as the
+Settings → Notifications → FocusDesk. A notification has no buttons of its own,
+whether the build is signed or not: it says that something is waiting, and
+clicking it opens the app, where the answers are. It is the same list as the
 menu bar's *Needs attention* section.
 
 ## Run it in a browser instead
@@ -246,14 +257,24 @@ counted as focus.
 ## Needs your attention
 
 Some things are better asked than assumed. FocusDesk keeps a short list of
-questions and shows them as banners under the clock on every page, oldest first;
-the desktop app shows the same list as notifications and at the top of its
-menu-bar menu. Each has a button for each answer, and goes away by itself the
-moment it stops being true.
+questions and shows them as banners under the clock on every page except the
+quick-switch box. The ones about a meeting or a block left running come first, the
+rest are oldest first, at most three are open at once and the others are behind
+*Show N more*. The desktop app shows the same list as notifications and at the top
+of its menu-bar menu. A banner has a button for each answer, and the menu has an
+item for each (a notification has none: clicking it opens the app). A question
+goes away by itself once it stops being true: from a banner at the next read of the
+list (every 15 seconds, whenever the window is focused, and at once when you answer
+in that window), and from a notification when the app next reads it. An answer that comes
+too late, because the question was answered somewhere else, says *That was already
+answered, so nothing changed.* for a few seconds; any other trouble is told in
+plain words; and a screen reader is told of a banner that arrives, not of the ones
+that were there when the page opened.
 
 - **Time you were away.** The desktop app notices when the machine was locked,
-  asleep or idle while a block ran and reports the stretch
-  (`POST /api/sessions/:id/away`). The clock kept ticking through it, so it is
+  asleep or idle while a block ran and reports the stretch when you are back
+  (`POST /api/sessions/:id/away`; see *Away detection* above for where a stretch
+  starts and ends). The clock kept ticking through it, so it is
   yours to decide: **Keep it**, or **Drop 40 min**, which takes exactly that
   stretch off the block. A running block keeps running; a paused or finished one is
   corrected the same way; time that was paused anyway costs it nothing. Reports of
@@ -264,9 +285,10 @@ moment it stops being true.
   An away stretch that is not from today names its day.
 - **A block left running.** Once the running block has worked
   `long_block_minutes` (two hours unless you change it) it asks *Still on …?* —
-  **Finish block** opens the finish dialog for that block, **Keep going** hides the
-  question until the next multiple (four hours, six…), and covers the ones below it
-  too. 0 turns it off.
+  **Finish block** opens the finish dialog for that block (`/?finish=<block id>`), but
+  only if that block is still the focus block on the clock: otherwise the page says
+  *That block is no longer on the clock*. **Keep going** hides the question until the
+  next multiple (four hours, six…), and covers the ones below it too. 0 turns it off.
 - **Meetings**, from a synced calendar. When one starts while a block is running:
   *Pause … for it?* (only that block is paused: if you switched to another while the
   question was up, it is not). When it ends: log it as a block linked to the meeting,
@@ -282,22 +304,29 @@ moment it stops being true.
   wrapped up: *Time to wrap up the day*, naming the focused time so far. **Wrap up**
   opens the wrap-up page and **Not today** hides it for that day only. It keeps
   asking through the small hours, about the day that has not ended yet, until the
-  day turns over at the day-start hour.
+  day turns over at the day-start hour. A `wrapup_time` at or before that hour is in
+  the small hours at the end of the day (01:00 is the night after, not the morning
+  before), and exactly that hour is the moment the day turns over, so it never comes.
 - **Last week.** From when work starts on the first work day of the week (Monday,
   unless Monday is not one) to the end of that week: *Review last week*, if last
   week had focus time on it and has not been reviewed. **Review** opens that week's
   review and **Not this week** hides it.
-- **Nothing on the clock.** In work hours on a work day, with no block running or
-  paused, no meeting going on and the day not wrapped up, for `nudge_minutes`
-  (fifteen; 0 turns it off): *Nothing on the clock*, *Since 2:15 PM. Start
-  something?* **Start a block** takes you to the Focus page (the desktop app opens
-  quick switch) and **Not now** asks again after another `nudge_minutes`. The quiet
-  is counted from the latest of: work starting, the last block of any kind ending,
-  the last time you dismissed it, and the app starting, so opening it at 14:00 does
-  not meet you with a question about the whole morning.
+- **Nothing on the clock.** In work hours on a work day (the weekday is the one of
+  the day the hours are on), with no block running or paused, no meeting going on
+  and the day not wrapped up, for `nudge_minutes` (fifteen; 0 turns it off):
+  *Nothing on the clock*, *Since 2:15 PM. Start something?* **Start a block** takes
+  you to the Focus page from the banner in the window, and opens quick switch from
+  the menu-bar item and the notification of the desktop app. **Not now** asks again
+  after another `nudge_minutes`. The quiet is counted from the latest of: work
+  starting, the last block of any kind ending, the last time you dismissed it, and
+  the app starting, so opening it at 14:00 does not meet you with a question about
+  the whole morning. A Mac that sleeps does not start the app again: the same quiet
+  is the same question, and it is not asked twice.
 
 All of the times are read in the timezone you set, so they stay put across a clock
-change, and a day is the focus day that turns over at the day-start hour.
+change, and a day is the focus day that turns over at the day-start hour (the
+nudge's work days go with its work hours, which are the clock's, so they are the
+calendar day's).
 
 Settings → **Prompts & nudges** holds the thresholds, the meeting switch, and the
 work days and hours the nudge and the reminders keep to; the wrap-up time is set
@@ -371,7 +400,7 @@ server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
 web/      React + Vite + Tailwind. Focus · Today · Tasks · Projects · Review · Settings,
           the wrap-up pages (/wrap-up, /wrap-up/week) reached from Today and Review,
           and the quick-switch box at /palette, which has no chrome of its own; the
-          prompt banners sit under the clock on every page
+          prompt banners sit under the clock on every page but that one
 desktop/  Electron shell: menu-bar clock, hotkeys, packaging
   main.mjs      window, tray, shortcuts; starts the server in-process
   palette.mjs   the quick-switch window: frameless, raised over other apps
@@ -379,10 +408,16 @@ desktop/  Electron shell: menu-bar clock, hotkeys, packaging
                 tracker that knows nothing of Electron
   attention.mjs notifications, the menu's Needs attention section and Got
                 interrupted's submenu, with Electron handed in
+  window-route.mjs  where the window goes for a route: the address, and whether
+                to load it or to move the page that is loaded
+  menu-bar.mjs  what the menu-bar item says: the clock, the dot, the tooltip
+  requests.mjs  which finished requests mean the menu bar must read again
   preload.cjs   the three calls a page may make of the shell (CommonJS on purpose)
-  scripts/      icon generator, payload bundler and the Mac packager, which builds
-                the chip of the machine it runs on (no binaries in git)
-  test/         node:test, no Electron: away, attention, the packaging arguments
+  scripts/      icon generator, payload bundler, the Mac packager (builds the chip
+                of the machine it runs on; no binaries in the repo) and ensure-deps,
+                which runs npm ci only when node_modules is not what the lockfile says
+  test/         node:test, no Electron: away, attention, window-route, menu-bar,
+                requests, the packaging arguments, ensure-deps
 docs/     PLAN.md — the model, what's built, and what's next
 ```
 
