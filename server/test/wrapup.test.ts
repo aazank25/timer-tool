@@ -1275,12 +1275,13 @@ describe('migration 7 on an existing database', () => {
         'wrap-ups',
       );
 
-      // Every old row is as it was, and the new tables are the only difference.
+      // Every old row is as it was, and the new tables are there. Migrations after 7 run
+      // in the same call and may add tables of their own, so the check is that nothing
+      // went missing and these two arrived, not that nothing else did.
       const after = everything(conn);
-      assert.deepEqual(
-        Object.keys(after),
-        [...Object.keys(before), 'day_notes', 'week_reviews'].sort(),
-      );
+      for (const table of [...Object.keys(before), 'day_notes', 'week_reviews']) {
+        assert.ok(table in after, `${table} is there after migrating`);
+      }
       for (const table of Object.keys(before)) assert.deepEqual(after[table], before[table], table);
       assert.equal(count(conn, 'day_notes'), 0);
       assert.equal(count(conn, 'week_reviews'), 0);

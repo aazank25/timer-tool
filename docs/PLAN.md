@@ -120,8 +120,15 @@ access. Recurring meetings are expanded (`RRULE`), cancelled instances honoured
 - Attribute a meeting to a project once and **later instances of the same
   meeting inherit it** on the next sync; a hand-made attribution always beats
   an inherited guess.
-- "Log as time spent" turns a meeting into a logged block.
+- "Log as time spent" turns a meeting into a logged block, linked to it, so the
+  meeting shows what was logged on it and a second click cannot log it again.
 - "Add to plan" turns a meeting into a plan item.
+- **A sync never undoes what you did by hand.** It upserts what the feed has and
+  deletes only the window's rows the feed no longer has (it used to clear the whole
+  window first, which wiped a meeting's project on every sync).
+- **The feed is read in the background** — soon after start-up, then every 15
+  minutes while a feed is switched on (`FOCUSDESK_CALENDAR_SYNC_MS`, 0 for off) —
+  and syncs run one at a time, whoever asks.
 - Feed URLs are bearer secrets: stored locally, never returned to the browser
   (the UI sees only a label and a hostname).
 
@@ -375,6 +382,53 @@ FocusDesk is running, with its window open or not.
 > names the reason. If pressing it does nothing, pick another. As with a pause from
 > the menu bar, a main window that is open reads the new block on its next poll.
 
+**Prompts — "needs your attention".** Done on the server and in the web app; the
+desktop app's end of it (reporting away time, notifications, nudges) follows.
+
+One list of questions the app has, served as `GET /api/prompts` and answered with
+`POST /api/prompts/act`. A prompt is `{ id, kind, title, body, createdAt, actions }`,
+oldest first by `createdAt`; an action is `{ id, label, primary?, open? }`, where
+`open` is a client route (`/?finish=1`) that the client goes to itself and never
+posts. A prompt that no longer applies is a 409 (*That prompt is no longer
+current*), an action it does not offer a 400. Each kind is a provider
+(`{ kind, list(now), act(id, action, now) }`) registered in `lib/prompts.ts`, so
+an end-of-day wrap-up or a weekly review is one more provider and nothing else.
+Prompts are worked out from the data as it stands, so they go away by themselves;
+what was dismissed is written to `prompt_state`, an answer runs in one
+transaction, and a provider that fails does not hide the others.
+
+- **`away:<id>`** — the desktop app reports a stretch it saw you were away
+  (`POST /api/sessions/:id/away {startedAt, endedAt}`: at least a minute, not in
+  the future (5 s of skew allowed), a focus block that was not discarded, start
+  clamped to the block's own). Overlapping or touching pending stretches of a
+  block merge into the earliest. **Keep it** marks it kept; **Drop** takes that
+  wall-clock stretch off the block (`dropInterval`): every run of the clock that
+  overlaps it is trimmed, split or removed, an open run becomes a closed one up to
+  the start of the stretch and a new open one from its end, and `active_seconds`
+  is worked out again from the closed runs, in one transaction, whether the block
+  is running, paused or finished. Only ticking time comes off, so a stretch that
+  was partly paused costs the block only the part that was running, and the prompt
+  says so when that is less than the whole.
+- **`long-block:<block>:<n>`** — the running focus block has worked n ×
+  `long_block_minutes`. Only the latest multiple is ever asked. **Finish block**
+  opens `/?finish=1` (the Focus page opens its finish dialog and takes the
+  parameter off the address); **Keep going** hides that multiple.
+- **`meeting-start:<event>`** — a timed event began 15 minutes ago or less, has not
+  ended, and a focus block is running that is not the time spent on it. **Pause**
+  pauses the block and writes its id into `prompt_state.data`.
+- **`meeting-end:<event>`** — a timed event ended an hour ago or less and is not
+  logged (no block linked to it) or the block paused for it is still paused:
+  **Log** (a finished focus block over the scheduled time, under the event's
+  project, linked), **Resume**, or **Log and resume** together. Logging never
+  creates a second block for a meeting that is logged already.
+
+Settings: `away_minutes` (10), `long_block_minutes` (120), `meeting_prompts`
+(true), `work_days` (1,2,3,4,5), `work_start` (09:00), `work_end` (18:00),
+`nudge_minutes` (15); the minutes take 0 for off. The desktop app reads the away
+threshold, the work hours and the nudge interval; the server only stores and
+validates them. The web client polls the list every 15 seconds and on window
+focus.
+
 ---
 
 ## 3. Roadmap
@@ -511,7 +565,10 @@ assets sit in git.
 - Break timer with auto-suggested short/long breaks (the settings already exist).
 - Sending the weekly review to you (an email or a notification on Monday): the
   review itself is built, so what is left is delivering it.
-- Idle detection — notice the machine was locked and offer to trim the block.
+- The desktop app's half of away detection and nudges: noticing the machine was
+  locked, asleep or idle and reporting it (the server keeps, asks about and drops
+  it already), notifications for the prompt list, and the start-a-block nudge in
+  work hours.
 - CSV / JSON export.
 - Sync across machines. This is the one feature that breaks the local-first
   promise; a synced SQLite file (Litestream, iCloud/Dropbox folder) is a much
@@ -590,8 +647,22 @@ day_notes         day (YYYY-MM-DD, the key), note, wrapped_up_at, updated_at
 week_reviews      week (the Monday, the key), note, reviewed_at, updated_at
                   · the same for a week; any day of the week is filed under it
 
+away_intervals    id, session_id→sessions (ON DELETE CASCADE), started_at,
+                  ended_at, status(pending|kept|dropped), created_at,
+                  resolved_at
+                  · wall-clock stretches the desktop app saw you were away;
+                    pending until kept or dropped, then never asked again
+
+prompt_state      key (a prompt's id), status(done|dismissed), data(json),
+                  updated_at
+                  · what was done about a prompt that is worked out from other
+                    tables (a long block, a meeting); data remembers what the
+                    prompt needs, such as the block it paused for a meeting
+
 settings          key, value
                   · wrapup_time: HH:MM (24-hour) or '' for off, default 17:30
+                  · includes away_minutes, long_block_minutes, meeting_prompts,
+                    work_days, work_start, work_end, nudge_minutes
 ```
 
 Migrations are append-only in `server/src/db.ts` — never edit a shipped one.

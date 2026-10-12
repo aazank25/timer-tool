@@ -306,6 +306,8 @@ export const api = {
     minutes: number;
     focusRating?: number | null;
     notes?: string | null;
+    /** The meeting this is the time spent on: it then shows what was logged on it. */
+    calendarEventId?: string | null;
   }) => request<Session>('POST', '/sessions/manual', body),
   pauseSession: (id: number) => request<Session>('POST', `/sessions/${id}/pause`),
   resumeSession: (id: number) => request<Session>('POST', `/sessions/${id}/resume`),

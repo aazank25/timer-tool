@@ -7,6 +7,7 @@ import { SettingsPage } from './pages/Settings';
 import { TasksPage } from './pages/Tasks';
 import { TodayPage } from './pages/Today';
 import { WrapUpDayPage, WrapUpWeekPage } from './pages/WrapUp';
+import { PromptCenter } from './components/PromptCenter';
 import { Button } from './components/ui';
 import { useLiveSession, useSessionActions, useTheme } from './hooks';
 import { clock, duration } from './lib/format';
@@ -82,6 +83,7 @@ export default function App() {
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col border-l border-hairline">
         <LiveBar dark={dark} />
+        <PromptCenter />
         <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-5 sm:px-6">
           <Routes>
             <Route path="/" element={<FocusPage dark={dark} />} />

@@ -281,6 +281,38 @@ export const migrations: Migration[] = [
     );
     `,
   },
+  {
+    id: 8,
+    name: 'prompts',
+    up: `
+    -- Time the desktop app saw you were away (locked, asleep or idle) while a block
+    -- ran. It waits here as 'pending' until you keep it or drop it, and then never
+    -- asks again. The interval is wall-clock and belongs to the block it was
+    -- reported for, so it goes with the block when that is deleted.
+    CREATE TABLE away_intervals (
+      id          INTEGER PRIMARY KEY,
+      session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      started_at  TEXT    NOT NULL,
+      ended_at    TEXT    NOT NULL,
+      status      TEXT    NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending','kept','dropped')),
+      created_at  TEXT    NOT NULL,
+      resolved_at TEXT
+    );
+    CREATE INDEX away_session ON away_intervals(session_id);
+
+    -- What has been done about a prompt that is worked out from other tables (a long
+    -- block, a meeting): the key is the prompt's id, and a row is the reason it no
+    -- longer shows. data holds whatever the prompt needs to remember, such as the
+    -- block it paused for a meeting.
+    CREATE TABLE prompt_state (
+      key        TEXT PRIMARY KEY,
+      status     TEXT NOT NULL CHECK (status IN ('done','dismissed')),
+      data       TEXT,
+      updated_at TEXT NOT NULL
+    );
+    `,
+  },
 ];
 
 export const DEFAULT_SETTINGS: Record<string, string> = {
@@ -302,6 +334,18 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   day_start_hour: '4',
   /** When the end-of-day wrap-up is due, as HH:MM on a 24-hour clock. '' means never. */
   wrapup_time: '17:30',
+  /** Minutes locked, asleep or idle during a block before the desktop app reports it as away. 0 = off. */
+  away_minutes: '10',
+  /** A running block is asked about at this length, and again at each multiple of it. 0 = off. */
+  long_block_minutes: '120',
+  /** Offer to pause the block when a meeting starts, and to log the meeting when it ends. */
+  meeting_prompts: 'true',
+  /** ISO weekdays that are work days, 1 = Monday to 7 = Sunday, comma-separated. May be empty. */
+  work_days: '1,2,3,4,5',
+  work_start: '09:00',
+  work_end: '18:00',
+  /** Minutes of work hours with no block running before the desktop app nudges you to start one. 0 = off. */
+  nudge_minutes: '15',
 };
 
 /**

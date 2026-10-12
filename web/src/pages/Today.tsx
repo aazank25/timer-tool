@@ -347,6 +347,7 @@ function CalendarCard({
                           5,
                           Math.round((Date.parse(e.endsAt) - Date.parse(e.startsAt)) / 60000),
                         ),
+                        calendarEventId: e.id,
                       })
                     }
                   >

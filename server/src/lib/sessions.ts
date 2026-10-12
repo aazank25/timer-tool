@@ -1,6 +1,7 @@
 import { db } from '../db.js';
 import { badRequest, conflict, notFound } from './http.js';
 import type { InterruptionReason } from './interruptions.js';
+import { cutOut, toSpans } from './segments.js';
 import { dayStartHour, getNumber, getSetting, tz } from './settings.js';
 import { requireProject, requireTask, startTask } from './tasks.js';
 import { focusDay, nowIso, secondsBetween } from './time.js';
@@ -445,7 +446,11 @@ export function switchSession(input: SwitchInput): {
   })();
 }
 
-/** Log a block that happened away from the timer. */
+/**
+ * Log a block that happened away from the timer. Given a calendar event it is the time
+ * spent on that meeting: the block is linked to it, so the meeting shows what was logged
+ * on it and cannot be logged a second time by mistake.
+ */
 export function logManualSession(input: {
   projectId?: number | null;
   title: string;
@@ -454,17 +459,27 @@ export function logManualSession(input: {
   focusRating?: number | null;
   notes?: string | null;
   kind?: 'focus' | 'break';
+  calendarEventId?: string | null;
 }): SessionView {
   const now = nowIso();
   const seconds = Math.round(input.minutes * 60);
   const endedAt = new Date(Date.parse(input.startedAt) + seconds * 1000).toISOString();
   return db.transaction(() => {
+    // Nothing enforces the link, so a meeting that is not there is refused here, ahead of
+    // the write, rather than left pointing at nothing.
+    if (
+      input.calendarEventId != null &&
+      !db.prepare('SELECT 1 FROM calendar_events WHERE id = ?').get(input.calendarEventId)
+    ) {
+      throw badRequest('Unknown calendar event');
+    }
     const info = db
       .prepare(
         `INSERT INTO sessions
           (project_id, title, kind, planned_minutes, started_at, ended_at, local_day,
-           active_seconds, focus_rating, notes, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?)`,
+           active_seconds, focus_rating, notes, status, calendar_event_id, created_at,
+           updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?)`,
       )
       .run(
         input.projectId ?? null,
@@ -477,6 +492,7 @@ export function logManualSession(input: {
         seconds,
         input.focusRating ?? null,
         input.notes ?? null,
+        input.calendarEventId ?? null,
         now,
         now,
       );
@@ -485,6 +501,55 @@ export function logManualSession(input: {
       'INSERT INTO session_segments (session_id, started_at, ended_at) VALUES (?, ?, ?)',
     ).run(id, input.startedAt, endedAt);
     return toView(getSessionRow(id));
+  })();
+}
+
+/**
+ * Take a stretch of wall-clock time off a block: time the clock ticked on while you were
+ * away. Every run of the clock that overlaps it is trimmed, split or removed (see cutOut)
+ * and the total is worked out again from what is left, so a running, paused or finished
+ * block reads as if that stretch had never been worked. Only ticking time comes off: a
+ * stretch that was partly spent paused costs the block only the part it was running. A
+ * running block keeps running, with the clock carrying on from the end of the stretch.
+ * One transaction, so the segments and the total cannot disagree.
+ */
+export function dropInterval(sessionId: number, from: string, to: string): SessionView {
+  const start = Date.parse(from);
+  const end = Date.parse(to);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    throw badRequest('The time to drop has to end after it starts');
+  }
+  getSessionRow(sessionId);
+  const now = nowIso();
+  return db.transaction(() => {
+    const rows = db
+      .prepare(
+        'SELECT started_at, ended_at FROM session_segments WHERE session_id = ? ORDER BY started_at, id',
+      )
+      .all(sessionId) as { started_at: string; ended_at: string | null }[];
+    const cut = cutOut(toSpans(rows), start, end, Date.parse(now));
+    // A stretch that falls where the clock was not running changes nothing, so nothing is rewritten.
+    if (cut.removedMs > 0) {
+      db.prepare('DELETE FROM session_segments WHERE session_id = ?').run(sessionId);
+      const add = db.prepare(
+        'INSERT INTO session_segments (session_id, started_at, ended_at) VALUES (?, ?, ?)',
+      );
+      // The total is the closed runs only, as everywhere else: a running block's open run
+      // is counted live, and is added to this only when it is closed.
+      let closedSeconds = 0;
+      for (const span of cut.spans) {
+        const startedAt = new Date(span.start).toISOString();
+        const endedAt = span.end == null ? null : new Date(span.end).toISOString();
+        add.run(sessionId, startedAt, endedAt);
+        if (endedAt) closedSeconds += secondsBetween(startedAt, endedAt);
+      }
+      db.prepare('UPDATE sessions SET active_seconds = ?, updated_at = ? WHERE id = ?').run(
+        closedSeconds,
+        now,
+        sessionId,
+      );
+    }
+    return toView(getSessionRow(sessionId));
   })();
 }
 

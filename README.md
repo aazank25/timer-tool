@@ -112,7 +112,9 @@ database's format, leaving `focusdesk.backup-before-…sqlite` files beside it.
 | From the repo | `./data/focusdesk.sqlite` |
 
 The menu-bar item's **Reveal data folder** opens it. Override the location with
-`FOCUSDESK_DATA_DIR`, and the browser port with `FOCUSDESK_PORT`.
+`FOCUSDESK_DATA_DIR`, and the browser port with `FOCUSDESK_PORT`. The calendar
+feeds are re-read in the background every 15 minutes; `FOCUSDESK_CALENDAR_SYNC_MS`
+changes that, and `0` switches it off.
 
 Because the app keeps its data in Application Support, rebuilding or
 reinstalling it never touches your history.
@@ -192,6 +194,33 @@ The clock is owned by the server and stored as run/pause segments, so a
 refresh, a closed lid or a restart loses nothing, and paused time is never
 counted as focus.
 
+## Needs your attention
+
+Some things are better asked than assumed. FocusDesk keeps a short list of
+questions and shows them as banners under the clock on every page, oldest first;
+the desktop app will show the same list as notifications. Each has a button for
+each answer, and goes away by itself the moment it stops being true.
+
+- **Time you were away.** The desktop app notices when the machine was locked,
+  asleep or idle while a block ran and reports the stretch
+  (`POST /api/sessions/:id/away`). The clock kept ticking through it, so it is
+  yours to decide: **Keep it**, or **Drop 40 min**, which takes exactly that
+  stretch off the block. A running block keeps running; a paused or finished one is
+  corrected the same way; time that was paused anyway costs it nothing. Reports of
+  the same absence merge into one, and a stretch you have answered never comes back.
+- **A block left running.** Once the running block has worked
+  `long_block_minutes` (two hours unless you change it) it asks *Still on …?* —
+  **Finish block** opens the finish dialog, **Keep going** hides the question until
+  the next multiple (four hours, six…). 0 turns it off.
+- **Meetings**, from a synced calendar. When one starts while a block is running:
+  *Pause … for it?* When it ends: log it as a block linked to the meeting, and
+  pick the block you paused back up, in one click. A meeting is never logged twice.
+
+Settings → **Prompts & nudges** holds the thresholds, the meeting switch, and the
+work days and hours the desktop app's nudges will keep to. Away detection and
+nudges need the desktop app; the long-block question and the meeting prompts work
+in a browser too.
+
 ## Connect a calendar (optional)
 
 Settings → Calendar. Paste a private ICS feed URL — no OAuth app needed:
@@ -202,8 +231,13 @@ Settings → Calendar. Paste a private ICS feed URL — no OAuth app needed:
   view all details* → copy the ICS link
 
 Recurring meetings are expanded. Attribute a meeting to a project once and later
-instances of the same meeting inherit it. You can log a meeting as time spent or
-add it to the day's plan.
+instances of the same meeting inherit it, and a sync never undoes that. You can log
+a meeting as time spent, which links the block to it so the meeting shows what was
+logged and cannot be logged twice by a second click, or add it to the day's plan.
+
+The feed is re-read in the background, soon after start-up and then every 15
+minutes while one is connected, so the meeting prompts are working from fresh
+events; **Sync now** is still there for when you cannot wait.
 
 That URL is a secret — anyone holding it can read the calendar. It is stored in
 your local database and never sent back to the browser.
@@ -218,9 +252,11 @@ server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
   src/app.ts    boots the API and client on a port; embedded by the desktop app
   src/lib/      sessions (timer, and quick switch's stop-and-start), tasks, stats
                 (rollups), wrapup (day and week reviews), calendar (ICS), time,
-                settings, accelerator (the shortcut rule)
+                settings, accelerator (the shortcut rule); prompts (the "needs your
+                attention" list and its providers: away, long-block, meetings),
+                segments (arithmetic on a block's runs)
   src/routes/   projects, sessions, tasks, timers, plan, stats, wrapup, settings,
-                calendar
+                calendar, prompts
   test/         timer accounting, stopwatch, saved-timer mode, day boundaries,
                 rollups, ICS parsing, migration and backup; tasks (status dates,
                 logged time, validation, ordering and moves, linking a block
@@ -229,10 +265,15 @@ server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
                 week, carrying unfinished tasks forward, migration 6); wrap-up
                 (live totals, notes, done stamps, the weekly sort, the summary
                 text, the setting, migration 7); switch (quick switch, the
-                shortcut rule)
+                shortcut rule); away time (reports, merging, dropping from
+                running, paused and finished blocks), the prompt engine,
+                long-block and meeting prompts, the new settings, migration 8;
+                calendar sync (hand attribution, removals, one sync at a time)
+                and the background timer
 web/      React + Vite + Tailwind. Focus · Today · Tasks · Projects · Review · Settings,
           the wrap-up pages (/wrap-up, /wrap-up/week) reached from Today and Review,
-          and the quick-switch box at /palette, which has no chrome of its own
+          and the quick-switch box at /palette, which has no chrome of its own; the
+          prompt banners sit under the clock on every page
 desktop/  Electron shell: menu-bar clock, hotkeys, packaging
   main.mjs      window, tray, shortcuts; starts the server in-process
   palette.mjs   the quick-switch window: frameless, raised over other apps
