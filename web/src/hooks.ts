@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
-import { api, type Session, type TaskFilter, type TaskInput } from './api';
+import { api, type Session, type TaskFilter, type TaskInput, type TaskMove } from './api';
 import { clock } from './lib/format';
 
 /* ------------------------------------------------------------------ theme */
@@ -166,18 +166,27 @@ export interface LiveSession {
 }
 
 /**
+ * The block on the clock as the server last said it, polled. Whatever only needs to know
+ * what state a block is in reads this: `useLiveSession` adds a tick every second to it,
+ * which is a re-render a dialog on screen has no use for. Both read the one query.
+ */
+export function useActiveSession() {
+  return useQuery({
+    queryKey: keys.active,
+    queryFn: api.activeSession,
+    refetchInterval: LIVE_POLL_MS,
+    refetchOnWindowFocus: true,
+  });
+}
+
+/**
  * The server owns the clock: it stores when each run/pause segment began, so
  * elapsed time survives a refresh, a closed lid or a restarted process. This
  * polls that truth and interpolates between polls so the display still ticks
  * once a second.
  */
 export function useLiveSession(): LiveSession & { isLoading: boolean } {
-  const query = useQuery({
-    queryKey: keys.active,
-    queryFn: api.activeSession,
-    refetchInterval: LIVE_POLL_MS,
-    refetchOnWindowFocus: true,
-  });
+  const query = useActiveSession();
   const now = useTick(1000);
   const session = query.data?.session ?? null;
   const isRunning = session?.status === 'running';
@@ -290,7 +299,15 @@ export function useTaskActions() {
       onSuccess: onDone,
     }),
     remove: useMutation({ mutationFn: api.deleteTask, onSuccess: onDone }),
-    reorder: useMutation({ mutationFn: api.reorderTasks, onSuccess: onDone }),
+    // Only the order changes, so only the lists of tasks are read again. The promise is
+    // returned so the mutation settles only after they have been, which lets a caller
+    // wait out the move, the new order read included, before it does anything that
+    // depends on the rows being where they now are. The page draws that order a moment
+    // after this settles, so a caller that has to know it is drawn waits for that too.
+    move: useMutation({
+      mutationFn: ({ id, to }: { id: number; to: TaskMove }) => api.moveTask(id, to),
+      onSuccess: () => qc.invalidateQueries({ queryKey: ['tasks'] }),
+    }),
   };
 }
 

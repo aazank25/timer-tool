@@ -86,6 +86,12 @@ export interface TaskFilter {
   projectId?: number | 'none';
 }
 
+/**
+ * Where a move puts a task: right before another task of its week and priority, or right
+ * after. Exactly one key, and the other cannot be there at all.
+ */
+export type TaskMove = { before: number; after?: never } | { after: number; before?: never };
+
 /** Undefined leaves a field as it is; null clears the ones that can be empty. */
 export interface TaskInput {
   title?: string;
@@ -216,6 +222,20 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * What went wrong, in words. A refused request only says "Invalid request", so the
+ * first field the server named is added to it, or you could not tell which one.
+ */
+export function reason(err: unknown, fallback: string): string {
+  if (!(err instanceof Error)) return fallback;
+  const fields =
+    err instanceof ApiError
+      ? (err.details as { fieldErrors?: Record<string, string[]> })?.fieldErrors
+      : undefined;
+  const first = Object.entries(fields ?? {})[0];
+  return first ? `${err.message} (${first[0]}: ${first[1]?.[0] ?? 'not allowed'})` : err.message;
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
@@ -297,8 +317,8 @@ export const api = {
   createTask: (body: TaskInput & { title: string }) => request<Task>('POST', '/tasks', body),
   updateTask: (id: number, body: TaskInput) => request<Task>('PATCH', `/tasks/${id}`, body),
   deleteTask: (id: number) => request<{ deleted: number }>('DELETE', `/tasks/${id}`),
-  reorderTasks: (ids: number[]) =>
-    request<{ reordered: number }>('POST', '/tasks/reorder', { ids }),
+  moveTask: (id: number, to: TaskMove) =>
+    request<{ moved: number }>('POST', `/tasks/${id}/move`, to),
 
   listTimers: (limit = 18) => request<SavedTimer[]>('GET', `/timers${qs({ limit })}`),
   saveTimer: (body: {

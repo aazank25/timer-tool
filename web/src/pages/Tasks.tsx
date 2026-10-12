@@ -1,11 +1,20 @@
-import { useId, useRef, useState } from 'react';
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type DragEvent,
+  type KeyboardEvent,
+} from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
-  ApiError,
+  reason,
   type Project,
   type Task,
   type TaskInput,
+  type TaskMove,
   type TaskPriority,
   type TaskStatus,
 } from '../api';
@@ -74,20 +83,6 @@ const STATUS_TONE: Record<TaskStatus, string> = {
   completed: 'border-good/40 bg-good/10 text-ink',
 };
 
-/**
- * What went wrong, in words. A refused request only says "Invalid request", so the
- * first field the server named is added to it, or you could not tell which one.
- */
-function reason(err: unknown, fallback: string): string {
-  if (!(err instanceof Error)) return fallback;
-  const fields =
-    err instanceof ApiError
-      ? (err.details as { fieldErrors?: Record<string, string[]> })?.fieldErrors
-      : undefined;
-  const first = Object.entries(fields ?? {})[0];
-  return first ? `${err.message} (${first[0]}: ${first[1]?.[0] ?? 'not allowed'})` : err.message;
-}
-
 /** 90 -> "1.5h", 120 -> "2h", 100 -> "1.67h": two decimals at most, no trailing zeros. */
 const hoursText = (minutes: number) => String(Number((minutes / 60).toFixed(2)));
 
@@ -147,6 +142,10 @@ export function TasksPage({ dark }: { dark: boolean }) {
   const [groupBy, setGroupBy] = useState<GroupBy>('week');
   const [editing, setEditing] = useState<Task | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // What a screen reader is told after a move. The count makes a new node each time: the
+  // same words said twice in a row would otherwise change nothing in the page, and so be
+  // announced only once.
+  const [announcement, setAnnouncement] = useState({ text: '', count: 0 });
 
   const { data: projects = [] } = useProjects(true);
   const { data: todayInfo } = useToday();
@@ -192,6 +191,26 @@ export function TasksPage({ dark }: { dark: boolean }) {
     );
   }
 
+  // True once the move is made and the list has been read again, false if it was refused.
+  async function moveTask(task: Task, edge: Edge, anchor: Task): Promise<boolean> {
+    setError(null);
+    const to: TaskMove = edge === 'before' ? { before: anchor.id } : { after: anchor.id };
+    try {
+      await taskActions.move.mutateAsync({ id: task.id, to });
+      // Where it went, and not only that it moved: it is somewhere else on the page now,
+      // and a screen reader cannot see where.
+      const where = edge === 'before' ? 'above' : 'below';
+      setAnnouncement((a) => ({
+        text: `Moved "${task.title}" ${where} "${anchor.title}"`,
+        count: a.count + 1,
+      }));
+      return true;
+    } catch (err) {
+      setError(reason(err, 'Could not move the task'));
+      return false;
+    }
+  }
+
   async function startBlock(task: Task) {
     setError(null);
     try {
@@ -209,6 +228,11 @@ export function TasksPage({ dark }: { dark: boolean }) {
 
   return (
     <div className="space-y-4">
+      {/* Says a move aloud. Taken out of the flow by sr-only, so it adds no space of its own. */}
+      <div role="status" aria-live="polite" className="sr-only">
+        <span key={announcement.count}>{announcement.text}</span>
+      </div>
+
       <div>
         <h1 className="text-lg font-semibold text-ink">Tasks</h1>
         <p className="text-xs text-muted">
@@ -288,10 +312,14 @@ export function TasksPage({ dark }: { dark: boolean }) {
             key={group.key}
             group={group}
             dark={dark}
+            // Only the weeks are the bands a task can be moved in: by project or status the
+            // rows of a card are not one band, so there is nothing to drag within.
+            reorderable={groupBy === 'week'}
             startBlockedReason={startBlockedReason}
             onOpen={setEditing}
             onStatus={changeStatus}
             onStart={(task) => void startBlock(task)}
+            onMove={moveTask}
           />
         ))
       )}
@@ -411,23 +439,259 @@ function QuickAdd({ projects, dark }: { projects: Project[]; dark: boolean }) {
 
 /* --------------------------------------------------------------------- list */
 
+/** The side of a row a dragged task would be put on. */
+type Edge = 'before' | 'after';
+
+/**
+ * What a drag carries, beside the task's id as plain text, when it is the drag of a row.
+ * Nothing else has it, so the rows take nothing else that is dragged over them: a text
+ * selection, a link, a file.
+ */
+const DRAG_TYPE = 'application/x-focusdesk-task';
+
+/**
+ * How long after a move was answered a new one is still turned away, when the page never
+ * draws a new order for it to wait for (see `move`). Enough for it to draw the list just read.
+ */
+const SETTLE_MS = 100;
+
+/** What a row needs to be moved by hand, handed down by the card it is in. */
+interface RowReorder {
+  /** Which side of this row a drop would land on right now, if one would. */
+  edge: Edge | null;
+  onKeyDown: (e: KeyboardEvent<HTMLButtonElement>) => void;
+  onDragStart: (e: DragEvent<HTMLButtonElement>) => void;
+  onDragEnd: () => void;
+  onDragOver: (e: DragEvent<HTMLTableRowElement>) => void;
+  onDragLeave: (e: DragEvent<HTMLTableRowElement>) => void;
+  onDrop: (e: DragEvent<HTMLTableRowElement>) => void;
+}
+
 function TaskGroup({
   group,
   dark,
+  reorderable,
   startBlockedReason,
   onOpen,
   onStatus,
   onStart,
+  onMove,
 }: {
   group: Group;
   dark: boolean;
+  /** Whether the rows have a handle. Only when the card is one week of the list. */
+  reorderable: boolean;
   startBlockedReason: string | null;
   onOpen: (task: Task) => void;
   onStatus: (task: Task, status: TaskStatus) => void;
   onStart: (task: Task) => void;
+  /** Put the task on this side of the anchor. Resolves to whether that was done, once the list has been read again. */
+  onMove: (task: Task, edge: Edge, anchor: Task) => Promise<boolean>;
 }) {
   const headingId = useId();
   const n = group.tasks.length;
+  const body = useRef<HTMLTableSectionElement>(null);
+
+  // The id of the task whose handle is being dragged, and nothing else about it. A refetch
+  // in the middle of a drag (the list is polled while a block runs) replaces every row with
+  // a new object, so one kept from the start would not be found among them: the task is
+  // looked up in the rows as they are when it is needed. A ref and not state: the page does
+  // not draw from it, and dragover cannot read the drag's own data to find out what is
+  // being dragged.
+  const dragged = useRef<number | null>(null);
+  // Where a drop would land, and so where the line is drawn.
+  const [dropAt, setDropAt] = useState<{ id: number; edge: Edge } | null>(null);
+  // A move that has been asked for and not yet drawn. Anything that would start another is
+  // turned away until it has been: a key press is ignored and a drag does not start, and
+  // nothing is queued, so two moves cannot be worked out from the same rows. A ref, so a
+  // second key that arrives before the page has drawn the first sees it.
+  const moving = useRef(false);
+  // That move has been answered and the list read again, so its order is on its way to the
+  // page and the next draw of the rows is the one to wait for.
+  const answered = useRef(false);
+  // The task a key moved and the handle that had focus when it did, for the focus to be
+  // given back to the task's handle once the rows are in their new order, if it was drawn anew.
+  const refocus = useRef<{ id: number; handle: HTMLElement } | null>(null);
+  // Lets a move go when the page never draws an order for it.
+  const fallback = useRef<number | undefined>(undefined);
+  // The rows' ids in order, which is how a new order is told from the old, and the order
+  // they were last drawn in.
+  const order = group.tasks.map((t) => t.id).join(',');
+  const drawn = useRef(order);
+
+  /** The move is over: what it was waiting for has happened, or never will. */
+  function release() {
+    window.clearTimeout(fallback.current);
+    moving.current = false;
+    answered.current = false;
+    refocus.current = null;
+  }
+  useEffect(() => () => window.clearTimeout(fallback.current), []);
+
+  // The dragged task as it is among the rows now, or null when it is not among them.
+  const draggedTask = () => group.tasks.find((t) => t.id === dragged.current) ?? null;
+
+  // The order is what to watch for: once it has changed, the new one is on the page.
+  useLayoutEffect(() => {
+    drawn.current = order;
+    // A drag whose task has left the card is over, whatever the browser says: when the
+    // row it was taken by is gone, dragend goes to a node that is not on the page and
+    // never gets here, and the drag would be taken up again by whatever is dragged next.
+    if (dragged.current != null && draggedTask() == null) endDrag();
+
+    // A row that changes place in the DOM can lose focus, and a move is exactly that. React
+    // hands focus back to a node it has only moved, so a handle still on the page is left
+    // alone: with focus on the body anyway, someone has clicked blank space while the list
+    // was being read again, and giving it back would make their next arrow key move the row
+    // once more. A handle drawn anew is a different node, and the old one with its focus is
+    // gone: the new one is given it, but only when focus is nowhere. Anyone who has clicked
+    // or tabbed on has chosen where it is, and taking it back would swallow what they type.
+    const kept = refocus.current;
+    const focus = document.activeElement;
+    if (kept && !kept.handle.isConnected && (focus == null || focus === document.body)) {
+      body.current?.querySelector<HTMLElement>(`[data-task-handle="${kept.id}"]`)?.focus();
+    }
+    // The rows are in the order the move made: the next one can be worked out from them.
+    if (answered.current) release();
+  }, [order]);
+
+  async function move(task: Task, edge: Edge, anchor: Task, handle: HTMLElement | null) {
+    if (moving.current) return;
+    moving.current = true;
+    answered.current = false;
+    // The handle a key was pressed on: it is the one with focus to keep. A drop has none.
+    if (handle) refocus.current = { id: task.id, handle };
+    // The rows as they will be once it is drawn: the task is put on its side of the anchor.
+    const rows = group.tasks.filter((t) => t.id !== task.id);
+    rows.splice(rows.findIndex((t) => t.id === anchor.id) + (edge === 'after' ? 1 : 0), 0, task);
+    const expected = rows.map((t) => t.id).join(',');
+    const moved = await onMove(task, edge, anchor);
+    answered.current = true;
+    // Refused, so the rows are as they were, or already drawn in the order it makes (the
+    // list can be read before the rest of the move settles): nothing is left to wait for.
+    if (!moved || drawn.current === expected) {
+      release();
+      return;
+    }
+    // The list has been read again, but the page draws it a moment later, and the effect
+    // above lets go when it has. It does not always draw a different order (the server may
+    // have found the task already there, or the list could not be read again), and then
+    // that never comes, so this lets go too.
+    fallback.current = window.setTimeout(release, SETTLE_MS);
+  }
+
+  // The other rows of its priority in this card: the ones it can be put beside. Its week
+  // is this card, and the server refuses any other.
+  const sameBand = (task: Task) => group.tasks.filter((t) => t.priority === task.priority);
+
+  /** Arrow up puts it before the row above it of its priority, arrow down after the one below. */
+  function onHandleKey(task: Task, e: KeyboardEvent<HTMLButtonElement>) {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    // With a modifier held the arrows belong to the browser or the screen reader.
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    // They would scroll the page as well as move the row.
+    e.preventDefault();
+    if (moving.current) return;
+    const band = sameBand(task);
+    const up = e.key === 'ArrowUp';
+    const beside = band[band.findIndex((t) => t.id === task.id) + (up ? -1 : 1)];
+    // Already first or last of its priority in the card.
+    if (!beside) return;
+    void move(task, up ? 'before' : 'after', beside, e.currentTarget);
+  }
+
+  function onHandleDragStart(task: Task, e: DragEvent<HTMLButtonElement>) {
+    if (moving.current) {
+      e.preventDefault();
+      return;
+    }
+    dragged.current = task.id;
+    e.dataTransfer.effectAllowed = 'move';
+    // Firefox starts no drag without some data, and it has to be set here.
+    e.dataTransfer.setData('text/plain', String(task.id));
+    // What the rows know a drag of a row by: dragover can read the types, not the data.
+    e.dataTransfer.setData(DRAG_TYPE, String(task.id));
+    // What follows the pointer is the whole row, not the little handle it was taken by.
+    const row = e.currentTarget.closest('tr');
+    if (row) {
+      const box = row.getBoundingClientRect();
+      e.dataTransfer.setDragImage(row, e.clientX - box.left, e.clientY - box.top);
+    }
+  }
+
+  function endDrag() {
+    dragged.current = null;
+    setDropAt(null);
+  }
+
+  /** The pointer's half of the row: the top half is before it, the bottom half after. */
+  const edgeOf = (e: DragEvent<HTMLTableRowElement>): Edge => {
+    const box = e.currentTarget.getBoundingClientRect();
+    return e.clientY < box.top + box.height / 2 ? 'before' : 'after';
+  };
+
+  /**
+   * Where the drag over a row would put the dragged task, or null when it would not go
+   * there. It is a drag of a row from this card's handles, over another row of the same
+   * priority, on a side that is a different place: directly below a row's own place is
+   * before the one after it, and directly above is after the one before it, and both
+   * leave the order as it is. There is no line at such a place, and a drop is refused.
+   */
+  function slot(
+    e: DragEvent<HTMLTableRowElement>,
+    target: Task,
+  ): { from: Task; edge: Edge } | null {
+    const from = draggedTask();
+    if (!from || !e.dataTransfer.types.includes(DRAG_TYPE)) return null;
+    if (from.id === target.id || from.priority !== target.priority) return null;
+    const edge = edgeOf(e);
+    const band = sameBand(from);
+    const gap = band.findIndex((t) => t.id === target.id) - band.findIndex((t) => t.id === from.id);
+    if ((edge === 'before' && gap === 1) || (edge === 'after' && gap === -1)) return null;
+    return { from, edge };
+  }
+
+  function onRowDragOver(task: Task, e: DragEvent<HTMLTableRowElement>) {
+    const to = slot(e, task);
+    if (!to) {
+      // Left alone, the browser refuses the drop. A line drawn from the other half of
+      // this row is taken away.
+      setDropAt((now) => (now?.id === task.id ? null : now));
+      return;
+    }
+    // This is what makes a row a target.
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDropAt((now) =>
+      now?.id === task.id && now.edge === to.edge ? now : { id: task.id, edge: to.edge },
+    );
+  }
+
+  function onRowDragLeave(task: Task, e: DragEvent<HTMLTableRowElement>) {
+    // Crossing from one cell of the row into the next fires this as well, and the line
+    // should stay: only leaving the row altogether takes it away.
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+    setDropAt((now) => (now?.id === task.id ? null : now));
+  }
+
+  function onRowDrop(task: Task, e: DragEvent<HTMLTableRowElement>) {
+    const to = slot(e, task);
+    if (!to) return;
+    e.preventDefault();
+    endDrag();
+    void move(to.from, to.edge, task, null);
+  }
+
+  const reorderFor = (task: Task): RowReorder => ({
+    edge: dropAt?.id === task.id ? dropAt.edge : null,
+    onKeyDown: (e) => onHandleKey(task, e),
+    onDragStart: (e) => onHandleDragStart(task, e),
+    onDragEnd: endDrag,
+    onDragOver: (e) => onRowDragOver(task, e),
+    onDragLeave: (e) => onRowDragLeave(task, e),
+    onDrop: (e) => onRowDrop(task, e),
+  });
+
   return (
     <Card
       title={
@@ -448,9 +712,12 @@ function TaskGroup({
         {/* Fixed columns, so the weeks and projects stacked on the page line up with each other. */}
         <table
           aria-labelledby={headingId}
-          className="w-full min-w-[57rem] table-fixed border-collapse text-left text-xs"
+          className={`w-full ${
+            reorderable ? 'min-w-[59rem]' : 'min-w-[57rem]'
+          } table-fixed border-collapse text-left text-xs`}
         >
           <colgroup>
+            {reorderable && <col className="w-8" />}
             <col />
             <col className="w-36" />
             <col className="w-20" />
@@ -462,6 +729,11 @@ function TaskGroup({
           </colgroup>
           <thead>
             <tr className="text-[11px] uppercase tracking-wide text-muted">
+              {reorderable && (
+                <th scope="col" className="pb-1.5">
+                  <span className="sr-only">Reorder</span>
+                </th>
+              )}
               <th scope="col" className="pb-1.5 pr-3 font-medium">
                 Task
               </th>
@@ -488,7 +760,7 @@ function TaskGroup({
               </th>
             </tr>
           </thead>
-          <tbody>
+          <tbody ref={body}>
             {group.tasks.map((task) => (
               <TaskRow
                 key={task.id}
@@ -498,6 +770,7 @@ function TaskGroup({
                 onOpen={onOpen}
                 onStatus={onStatus}
                 onStart={onStart}
+                reorder={reorderable ? reorderFor(task) : undefined}
               />
             ))}
           </tbody>
@@ -514,6 +787,7 @@ function TaskRow({
   onOpen,
   onStatus,
   onStart,
+  reorder,
 }: {
   task: Task;
   dark: boolean;
@@ -521,11 +795,48 @@ function TaskRow({
   onOpen: (task: Task) => void;
   onStatus: (task: Task, status: TaskStatus) => void;
   onStart: (task: Task) => void;
+  /** Present when the row can be moved by hand, which is when it has a handle. */
+  reorder?: RowReorder;
 }) {
   const done = task.status === 'completed';
-  const cell = 'py-2 pr-3 align-middle';
+  // The line a drop would land on, 2px in the accent colour at the top or the bottom of
+  // the row. It is an inset shadow on every cell: a border would push the row about, and
+  // a shadow on the <tr> is not painted in a table with collapsed borders.
+  const line =
+    reorder?.edge === 'before'
+      ? 'shadow-[inset_0_2px_0_0_var(--accent)]'
+      : reorder?.edge === 'after'
+        ? 'shadow-[inset_0_-2px_0_0_var(--accent)]'
+        : '';
+  const cell = `py-2 pr-3 align-middle ${line}`;
   return (
-    <tr className={`border-t border-hairline ${done ? 'text-muted' : 'text-ink'}`}>
+    <tr
+      className={`border-t border-hairline ${done ? 'text-muted' : 'text-ink'}`}
+      onDragOver={reorder?.onDragOver}
+      onDragLeave={reorder?.onDragLeave}
+      onDrop={reorder?.onDrop}
+    >
+      {reorder && (
+        <td className={`py-2 pr-1 align-middle ${line}`}>
+          <button
+            type="button"
+            draggable
+            data-task-handle={task.id}
+            aria-label={`Move "${task.title}"`}
+            title="Drag to reorder within its priority, or use ↑ ↓"
+            onKeyDown={reorder.onKeyDown}
+            onDragStart={reorder.onDragStart}
+            onDragEnd={reorder.onDragEnd}
+            // The ring is drawn inside the button: it sits flush at the left edge of the box
+            // that scrolls the table, and a ring outside it would be cut off there.
+            className="grid size-7 cursor-grab place-items-center rounded-md text-muted
+              transition-colors hover:text-ink active:cursor-grabbing focus-visible:outline-2
+              focus-visible:-outline-offset-2 focus-visible:outline-accent"
+          >
+            <GripIcon />
+          </button>
+        </td>
+      )}
       <td className={cell}>
         <div className="flex items-start gap-1.5">
           {done && (
@@ -588,7 +899,7 @@ function TaskRow({
         {duration(task.loggedSeconds)}
         {task.estimatedMinutes != null && ` / ${hoursText(task.estimatedMinutes)}h`}
       </td>
-      <td className="py-2 align-middle">
+      <td className={`py-2 align-middle ${line}`}>
         <button
           type="button"
           aria-label={`Start a block on ${task.title}`}
@@ -605,6 +916,20 @@ function TaskRow({
         </button>
       </td>
     </tr>
+  );
+}
+
+/** Six dots, two by three: the handle a row is taken by. */
+function GripIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 12 16" className="h-4 w-3" fill="currentColor">
+      <circle cx="3.5" cy="3" r="1.3" />
+      <circle cx="8.5" cy="3" r="1.3" />
+      <circle cx="3.5" cy="8" r="1.3" />
+      <circle cx="8.5" cy="8" r="1.3" />
+      <circle cx="3.5" cy="13" r="1.3" />
+      <circle cx="8.5" cy="13" r="1.3" />
+    </svg>
   );
 }
 

@@ -8,7 +8,11 @@ import {
   EstimatePicker,
   ModePicker,
   ProjectPicker,
+  projectOf,
   RatingPicker,
+  taskLabel,
+  withPicked,
+  type ProjectChoice,
 } from '../components/pickers';
 import { TimerRing } from '../components/TimerRing';
 import { Button, Card, Empty, Field, inputClass, Modal, Swatch } from '../components/ui';
@@ -33,7 +37,7 @@ export function FocusPage({ dark }: { dark: boolean }) {
   const live = useLiveSession();
   useBlockEndAlert(live);
   const { data: today } = useToday();
-  const { data: projects = [] } = useProjects();
+  const { data: projects = [], isSuccess: projectsLoaded } = useProjects();
   const { data: plan = [] } = usePlan(today?.today);
   const { data: stats } = useDayStats(today?.today);
   const { data: settings, isPending: settingsPending } = useSettings();
@@ -96,6 +100,7 @@ export function FocusPage({ dark }: { dark: boolean }) {
             </Card>
             <StartBlock
               projects={projects}
+              projectsLoaded={projectsLoaded}
               defaultMinutes={defaultMinutes}
               defaultMode={defaultMode}
               settingsReady={settingsReady}
@@ -184,6 +189,7 @@ export function FocusPage({ dark }: { dark: boolean }) {
 
 function StartBlock({
   projects,
+  projectsLoaded,
   defaultMinutes,
   defaultMode,
   settingsReady,
@@ -192,7 +198,10 @@ function StartBlock({
   error,
   onStart,
 }: {
-  projects: { id: number; name: string; color: string }[];
+  /** The live projects only: the first is the default, the one worked on most recently. */
+  projects: ProjectChoice[];
+  /** Whether that list has arrived: until it has, a project missing from it is not known to be archived. */
+  projectsLoaded: boolean;
   defaultMinutes: number;
   defaultMode: TimerMode;
   /** False until the settings have settled: the two defaults above are only a guess before then. */
@@ -216,8 +225,11 @@ function StartBlock({
   const [taskPick, setTaskPick] = useState<number | null>(null);
   const task = openTasks.find((t) => t.id === taskPick) ?? null;
   // Undefined until a task sets it. Null is a task with no project, which is
-  // not the same as no opinion, so it has to stick.
-  const [taskProject, setTaskProject] = useState<number | null | undefined>(undefined);
+  // not the same as no opinion, so it has to stick. Kept as the project itself and
+  // not just its id: the task's project can be archived, which the list of live
+  // projects does not know, and the picker has to be able to show it. Only a snapshot,
+  // taken when the task was picked: the task itself is the better source while picked.
+  const [taskProject, setTaskProject] = useState<ProjectChoice | null | undefined>(undefined);
   // Undefined until the person picks: it follows the task's project, and with
   // no task the project worked on most recently. Null is an explicit "No
   // project" and has to stick, so nothing may fill it back in.
@@ -226,8 +238,20 @@ function StartBlock({
     projectPick !== undefined
       ? projectPick
       : taskProject !== undefined
-        ? taskProject
+        ? (taskProject?.id ?? null)
         : (projects[0]?.id ?? null);
+  // The live projects stay the list, and the default above is still taken from them.
+  // The picked task's project is added to it for as long as the task is picked, whoever
+  // chose the project: one picked by hand must not take the task's away. It is read off
+  // the task as it is now, so a rename or a new colour shows. The snapshot is added too
+  // while it is the project in use, which is all there is once no task is picked. So
+  // the select never holds a project that it has no option for.
+  const choices = withPicked(
+    projects,
+    projectsLoaded,
+    task ? projectOf(task) : null,
+    projectPick === undefined ? taskProject : null,
+  );
   const [title, setTitle] = useState('');
   // The title a task last put in the box, kept to tell it from one the person wrote:
   // only a title that is still exactly this may be swapped when another task is picked.
@@ -260,9 +284,10 @@ function StartBlock({
       setFilledTitle(picked?.title ?? null);
     }
     if (!picked) return;
-    // The picker only lists live projects, so a task on an archived one has
-    // nothing to show here and files under no project rather than a hidden one.
-    setTaskProject(projects.some((p) => p.id === picked.projectId) ? picked.projectId : null);
+    // A block on a task follows the task's project, archived or not, the same as when
+    // it is started from the Tasks tab: that sends the task alone and the server files
+    // the block under the task's project, so this has to agree with it.
+    setTaskProject(projectOf(picked));
   }
 
   // One path for Enter and the button, so they can never send different things.
@@ -295,7 +320,7 @@ function StartBlock({
             <option value="">— none —</option>
             {openTasks.map((t) => (
               <option key={t.id} value={t.id}>
-                {t.projectName ? `${t.title} · ${t.projectName}` : t.title}
+                {taskLabel(t)}
               </option>
             ))}
           </select>
@@ -316,7 +341,7 @@ function StartBlock({
 
         <Field label="Project">
           <ProjectPicker
-            projects={projects as never}
+            projects={choices}
             value={projectId}
             onChange={setProjectPick}
             dark={dark}

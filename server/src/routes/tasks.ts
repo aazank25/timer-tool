@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { handler, intParam, parse } from '../lib/http.js';
-import { createTask, deleteTask, listTasks, reorderTasks, updateTask } from '../lib/tasks.js';
+import { createTask, deleteTask, listTasks, moveTask, updateTask } from '../lib/tasks.js';
 
 export const tasksRouter = Router();
 
@@ -54,14 +54,22 @@ tasksRouter.post(
   }),
 );
 
+/**
+ * Exactly one of the two, and nothing else: strict, so a body naming both, neither or
+ * a stray key is refused instead of one of them being picked.
+ */
+const moveSchema = z.union([
+  z.object({ before: z.number().int().positive() }).strict(),
+  z.object({ after: z.number().int().positive() }).strict(),
+]);
+
+/** Put the task right before or right after another one of its week and priority. */
 tasksRouter.post(
-  '/reorder',
+  '/:id/move',
   handler((req) => {
-    const { ids } = parse(
-      z.object({ ids: z.array(z.number().int().positive()).max(500) }),
-      req.body,
-    );
-    return { reordered: reorderTasks(ids) };
+    const id = intParam(req.params.id, 'task id');
+    moveTask(id, parse(moveSchema, req.body));
+    return { moved: id };
   }),
 );
 

@@ -88,7 +88,7 @@ reporting splits a block across the hours it really covered — 10:15 + 50m land
 - Finish dialog: rate 1–5 with the number keys, rewrite the title, add notes.
 - Manual logging for work done away from the timer.
 - Editing after the fact: retitle, reassign project, re-rate, fix the minutes,
-  reschedule, delete.
+  link to a task, reschedule, delete.
 - Today: hero total, daily-target meter, avg rating, focus score,
   interruptions, longest unbroken run, day timeline, time-by-project,
   time-by-hour, full block log.
@@ -142,6 +142,44 @@ list to open, completed or all.
   held up makes it in progress. Moving a task to in progress stamps a start date
   and to completed stamps a completion date; reopening clears the latter. A date
   you type always wins over the one the status would have filled in.
+- **A block on a task follows the task's project, archived or not.** Starting one
+  from the Tasks tab sends the task alone and the server files the block under the
+  task's project; the Focus screen names that same project, so both ways end in the
+  same place. An archived project is hidden from the pickers, not from the work
+  already on it: the Focus screen's project picker and the block editor's list it,
+  marked *(archived)*, for as long as it is the project in use or the project of the
+  task picked, whoever chose the project. The mark waits for the list of live
+  projects to arrive: a project missing from a list that has not loaded, or failed,
+  is not called archived.
+- **The order inside a week is yours, by band.** The list runs newest week first
+  and, within a week, high, medium, low. A task's *band* is its week and its
+  priority, and the order inside a band is the one you put the rows in: a new task
+  takes the bottom of its band, like a row added to the end of a sheet, and you drag
+  a row by its grip (shown in week grouping only, where each card is one week) or
+  focus the grip and press ↑ or ↓. A move puts a task right before or right after
+  another one in its band; the server reads the whole band, completed rows the
+  screen hides included, and numbers it 0..n-1 again, so a hidden row keeps its
+  place in the order too. A task is never moved out of its band: an anchor in
+  another week or priority is refused. Editing a task's priority, or its added-on
+  day into another week, sends it to the bottom of its new band; any other edit
+  leaves its place alone, a day within the same week included. The added-on day no
+  longer orders anything. What changes on screen: within a week and priority, tasks
+  now list in the order they were added (new ones at the bottom), not newest day
+  first.
+- **A block can be linked to a task after the fact.** Forgot to pick one? Open the
+  block in Today's block log and choose its task: open tasks first, completed ones
+  under their own heading. The task moves along as if the block had been started on
+  it, by what the block is. A running or paused block does exactly what starting one
+  does. A finished block moves only a task that was not started, to in progress, and
+  stamps the day *that block was worked* as its start date, not today; a start date
+  the task already has is kept. A task held up or completed stays as it is: holding
+  or finishing it was decided after a block that old. A discarded block, or a break,
+  moves nothing. All of it happens in the same transaction as the rest of the edit.
+  Saying the same task again, unlinking, or editing something else never touches a
+  task, and the server never changes the block's project for it: the editor moves
+  its project picker to the task's, unless you have already picked one there. The
+  minutes of a running block are the clock's to count: the server refuses to rewrite
+  them, and the edit with them, so the editor disables that field until it is paused.
 - **Deleting a task keeps its blocks.** They lose the link, never their minutes.
   Deleting a project likewise leaves its tasks behind as misc ones.
 
@@ -311,6 +349,12 @@ tasks             id, project_id→projects (NULL = a misc task), title,
                   added_on, start_date, target_date, completed_on, notes,
                   results, position, timestamps
                   · dates are plain YYYY-MM-DD days, not instants
+                  · position orders a task inside its band (the week it was
+                    added, and its priority) and nowhere else: a new task takes
+                    the highest position + 1, a move renumbers its band 0..n-1.
+                    The app itself never reordered tasks before, so positions
+                    were simply the order they were made in, which is where the
+                    new rule starts from, so nothing was migrated
 
 session_segments  id, session_id→sessions, started_at, ended_at
                   · an open row means the clock is ticking

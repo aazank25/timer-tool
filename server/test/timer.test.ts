@@ -288,10 +288,15 @@ describe('daily rollups', () => {
   it('leaves abandoned blocks out of focused time', async () => {
     const { startSession, stopSession } = await mod();
     const { dayStats } = await stats();
-    const before = dayStats(new Date().toISOString().slice(0, 10)).focusSeconds;
+    const { today } = await settings();
+    // The block lands on the user's focus day, which turns over at the day-start hour in
+    // their timezone and not at UTC midnight: for the first hours of every UTC day the UTC
+    // date is already the next day. Ask the app which day it is rather than the clock.
+    const day = today();
+    const before = dayStats(day).focusSeconds;
     const s = startSession({ projectId: roi, title: 'Gave up', plannedMinutes: 45 });
     stopSession(s.id, 'abandoned', { activeSeconds: 600 });
-    const d = dayStats(new Date().toISOString().slice(0, 10));
+    const d = dayStats(day);
     assert.equal(d.focusSeconds, before);
     assert.equal(d.abandonedBlocks, 1);
   });

@@ -1,12 +1,20 @@
 import { useState } from 'react';
-import type { CalendarEvent, PlanItem, Session } from '../api';
+import { flushSync } from 'react-dom';
+import { reason, type CalendarEvent, type PlanItem, type Session } from '../api';
 import { BarsByName, Columns, Hero, StatTile } from '../components/charts';
 import { DayBar } from '../components/DayBar';
 import { EntryRow } from '../components/EntryRow';
 import { DayTimeline } from '../components/DayTimeline';
-import { ProjectPicker } from '../components/pickers';
+import {
+  ProjectPicker,
+  projectOf,
+  taskLabel,
+  withPicked,
+  type ProjectChoice,
+} from '../components/pickers';
 import { Button, Card, Empty, Field, inputBase, inputClass, Modal, Swatch } from '../components/ui';
 import {
+  useActiveSession,
   useCalendarActions,
   useCalendarEvents,
   useDayStats,
@@ -14,6 +22,7 @@ import {
   usePlanActions,
   useProjects,
   useSessionActions,
+  useTasks,
   useToday,
 } from '../hooks';
 import { addDays, dayLabel, duration, hourLabel, timeOfDay, todayKey } from '../lib/format';
@@ -28,7 +37,7 @@ export function TodayPage({ dark }: { dark: boolean }) {
   const { data: stats } = useDayStats(active);
   const { data: plan = [] } = usePlan(active);
   const { data: events = [] } = useCalendarEvents(active, active);
-  const { data: projects = [] } = useProjects();
+  const { data: projects = [], isSuccess: projectsLoaded } = useProjects();
 
   return (
     <div className="space-y-4">
@@ -147,7 +156,12 @@ export function TodayPage({ dark }: { dark: boolean }) {
         <CalendarCard events={events} projects={projects} dark={dark} />
       </div>
 
-      <SessionLog sessions={stats?.sessions ?? []} projects={projects} dark={dark} />
+      <SessionLog
+        sessions={stats?.sessions ?? []}
+        projects={projects}
+        projectsLoaded={projectsLoaded}
+        dark={dark}
+      />
     </div>
   );
 }
@@ -387,10 +401,13 @@ function CalendarCard({
 function SessionLog({
   sessions,
   projects,
+  projectsLoaded,
   dark,
 }: {
   sessions: Session[];
   projects: { id: number; name: string; color: string }[];
+  /** Whether `projects` has arrived: until it has, a project missing from it is not known to be archived. */
+  projectsLoaded: boolean;
   dark: boolean;
 }) {
   const { update, remove } = useSessionActions();
@@ -405,7 +422,10 @@ function SessionLog({
   }
 
   return (
-    <Card title="Block log" subtitle="Click any block to fix its title, project, rating or minutes">
+    <Card
+      title="Block log"
+      subtitle="Click any block to fix its title, project, task, rating or minutes"
+    >
       <ul className="-mx-1 space-y-0.5">
         {sessions.map((s) => (
           <li key={s.id}>
@@ -418,14 +438,17 @@ function SessionLog({
         <EditSessionDialog
           session={editing}
           projects={projects}
+          projectsLoaded={projectsLoaded}
           dark={dark}
           onClose={() => setEditing(null)}
-          onSave={(body) => {
-            update.mutate({ id: editing.id, ...body });
+          // The dialog is closed once the server has said yes, and not before: a refusal has
+          // to reach the person while what they typed is still in front of them.
+          onSave={async (body) => {
+            await update.mutateAsync({ id: editing.id, ...body });
             setEditing(null);
           }}
-          onDelete={() => {
-            remove.mutate(editing.id);
+          onDelete={async () => {
+            await remove.mutateAsync(editing.id);
             setEditing(null);
           }}
         />
@@ -437,20 +460,34 @@ function SessionLog({
 function EditSessionDialog({
   session,
   projects,
+  projectsLoaded,
   dark,
   onClose,
   onSave,
   onDelete,
 }: {
   session: Session;
-  projects: { id: number; name: string; color: string }[];
+  /** The live projects only: an archived one is added below when the block is on it. */
+  projects: ProjectChoice[];
+  /** Whether that list has arrived: until it has, a project missing from it is not known to be archived. */
+  projectsLoaded: boolean;
   dark: boolean;
   onClose: () => void;
-  onSave: (body: Record<string, unknown>) => void;
-  onDelete: () => void;
+  /** Settles when the server has answered: resolves if it took the save, rejects with why not. */
+  onSave: (body: Record<string, unknown>) => Promise<void>;
+  onDelete: () => Promise<void>;
 }) {
+  const { data: tasks } = useTasks({ view: 'all' });
   const [title, setTitle] = useState(session.title);
   const [projectId, setProjectId] = useState(session.projectId);
+  const [taskId, setTaskId] = useState(session.taskId);
+  // Whether the person has chosen a project in this dialog. Until they have, picking a
+  // task moves the project to the task's; after that the project is theirs and a task
+  // never moves it again.
+  const [projectChosen, setProjectChosen] = useState(false);
+  // The project a task last moved the picker to, kept as the task names it: it can be
+  // archived, and then the list of live projects does not know it.
+  const [taskProject, setTaskProject] = useState<ProjectChoice | null>(null);
   const [rating, setRating] = useState(session.focusRating);
   const [notes, setNotes] = useState(session.notes ?? '');
   // The field is seeded rounded to a whole minute, so the time is only sent
@@ -459,62 +496,181 @@ function EditSessionDialog({
   // minute and flatten its pause history into one span.
   const initialMinutes = Math.round(session.elapsedSeconds / 60);
   const [minutes, setMinutes] = useState(initialMinutes);
+  // The server refuses to rewrite the time of a block that is on the clock, and refuses the
+  // whole save with it, a new task link included, so a running block's time is left alone.
+  // Whether it is running comes from the active session when that is this block: it is
+  // polled, and read again after anything that changes a block, while the block this dialog
+  // opened on is only as it was then, and one can be resumed from the menu bar or a shortcut
+  // with the dialog open. Any other block is taken as it was when the dialog opened.
+  const cached = useActiveSession().data?.session;
+  const running = (cached?.id === session.id ? cached : session).status === 'running';
+  // What is waiting on the server, so its button says so and neither is pressed twice, and
+  // why the last one was refused: the dialog stays open, with everything typed in it.
+  const [pending, setPending] = useState<'save' | 'delete' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function attempt(
+    what: 'save' | 'delete',
+    button: HTMLElement,
+    action: () => Promise<void>,
+  ) {
+    setPending(what);
+    setError(null);
+    try {
+      await action();
+    } catch (err) {
+      flushSync(() => {
+        setError(reason(err, what === 'save' ? 'Could not save' : 'Could not delete'));
+        setPending(null);
+      });
+      // A button that is disabled cannot keep focus, which falls to the page and leaves a
+      // keyboard user outside the dialog. The button is given it again once it can take it,
+      // but only if focus is nowhere: anyone who has moved on in the meantime has chosen
+      // where it is.
+      if (document.activeElement == null || document.activeElement === document.body) {
+        button.focus();
+      }
+    }
+  }
+
+  // Open tasks first and the finished ones under their own heading, as on the Focus screen
+  // but with the completed ones as well: work is often linked to a task after it is done.
+  const everyTask = tasks ?? [];
+  const openTasks = everyTask.filter((t) => t.status !== 'completed');
+  const doneTasks = everyTask.filter((t) => t.status === 'completed');
+  // Only once the list has arrived: before that, an empty list means nothing yet.
+  const noTasks = tasks !== undefined && tasks.length === 0;
+  // The block's own task is an option before the list has arrived, so the select shows it
+  // from the first frame instead of holding a value it has no option for.
+  const ownTaskMissing = session.taskId != null && !everyTask.some((t) => t.id === session.taskId);
+
+  // The block's own project stays in the list when it is archived, since a block on a
+  // project that has been archived since is still on it. So does the picked task's, for as
+  // long as the task is picked, whoever chose the project: one picked by hand must not take
+  // it away. It is read off the task as it is now, and the snapshot of the project a task
+  // moved the picker to stands in while that is the one in use. The select must always
+  // show what is chosen. The live projects are everything else.
+  const pickedTask = taskId == null ? undefined : everyTask.find((t) => t.id === taskId);
+  const choices = withPicked(
+    projects,
+    projectsLoaded,
+    projectOf(session),
+    pickedTask ? projectOf(pickedTask) : null,
+    taskProject?.id === projectId ? taskProject : null,
+  );
+
+  // A task with a project moves the project to it, unless the person has picked one here.
+  // A task with none, or none at all, leaves the project as it is. The title is never
+  // touched: it says what you did, and no task knows that.
+  function pickTask(id: number | null) {
+    setTaskId(id);
+    const picked = id == null ? undefined : everyTask.find((t) => t.id === id);
+    const project = picked ? projectOf(picked) : null;
+    if (project && !projectChosen) {
+      setProjectId(project.id);
+      setTaskProject(project);
+    }
+  }
 
   return (
     <Modal open onClose={onClose} title="Edit block">
       <div className="space-y-3">
-        <Field label="What you did">
-          <input
-            className={inputClass}
-            value={title}
-            data-autofocus
-            onChange={(e) => setTitle(e.target.value)}
-          />
-        </Field>
-        <Field label="Project">
-          <ProjectPicker
-            projects={projects as never}
-            value={projectId}
-            onChange={setProjectId}
-            dark={dark}
-          />
-        </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Focus level" hint="1–5, blank to unrate">
+        {/* Tall on a short screen, and the modal itself does not scroll: this does. */}
+        <div className="max-h-[calc(100dvh-12rem)] space-y-3 overflow-y-auto">
+          <Field label="What you did">
+            <input
+              className={inputClass}
+              value={title}
+              data-autofocus
+              onChange={(e) => setTitle(e.target.value)}
+            />
+          </Field>
+          <Field label="Project">
+            <ProjectPicker
+              projects={choices}
+              value={projectId}
+              onChange={(id) => {
+                setProjectId(id);
+                setProjectChosen(true);
+              }}
+              dark={dark}
+            />
+          </Field>
+          <Field label="Task" hint={noTasks ? 'No tasks yet — add them on the Tasks tab.' : undefined}>
             <select
               className={inputClass}
-              value={rating ?? ''}
-              onChange={(e) => setRating(e.target.value ? Number(e.target.value) : null)}
+              value={taskId ?? ''}
+              disabled={noTasks}
+              onChange={(e) => pickTask(e.target.value ? Number(e.target.value) : null)}
             >
-              <option value="">Unrated</option>
-              {[1, 2, 3, 4, 5].map((n) => (
-                <option key={n} value={n}>
-                  {n}
+              <option value="">— none —</option>
+              {ownTaskMissing && <option value={session.taskId!}>{session.taskTitle}</option>}
+              {openTasks.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {taskLabel(t)}
                 </option>
               ))}
+              {doneTasks.length > 0 && (
+                <optgroup label="Completed">
+                  {doneTasks.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {taskLabel(t)}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </select>
           </Field>
-          <Field label="Minutes worked">
-            <input
-              type="number"
-              min={0}
-              max={1440}
-              className={inputClass}
-              value={minutes}
-              onChange={(e) => setMinutes(Math.max(0, Number(e.target.value) || 0))}
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Focus level" hint="1–5, blank to unrate">
+              <select
+                className={inputClass}
+                value={rating ?? ''}
+                onChange={(e) => setRating(e.target.value ? Number(e.target.value) : null)}
+              >
+                <option value="">Unrated</option>
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field
+              label="Minutes worked"
+              hint={running ? 'Pause the block to change its time' : undefined}
+            >
+              <input
+                type="number"
+                min={0}
+                max={1440}
+                className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`}
+                value={minutes}
+                disabled={running}
+                onChange={(e) => setMinutes(Math.max(0, Number(e.target.value) || 0))}
+              />
+            </Field>
+          </div>
+          <Field label="Notes">
+            <textarea
+              className={`${inputClass} min-h-20 resize-y`}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
             />
           </Field>
         </div>
-        <Field label="Notes">
-          <textarea
-            className={`${inputClass} min-h-20 resize-y`}
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-          />
-        </Field>
+        {error && (
+          <p role="alert" className="text-xs text-critical">
+            {error}
+          </p>
+        )}
         <div className="flex items-center justify-between gap-2">
-          <Button variant="danger" onClick={onDelete}>
-            Delete
+          <Button
+            variant="danger"
+            disabled={pending != null}
+            onClick={(e) => void attempt('delete', e.currentTarget, onDelete)}
+          >
+            {pending === 'delete' ? 'Deleting…' : 'Delete'}
           </Button>
           <div className="flex gap-2">
             <Button variant="ghost" onClick={onClose}>
@@ -522,17 +678,25 @@ function EditSessionDialog({
             </Button>
             <Button
               variant="primary"
-              onClick={() =>
-                onSave({
-                  title: title.trim() || session.title,
-                  projectId,
-                  focusRating: rating,
-                  notes: notes.trim() || null,
-                  ...(minutes !== initialMinutes ? { activeSeconds: minutes * 60 } : {}),
-                })
+              disabled={pending != null}
+              onClick={(e) =>
+                void attempt('save', e.currentTarget, () =>
+                  onSave({
+                    title: title.trim() || session.title,
+                    projectId,
+                    focusRating: rating,
+                    notes: notes.trim() || null,
+                    // Only when it changed, like the time: sending the same task again
+                    // would be an edit about the task, and an unrelated one must not be.
+                    ...(taskId !== session.taskId ? { taskId } : {}),
+                    ...(!running && minutes !== initialMinutes
+                      ? { activeSeconds: minutes * 60 }
+                      : {}),
+                  }),
+                )
               }
             >
-              Save
+              {pending === 'save' ? 'Saving…' : 'Save'}
             </Button>
           </div>
         </div>

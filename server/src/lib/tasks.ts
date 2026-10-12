@@ -3,7 +3,7 @@ import { badRequest, notFound } from './http.js';
 // sessions.ts imports this file back, for requireTask and startTask. That is safe
 // because neither file uses the other while it is loading, only from inside a
 // function, so keep it that way: no module-level use of what these two provide.
-import { liveSessionRow, toView as sessionView } from './sessions.js';
+import { liveSessionRow, toView as sessionView, type SessionRow } from './sessions.js';
 import { today } from './settings.js';
 import { nowIso, weekStart } from './time.js';
 
@@ -95,16 +95,26 @@ const SELECT = `
 const WEEK_OF = `date(t.added_on, '-6 days', 'weekday 1')`;
 
 /**
- * Newest week first, then the most pressing within it whatever day it was added,
- * then the newest day, then the order you put them in. The week has to come
- * before the priority and the day after it: sorting by day first would bury a
- * Monday's high-priority task under Friday's low-priority one.
+ * Newest week first, then the most pressing within it, then the order you have put
+ * them in. The week and the priority make a task's band, and the order is yours
+ * inside a band only: `position` is where it is kept. A new task takes the next
+ * position, so it lands at the bottom of its band like a row added to the end of a
+ * sheet, and a move renumbers the band it is made in. The week has to come before
+ * the priority, or last week's high-priority task would sit above everything added
+ * this week. The day a task was added is deliberately not in the order: it would
+ * put the newest day on top and undo every move, and the week is already in it.
  */
 const ORDER = `
   ORDER BY ${WEEK_OF} DESC,
            CASE t.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
-           t.added_on DESC,
            t.position ASC, t.id ASC`;
+
+/**
+ * One past the highest position any task has, so the task given it sorts last in
+ * whichever band it is in. Positions are only compared inside a band, so the gaps
+ * this leaves in the others do no harm.
+ */
+const NEXT_POSITION = '(SELECT COALESCE(MAX(position), -1) + 1 FROM tasks)';
 
 /** The block on the clock, when it is focus work on a task. */
 interface OnTheClock {
@@ -267,8 +277,7 @@ export function createTask(input: TaskInput): TaskView {
         `INSERT INTO tasks
           (project_id, title, priority, status, estimated_minutes, added_on, start_date,
            target_date, completed_on, notes, results, position, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                 (SELECT COALESCE(MAX(position), -1) + 1 FROM tasks), ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_POSITION}, ?, ?)`,
       )
       .run(
         input.projectId ?? null,
@@ -291,12 +300,25 @@ export function createTask(input: TaskInput): TaskView {
 
 export function updateTask(id: number, patch: TaskPatch): TaskView {
   const row = db
-    .prepare('SELECT status, start_date, completed_on FROM tasks WHERE id = ?')
+    .prepare('SELECT priority, status, added_on, start_date, completed_on FROM tasks WHERE id = ?')
     .get(id) as
-    | { status: TaskStatus; start_date: string | null; completed_on: string | null }
+    | {
+        priority: TaskPriority;
+        status: TaskStatus;
+        added_on: string;
+        start_date: string | null;
+        completed_on: string | null;
+      }
     | undefined;
   if (!row) throw notFound('Task');
   if (patch.projectId != null) requireProject(patch.projectId);
+
+  // A task that lands in another band goes to the bottom of it, like one added there.
+  // One that stays in its band keeps its place whatever else about it is edited, so a
+  // day within the same week is not a move, and neither is saying the priority again.
+  const changesBand =
+    (patch.priority !== undefined && patch.priority !== row.priority) ||
+    (patch.addedOn !== undefined && weekStart(patch.addedOn) !== weekStart(row.added_on));
 
   const map: Record<string, unknown> = {
     project_id: patch.projectId,
@@ -320,6 +342,7 @@ export function updateTask(id: number, patch: TaskPatch): TaskView {
     sets.push(`${col} = ?`);
     args.push(val);
   }
+  if (changesBand) sets.push(`position = ${NEXT_POSITION}`);
   if (sets.length) {
     sets.push('updated_at = ?');
     args.push(nowIso(), id);
@@ -337,13 +360,58 @@ export function deleteTask(id: number): void {
   if (!info.changes) throw notFound('Task');
 }
 
-/** Positions follow the order given. Ids that no longer exist are skipped. */
-export function reorderTasks(ids: number[]): number {
-  const stmt = db.prepare('UPDATE tasks SET position = ?, updated_at = ? WHERE id = ?');
-  const now = nowIso();
-  return db.transaction(() =>
-    ids.reduce((moved, id, position) => moved + stmt.run(position, now, id).changes, 0),
-  )();
+/**
+ * Where a move puts a task: right before another task, or right after it. Exactly one
+ * key, and the other cannot be there at all, so no value can name two sides at once.
+ */
+export type TaskMove = { before: number; after?: never } | { after: number; before?: never };
+
+/**
+ * Put a task right before or right after another one in its band. The band is read
+ * from the database whole, completed tasks and all, whatever the screen shows: a list
+ * that hides rows must not be able to number around them. The task comes out of it,
+ * goes back in beside the anchor, and the band is numbered 0..n-1 again, writing only
+ * the rows whose number changed. Two tasks of different bands have no order against
+ * each other, so that is refused rather than guessed at, and nothing is written for a
+ * request that is refused.
+ */
+export function moveTask(id: number, to: TaskMove): void {
+  // The anchor and the side come from the one key that carries a value. Testing for the
+  // keys instead would let a call that passes both, `after: undefined` beside a `before`,
+  // take the anchor from one and the side from the other.
+  const [anchorId, side] =
+    to.before !== undefined ? ([to.before, 'before'] as const) : ([to.after, 'after'] as const);
+  db.transaction(() => {
+    const ends = db
+      .prepare(`SELECT t.id, t.priority, ${WEEK_OF} AS week_of FROM tasks t WHERE t.id IN (?, ?)`)
+      .all(id, anchorId) as { id: number; priority: TaskPriority; week_of: string }[];
+    const task = ends.find((r) => r.id === id);
+    if (!task) throw notFound('Task');
+    // Beside itself is where it already is.
+    if (anchorId === id) return;
+    const anchor = ends.find((r) => r.id === anchorId);
+    if (!anchor) throw badRequest('Unknown task');
+    if (anchor.priority !== task.priority || anchor.week_of !== task.week_of) {
+      throw badRequest('A task can only be moved within its own week and priority');
+    }
+
+    const band = db
+      .prepare(
+        `SELECT t.id, t.position FROM tasks t
+          WHERE t.priority = ? AND ${WEEK_OF} = ?
+          ORDER BY t.position ASC, t.id ASC`,
+      )
+      .all(task.priority, task.week_of) as { id: number; position: number }[];
+    const order = band.filter((r) => r.id !== id).map((r) => r.id);
+    order.splice(order.indexOf(anchorId) + (side === 'after' ? 1 : 0), 0, id);
+
+    const was = new Map(band.map((r) => [r.id, r.position]));
+    const write = db.prepare('UPDATE tasks SET position = ?, updated_at = ? WHERE id = ?');
+    const now = nowIso();
+    order.forEach((taskId, position) => {
+      if (was.get(taskId) !== position) write.run(position, now, taskId);
+    });
+  })();
 }
 
 /**
@@ -357,4 +425,39 @@ export function startTask(id: number): void {
         SET status = 'in_progress', start_date = COALESCE(start_date, ?), updated_at = ?
       WHERE id = ? AND status IN ('not_started', 'held_up')`,
   ).run(today(), nowIso(), id);
+}
+
+/**
+ * A block that has already started was pointed at a task from the block log: the work
+ * on it happened, so the task moves along as it would have if the block had been
+ * started on it. What that comes to depends on the block as it is now.
+ *   running or paused  exactly what starting a block on the task does (startTask)
+ *   completed          only a task not started moves, to in progress, and its start
+ *                      date is the day that block was worked rather than today, since
+ *                      that is when the work began. A start date the task already has
+ *                      is kept (COALESCE), not replaced by that day. A task held up
+ *                      or completed stays as it is: holding or finishing it was
+ *                      decided after a block that old
+ *   abandoned          nothing: a discarded block is not work on the task
+ *   a break            nothing, in any state: a rest is not work on it either
+ * `block` is the block as it stood before the edit, and `taskId` what the edit says
+ * its task is, if it says anything. Only a different task counts. Saying the same one
+ * again, unlinking and leaving the task out all change no task, so an edit that is
+ * about something else cannot restart a task that was put on hold since. The block's
+ * project is not touched here either: the edit says what that is.
+ */
+export function startTaskForLinkedBlock(
+  block: Pick<SessionRow, 'kind' | 'status' | 'local_day' | 'task_id'>,
+  taskId: number | null | undefined,
+): void {
+  if (taskId == null || taskId === block.task_id || block.kind === 'break') return;
+  if (block.status === 'running' || block.status === 'paused') {
+    startTask(taskId);
+  } else if (block.status === 'completed') {
+    db.prepare(
+      `UPDATE tasks
+          SET status = 'in_progress', start_date = COALESCE(start_date, ?), updated_at = ?
+        WHERE id = ? AND status = 'not_started'`,
+    ).run(block.local_day, nowIso(), taskId);
+  }
 }

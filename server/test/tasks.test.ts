@@ -20,6 +20,12 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
+// Two Mondays, so a test that needs tasks in one week, or in two, says which and does not leave
+// it to the day the suite runs on: a task made with no day is added "today", and a run that
+// crosses Monday 04:00 UTC would put the tasks it makes in different weeks.
+const MONDAY = '2026-10-05';
+const NEXT_MONDAY = '2026-10-12';
+
 /** A clean database, with the user's day pinned to UTC and rolling over at 04:00. */
 async function reset() {
   await freshDb();
@@ -59,6 +65,15 @@ async function storedTask(id: number) {
   return db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
 }
 
+/** A block's row exactly as stored, every column, and every one of its segments. */
+async function storedBlock(id: number) {
+  const { db } = await dbMod();
+  return {
+    block: db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as SessionRow,
+    segments: db.prepare('SELECT * FROM session_segments WHERE session_id = ? ORDER BY id').all(id),
+  };
+}
+
 /** How many rows a table holds, straight from the database. */
 async function countRows(table: 'sessions' | 'session_segments') {
   const { db } = await dbMod();
@@ -90,8 +105,10 @@ async function serve() {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res.text();
+    // Express answers a route that does not exist with a page of HTML, which is not JSON.
+    const json = text && res.headers.get('content-type')?.includes('json');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return { status: res.status, body: (text ? JSON.parse(text) : undefined) as any };
+    return { status: res.status, body: (json ? JSON.parse(text) : text || undefined) as any };
   };
 
   return {
@@ -1017,7 +1034,7 @@ describe('listing tasks', () => {
     assert.deepEqual(await titles({ view: 'completed' }), []);
   });
 
-  it('puts the newest week first, then high before medium before low, then the given order', async () => {
+  it('puts the newest week first, then high before medium before low, then the order made in', async () => {
     await task('L1', { priority: 'low', addedOn: '2026-10-05' });
     await task('H1', { priority: 'high', addedOn: '2026-10-05' });
     await task('M1', { priority: 'medium', addedOn: '2026-10-05' });
@@ -1041,14 +1058,16 @@ describe('listing tasks', () => {
     ]);
   });
 
-  it('puts the newer day first among tasks of the same week and priority', async () => {
+  it('keeps tasks of the same week and priority in the order they were added in, whatever day each carries', async () => {
+    // Made Monday, Thursday, Wednesday. The day a task was added is not what orders it: the
+    // order it was made in is, like rows added to the end of a sheet, until it is moved.
     await task('High on Monday', { priority: 'high', addedOn: '2026-10-05' });
     await task('High on Thursday', { priority: 'high', addedOn: '2026-10-08' });
     await task('High on Wednesday', { priority: 'high', addedOn: '2026-10-07' });
     assert.deepEqual(await titles({ view: 'all' }), [
+      'High on Monday',
       'High on Thursday',
       'High on Wednesday',
-      'High on Monday',
     ]);
   });
 
@@ -1084,21 +1103,23 @@ describe('listing tasks', () => {
       new Date(Date.UTC(2026, 9, 4 + i)).toISOString().slice(0, 10),
     );
     const priorities = ['high', 'medium', 'low'] as const;
-    const made = days.flatMap((day) => priorities.map((priority) => ({ day, priority })));
-    // Made in a scrambled order (7 is coprime with 45, so each is made once), so neither ids
-    // nor positions can stand in for the sort.
-    for (let i = 0; i < made.length; i++) {
-      const { day, priority } = made[(i * 7) % made.length]!;
+    const all = days.flatMap((day) => priorities.map((priority) => ({ day, priority })));
+    // Made in a scrambled order (7 is coprime with 45, so each is made once), so the order they
+    // were made in is not the order of the days either, and a sort by day would show.
+    const made = all.map((_, i) => all[(i * 7) % all.length]!);
+    for (const { day, priority } of made) {
       await task(`${day} ${priority}`, { priority, addedOn: day });
     }
-    // The expected order, worked out in JS by the rule the view's own weekOf uses.
+    // The expected order, worked out in JS: the week by the rule the view's own weekOf uses,
+    // newest first, then the priority, then the order they were made in.
     const rank = { high: 0, medium: 1, low: 2 };
-    const expected = [...made]
+    const expected = made
+      .map((t, madeAt) => ({ ...t, madeAt }))
       .sort(
         (a, b) =>
           weekStart(b.day).localeCompare(weekStart(a.day)) ||
           rank[a.priority] - rank[b.priority] ||
-          b.day.localeCompare(a.day),
+          a.madeAt - b.madeAt,
       )
       .map((t) => `${t.day} ${t.priority}`);
     const listed = listTasks({ view: 'all' });
@@ -1112,11 +1133,11 @@ describe('listing tasks', () => {
     assert.equal(new Set(weeks).size, 3);
   });
 
-  it('breaks a tie on the same day and priority by position, then by id', async () => {
+  it('breaks a tie within a week and priority by position, then by id', async () => {
     const { db } = await dbMod();
-    const a = await task('First made');
-    const b = await task('Second made');
-    const c = await task('Third made');
+    const a = await task('First made', { addedOn: MONDAY });
+    const b = await task('Second made', { addedOn: MONDAY });
+    const c = await task('Third made', { addedOn: MONDAY });
     assert.deepEqual(await titles(), ['First made', 'Second made', 'Third made']);
     // Equal positions fall back to id, so the order is still settled.
     db.prepare('UPDATE tasks SET position = 7').run();
@@ -1128,65 +1149,384 @@ describe('listing tasks', () => {
   });
 });
 
-/* ----------------------------------------------------------------- reorder */
+/* ------------------------------------------------------------------- bands */
 
-describe('reordering tasks', () => {
+// A task's band is its week and its priority: the order you put things in is kept inside a band
+// and never across one. The tests move tasks between the week of Monday the 5th of October and
+// the week of Monday the 12th, and between priorities.
+
+describe('where a task sits in its band', () => {
   beforeEach(reset);
 
-  it('sets positions in the order given', async () => {
-    const { reorderTasks, listTasks } = await tasksMod();
-    const a = await task('A');
-    const b = await task('B');
-    const c = await task('C');
+  const order = async (view: 'open' | 'all' = 'all') => {
+    const { listTasks } = await tasksMod();
+    return listTasks({ view }).map((t) => t.title);
+  };
+  const positions = async () => {
+    const { listTasks } = await tasksMod();
+    return listTasks({ view: 'all' }).map((t) => [t.title, t.position]);
+  };
+
+  it('puts a task made afterwards at the bottom of its band, even after a move', async () => {
+    const { moveTask, listTasks } = await tasksMod();
+    // Two bands made turn and turn about, so each is numbered with gaps: moving inside the
+    // first renumbers it to 0..n-1, which brings its numbers below the other band's.
+    const a = await task('A', { addedOn: MONDAY });
+    await task('X', { addedOn: NEXT_MONDAY });
+    await task('B', { addedOn: MONDAY });
+    await task('Y', { addedOn: NEXT_MONDAY });
+    const c = await task('C', { addedOn: MONDAY });
+    moveTask(c.id, { before: a.id });
+    assert.deepEqual(await order(), ['X', 'Y', 'C', 'A', 'B']);
+
+    // One past every number there is, not merely past the end of its own band.
+    const highest = Math.max(...listTasks({ view: 'all' }).map((t) => t.position));
+    const d = await task('D', { addedOn: MONDAY });
+    assert.ok(d.position > highest, `${d.position} should be past ${highest}`);
+    await task('Z', { addedOn: NEXT_MONDAY });
+    assert.deepEqual(await order(), ['X', 'Y', 'Z', 'C', 'A', 'B', 'D']);
+
+    // And a move made after that does not stop the next one going to the bottom either.
+    moveTask(d.id, { before: c.id });
+    await task('E', { addedOn: MONDAY });
+    assert.deepEqual(await order(), ['X', 'Y', 'Z', 'D', 'C', 'A', 'B', 'E']);
+  });
+
+  it('puts a task made after others were deleted at the bottom of its band', async () => {
+    const { deleteTask } = await tasksMod();
+    const a = await task('A', { addedOn: MONDAY });
+    const b = await task('B', { addedOn: MONDAY });
+    const c = await task('C', { addedOn: MONDAY });
+    deleteTask(a.id);
+    deleteTask(b.id);
+    // C keeps position 2 with only itself left. Numbering the next task by how many tasks
+    // there are would give it 1, and so put it above C: it has to be past the highest number.
+    const d = await task('D', { addedOn: MONDAY });
+    assert.ok(d.position > c.position, `${d.position} should be past ${c.position}`);
+    assert.deepEqual(await order(), ['C', 'D']);
+  });
+
+  it('sends a task to the bottom of its new band when its priority changes', async () => {
+    const { updateTask } = await tasksMod();
+    // The mediums come first by position, so a task that kept its place would sit above the
+    // highs it joins, and above the low one.
+    const a = await task('A', { addedOn: MONDAY });
+    const b = await task('B', { addedOn: MONDAY });
+    const c = await task('C', { addedOn: MONDAY });
+    await task('H1', { priority: 'high', addedOn: MONDAY });
+    await task('H2', { priority: 'high', addedOn: MONDAY });
+    await task('L', { priority: 'low', addedOn: MONDAY });
+    assert.deepEqual(await order(), ['H1', 'H2', 'A', 'B', 'C', 'L']);
+
+    updateTask(a.id, { priority: 'high' });
+    assert.deepEqual(await order(), ['H1', 'H2', 'A', 'B', 'C', 'L']);
+    // Lowered, it goes below the low task that was already there, not above it.
+    updateTask(c.id, { priority: 'low' });
+    assert.deepEqual(await order(), ['H1', 'H2', 'A', 'B', 'L', 'C']);
+    // B was the last medium left, and joins the highs at the bottom of them.
+    updateTask(b.id, { priority: 'high' });
+    assert.deepEqual(await order(), ['H1', 'H2', 'A', 'B', 'L', 'C']);
+    // And a high lowered to an empty band leaves the highs closed up behind it.
+    updateTask(a.id, { priority: 'medium' });
+    assert.deepEqual(await order(), ['H1', 'H2', 'B', 'A', 'L', 'C']);
+  });
+
+  it("sends a task to the bottom of that week's band when its day moves into another week", async () => {
+    const { updateTask, listTasks, getTask } = await tasksMod();
+    const a = await task('A', { addedOn: MONDAY });
+    await task('B', { addedOn: MONDAY });
+    await task('X', { addedOn: NEXT_MONDAY });
+    await task('Y', { addedOn: NEXT_MONDAY });
+    const inNextWeek = () =>
+      listTasks({ view: 'all' })
+        .filter((t) => t.weekOf === NEXT_MONDAY)
+        .map((t) => t.title);
+    assert.deepEqual(inNextWeek(), ['X', 'Y']);
+
+    // On the Monday that opens the next week. A was the first made, so a task that kept its
+    // place would head the week it joined.
+    const moved = updateTask(a.id, { addedOn: NEXT_MONDAY });
+    assert.equal(moved.weekOf, NEXT_MONDAY);
+    assert.deepEqual(inNextWeek(), ['X', 'Y', 'A']);
+
+    // Back past the Sunday that closes the week before it, behind a task made since.
+    await task('C', { addedOn: MONDAY });
+    updateTask(a.id, { addedOn: '2026-10-11' });
+    assert.equal(getTask(a.id).weekOf, MONDAY);
+    assert.deepEqual(await order(), ['X', 'Y', 'B', 'C', 'A']);
+  });
+
+  it('keeps its place when its day changes within the same week', async () => {
+    const { updateTask } = await tasksMod();
+    const a = await task('A', { addedOn: MONDAY });
+    await task('B', { addedOn: '2026-10-07' });
+    const c = await task('C', { addedOn: '2026-10-09' });
+    const before = await positions();
+
+    // The first to the last day of its week, and the last to the first: neither is a move.
+    updateTask(a.id, { addedOn: '2026-10-11' });
+    updateTask(c.id, { addedOn: MONDAY });
+    assert.deepEqual(await positions(), before);
+    assert.deepEqual(await order(), ['A', 'B', 'C']);
+  });
+
+  it('keeps its place when its status or anything but its priority or week is edited', async () => {
+    const { updateTask } = await tasksMod();
+    const roi = await makeProject('ROI Dashboard');
+    await task('A', { addedOn: MONDAY });
+    const b = await task('B', { addedOn: MONDAY });
+    await task('C', { addedOn: MONDAY });
+    const before = await positions();
+
+    updateTask(b.id, { status: 'in_progress' });
+    updateTask(b.id, { status: 'completed' });
+    updateTask(b.id, { status: 'held_up' });
+    updateTask(b.id, { title: 'B, renamed', notes: 'Waiting', results: 'None yet' });
+    updateTask(b.id, { projectId: roi, estimatedMinutes: 90, targetDate: '2026-10-30' });
+    // Saying what it already is: the same priority, and the same day.
+    updateTask(b.id, { priority: 'medium', addedOn: MONDAY });
+
     assert.deepEqual(
-      listTasks().map((t) => [t.title, t.position]),
-      [
-        ['A', 0],
-        ['B', 1],
-        ['C', 2],
-      ],
+      await positions(),
+      before.map(([title, position]) => [title === 'B' ? 'B, renamed' : title, position]),
+    );
+    assert.deepEqual(await order(), ['A', 'B, renamed', 'C']);
+  });
+});
+
+/* -------------------------------------------------------------------- moves */
+
+describe('moving a task within its band', () => {
+  beforeEach(reset);
+  afterEach(() => mock.timers.reset());
+
+  const listed = async (view: 'open' | 'all' = 'all') => {
+    const { listTasks } = await tasksMod();
+    return listTasks({ view }).map((t) => [t.title, t.position]);
+  };
+
+  it('puts a task right before another one of its band', async () => {
+    const { moveTask } = await tasksMod();
+    const a = await task('A', { addedOn: MONDAY });
+    const b = await task('B', { addedOn: MONDAY });
+    const c = await task('C', { addedOn: MONDAY });
+    const d = await task('D', { addedOn: MONDAY });
+
+    moveTask(d.id, { before: b.id });
+    assert.deepEqual(await listed(), [
+      ['A', 0],
+      ['D', 1],
+      ['B', 2],
+      ['C', 3],
+    ]);
+
+    // To the very top of the band.
+    moveTask(c.id, { before: a.id });
+    assert.deepEqual(await listed(), [
+      ['C', 0],
+      ['A', 1],
+      ['D', 2],
+      ['B', 3],
+    ]);
+  });
+
+  it('puts a task right after another one of its band', async () => {
+    const { moveTask } = await tasksMod();
+    const a = await task('A', { addedOn: MONDAY });
+    const b = await task('B', { addedOn: MONDAY });
+    const c = await task('C', { addedOn: MONDAY });
+    const d = await task('D', { addedOn: MONDAY });
+
+    moveTask(a.id, { after: c.id });
+    assert.deepEqual(await listed(), [
+      ['B', 0],
+      ['C', 1],
+      ['A', 2],
+      ['D', 3],
+    ]);
+
+    // To the very bottom of the band.
+    moveTask(b.id, { after: d.id });
+    assert.deepEqual(await listed(), [
+      ['C', 0],
+      ['A', 1],
+      ['D', 2],
+      ['B', 3],
+    ]);
+  });
+
+  it('numbers the band 0..n-1 again, however it was numbered before', async () => {
+    const { moveTask } = await tasksMod();
+    const { db } = await dbMod();
+    const a = await task('A', { addedOn: MONDAY });
+    const b = await task('B', { addedOn: MONDAY });
+    const c = await task('C', { addedOn: MONDAY });
+    const d = await task('D', { addedOn: MONDAY });
+    // Gaps, and a tie that falls back to the id: the order is A B C D all the same.
+    const number = db.prepare('UPDATE tasks SET position = ? WHERE id = ?');
+    number.run(10, a.id);
+    number.run(20, b.id);
+    number.run(20, c.id);
+    number.run(45, d.id);
+    assert.deepEqual(
+      (await listed()).map(([title]) => title),
+      ['A', 'B', 'C', 'D'],
     );
 
-    assert.equal(reorderTasks([c.id, a.id, b.id]), 3);
+    moveTask(d.id, { before: b.id });
+    assert.deepEqual(await listed(), [
+      ['A', 0],
+      ['D', 1],
+      ['B', 2],
+      ['C', 3],
+    ]);
+  });
+
+  it('leaves the tasks of every other band exactly as they were', async () => {
+    freeze('2026-10-08T12:00:00.000Z');
+    const { moveTask } = await tasksMod();
+    const { db } = await dbMod();
+    // Made turn and turn about, so every band is numbered with gaps. Three of them are not the
+    // one that moves: another priority, another week, and another priority in the same week.
+    const a = await task('A', { addedOn: MONDAY });
+    await task('High', { addedOn: MONDAY, priority: 'high' });
+    await task('B', { addedOn: MONDAY });
+    await task('Next week', { addedOn: NEXT_MONDAY });
+    await task('Low', { addedOn: MONDAY, priority: 'low' });
+    const c = await task('C', { addedOn: MONDAY });
+    await task('Done', { addedOn: MONDAY, status: 'completed' });
+    // A clock later than they were made at, so a row that was written shows in updated_at too.
+    advance(MINUTE);
+    const others = () =>
+      db
+        .prepare(`SELECT * FROM tasks WHERE title IN ('High', 'Next week', 'Low') ORDER BY id`)
+        .all();
+    const before = others();
+    assert.equal(before.length, 3);
+
+    moveTask(c.id, { before: a.id });
+
+    assert.deepEqual(others(), before);
+    // The band that moved is the medium one of that week, the completed task in it included.
+    const band = new Set(['C', 'A', 'B', 'Done']);
     assert.deepEqual(
-      listTasks().map((t) => [t.title, t.position]),
+      (await listed()).filter(([title]) => band.has(title as string)),
       [
         ['C', 0],
         ['A', 1],
         ['B', 2],
+        ['Done', 3],
       ],
     );
-
-    reorderTasks([b.id, c.id, a.id]);
-    assert.deepEqual(
-      listTasks().map((t) => t.title),
-      ['B', 'C', 'A'],
-    );
   });
 
-  it('puts a task made afterwards at the end', async () => {
-    const { reorderTasks, listTasks } = await tasksMod();
+  it('writes only the rows whose position changed', async () => {
+    freeze('2026-10-08T12:00:00.000Z');
+    const { moveTask } = await tasksMod();
+    const { db } = await dbMod();
     const a = await task('A');
     const b = await task('B');
-    reorderTasks([b.id, a.id]);
     const c = await task('C');
-    assert.equal(c.position, 2);
-    assert.deepEqual(
-      listTasks().map((t) => t.title),
-      ['B', 'A', 'C'],
-    );
+    const d = await task('D');
+    advance(MINUTE);
+    const row = (id: number) =>
+      db.prepare('SELECT position, updated_at FROM tasks WHERE id = ?').get(id);
+    const [ra, rb] = [row(a.id), row(b.id)];
+
+    // C and D swap places. A and B keep the numbers they had, so they are not written.
+    moveTask(d.id, { before: c.id });
+    assert.deepEqual([row(a.id), row(b.id)], [ra, rb]);
+    const stamp = '2026-10-08T12:01:00.000Z';
+    assert.deepEqual(row(d.id), { position: 2, updated_at: stamp });
+    assert.deepEqual(row(c.id), { position: 3, updated_at: stamp });
+
+    // Putting a task where it already is writes nothing at all.
+    advance(MINUTE);
+    const every = () => db.prepare('SELECT * FROM tasks ORDER BY id').all();
+    const before = every();
+    moveTask(b.id, { after: a.id });
+    moveTask(a.id, { before: b.id });
+    assert.deepEqual(every(), before);
   });
 
-  it('never lifts a task out of its week or its priority', async () => {
-    const { reorderTasks, listTasks } = await tasksMod();
-    const late = await task('Late week', { addedOn: '2026-10-12' });
-    const early = await task('Early week', { addedOn: '2026-10-05' });
-    const low = await task('Low', { addedOn: '2026-10-05', priority: 'low' });
-    reorderTasks([low.id, early.id, late.id]);
-    assert.deepEqual(
-      listTasks().map((t) => t.title),
-      ['Late week', 'Early week', 'Low'],
-    );
+  it('works on the whole band, completed tasks the open view hides included', async () => {
+    const { moveTask } = await tasksMod();
+    const a = await task('A', { addedOn: MONDAY });
+    const b = await task('B', { addedOn: MONDAY, status: 'completed' });
+    const c = await task('C', { addedOn: MONDAY });
+    assert.deepEqual(await listed('open'), [
+      ['A', 0],
+      ['C', 2],
+    ]);
+
+    // C before A: the hidden B is numbered along with them, and ends up last.
+    moveTask(c.id, { before: a.id });
+    assert.deepEqual(await listed(), [
+      ['C', 0],
+      ['A', 1],
+      ['B', 2],
+    ]);
+    assert.deepEqual(await listed('open'), [
+      ['C', 0],
+      ['A', 1],
+    ]);
+
+    // A after C is where A already is, so nothing changes.
+    moveTask(a.id, { after: c.id });
+    assert.deepEqual(await listed(), [
+      ['C', 0],
+      ['A', 1],
+      ['B', 2],
+    ]);
+
+    // C after A, as the screen would ask for from the two rows it can see: C lands right
+    // behind A, so it is still ahead of the hidden B and not behind it.
+    moveTask(c.id, { after: a.id });
+    assert.deepEqual(await listed(), [
+      ['A', 0],
+      ['C', 1],
+      ['B', 2],
+    ]);
+
+    // A hidden task can be moved itself, and can be the one another is put beside.
+    moveTask(b.id, { before: c.id });
+    assert.deepEqual(await listed(), [
+      ['A', 0],
+      ['B', 1],
+      ['C', 2],
+    ]);
+    moveTask(a.id, { after: b.id });
+    assert.deepEqual(await listed(), [
+      ['B', 0],
+      ['A', 1],
+      ['C', 2],
+    ]);
+    assert.deepEqual(await listed('open'), [
+      ['A', 1],
+      ['C', 2],
+    ]);
+  });
+
+  it('goes by the key that has a value, whatever sits beside it', async () => {
+    const { moveTask } = await tasksMod();
+    const a = await task('A', { addedOn: MONDAY });
+    const b = await task('B', { addedOn: MONDAY });
+    const c = await task('C', { addedOn: MONDAY });
+    // Neither the types nor the route let a request name both sides, but a library call can
+    // still hand over a key that is there with nothing in it. That is not an `after`.
+    moveTask(c.id, { before: a.id, after: undefined } as never);
+    assert.deepEqual(await listed(), [
+      ['C', 0],
+      ['A', 1],
+      ['B', 2],
+    ]);
+    // And the other way round: the `before` that is empty does not take the anchor.
+    moveTask(c.id, { before: undefined, after: b.id } as never);
+    assert.deepEqual(await listed(), [
+      ['A', 0],
+      ['B', 1],
+      ['C', 2],
+    ]);
   });
 });
 
@@ -1206,6 +1546,8 @@ describe('tasks over the API', () => {
     const { db } = await dbMod();
     db.exec('DELETE FROM session_segments; DELETE FROM sessions; DELETE FROM tasks;');
   });
+
+  afterEach(() => mock.timers.reset());
 
   after(() => api.close());
 
@@ -1438,25 +1780,242 @@ describe('tasks over the API', () => {
     assert.deepEqual(await everything(), before);
   });
 
-  it('puts tasks in the order given when they are reordered', async () => {
-    const make = async (title: string) => (await api.call('POST', '/tasks', { title })).body.id;
+  it('puts a task before or after another through the move endpoint', async () => {
+    const make = async (title: string) =>
+      (await api.call('POST', '/tasks', { title, addedOn: MONDAY })).body.id;
     const a = await make('A');
     const b = await make('B');
     const c = await make('C');
     const order = async () => (await everything()).map((t: { title: string }) => t.title);
     assert.deepEqual(await order(), ['A', 'B', 'C']);
 
-    const res = await api.call('POST', '/tasks/reorder', { ids: [c, a, b] });
-    assert.equal(res.status, 200);
-    assert.deepEqual(res.body, { reordered: 3 });
+    const before = await api.call('POST', `/tasks/${c}/move`, { before: a });
+    assert.equal(before.status, 200);
+    assert.deepEqual(before.body, { moved: c });
     assert.deepEqual(await order(), ['C', 'A', 'B']);
 
-    assert.equal(await api.status('POST', '/tasks/reorder', {}), 400);
-    assert.equal(await api.status('POST', '/tasks/reorder', { ids: 'abc' }), 400);
-    assert.equal(await api.status('POST', '/tasks/reorder', { ids: [0] }), 400);
-    assert.equal(await api.status('POST', '/tasks/reorder', { ids: [1.5] }), 400);
-    assert.equal(await api.status('POST', '/tasks/reorder', { ids: ['x'] }), 400);
-    assert.deepEqual(await order(), ['C', 'A', 'B']);
+    const after = await api.call('POST', `/tasks/${c}/move`, { after: b });
+    assert.equal(after.status, 200);
+    assert.deepEqual(after.body, { moved: c });
+    assert.deepEqual(await order(), ['A', 'B', 'C']);
+    assert.deepEqual(
+      (await everything()).map((t: { position: number }) => t.position),
+      [0, 1, 2],
+    );
+  });
+
+  /** Every task row exactly as stored, so "nothing changed" means every column of every row. */
+  async function snapshot() {
+    const { db } = await dbMod();
+    return db.prepare('SELECT * FROM tasks ORDER BY id').all();
+  }
+
+  /** Two tasks and a clock later than they were made at, for a refused move to leave alone. */
+  async function pair(a: Record<string, unknown>, b: Record<string, unknown>) {
+    freeze('2026-10-08T12:00:00.000Z');
+    const first = (await api.call('POST', '/tasks', { title: 'First', ...a })).body.id;
+    const second = (await api.call('POST', '/tasks', { title: 'Second', ...b })).body.id;
+    advance(MINUTE);
+    return [first, second] as const;
+  }
+
+  /** Three tasks of one band, made at a frozen clock that is then moved on, as `pair` does for two. */
+  async function trio() {
+    freeze('2026-10-08T12:00:00.000Z');
+    const make = async (title: string) => (await api.call('POST', '/tasks', { title })).body.id;
+    const ids = [await make('First'), await make('Second'), await make('Third')] as const;
+    advance(MINUTE);
+    return ids;
+  }
+
+  it('refuses a move to a task of another week, and changes nothing', async () => {
+    const [a, b] = await pair({ addedOn: '2026-10-05' }, { addedOn: '2026-10-12' });
+    const before = await snapshot();
+    for (const to of [{ before: b }, { after: b }]) {
+      const res = await api.call('POST', `/tasks/${a}/move`, to);
+      assert.equal(res.status, 400);
+      assert.match(res.body.error, /own week and priority/);
+    }
+    assert.deepEqual(await snapshot(), before);
+  });
+
+  it('refuses a move to a task of another priority, and changes nothing', async () => {
+    const [a, b] = await pair({ priority: 'medium' }, { priority: 'high' });
+    const before = await snapshot();
+    for (const to of [{ before: b }, { after: b }]) {
+      const res = await api.call('POST', `/tasks/${a}/move`, to);
+      assert.equal(res.status, 400);
+      assert.match(res.body.error, /own week and priority/);
+    }
+    assert.deepEqual(await snapshot(), before);
+  });
+
+  it('refuses an anchor that is not there, with a 400', async () => {
+    const [a] = await pair({}, {});
+    const before = await snapshot();
+    for (const to of [{ before: 999_999 }, { after: 999_999 }]) {
+      const res = await api.call('POST', `/tasks/${a}/move`, to);
+      assert.equal(res.status, 400);
+      assert.equal(res.body.error, 'Unknown task');
+    }
+    assert.deepEqual(await snapshot(), before);
+  });
+
+  it('answers 404 to a task to move that is not there', async () => {
+    const [a] = await pair({}, {});
+    const before = await snapshot();
+    const res = await api.call('POST', '/tasks/999999/move', { before: a });
+    assert.equal(res.status, 404);
+    assert.equal(res.body.error, 'Task not found');
+    // Told apart from an anchor that is not there: both missing is still the task in the URL.
+    assert.equal(await api.status('POST', '/tasks/999999/move', { before: 888_888 }), 404);
+    assert.deepEqual(await snapshot(), before);
+  });
+
+  it('answers 404 to a task that is not there moved onto itself, not 200', async () => {
+    await pair({}, {});
+    const before = await snapshot();
+    // Beside itself is a no-op only for a task that exists: this one is not there to be left alone.
+    for (const to of [{ before: 999_999 }, { after: 999_999 }]) {
+      const res = await api.call('POST', '/tasks/999999/move', to);
+      assert.equal(res.status, 404);
+      assert.equal(res.body.error, 'Task not found');
+    }
+    assert.deepEqual(await snapshot(), before);
+  });
+
+  it('succeeds and changes nothing when a task is moved onto itself', async () => {
+    const [a] = await pair({}, {});
+    const before = await snapshot();
+    for (const to of [{ before: a }, { after: a }]) {
+      const res = await api.call('POST', `/tasks/${a}/move`, to);
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body, { moved: a });
+    }
+    assert.deepEqual(await snapshot(), before);
+  });
+
+  /**
+   * A task moved onto itself has to be left alone. The test above does it with the first of two
+   * tasks, which comes out the same even with no check for it, so these use a band of three and a
+   * task that is last or in the middle, where leaving it out moves something.
+   */
+  async function movedOntoItself(which: 1 | 2) {
+    const id = (await trio())[which];
+    const before = await snapshot();
+    for (const to of [{ before: id }, { after: id }]) {
+      const res = await api.call('POST', `/tasks/${id}/move`, to);
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body, { moved: id });
+    }
+    assert.deepEqual(await snapshot(), before);
+  }
+
+  it('succeeds and changes nothing when the last task of a band is moved onto itself', () =>
+    movedOntoItself(2));
+
+  it('succeeds and changes nothing when a middle task of a band is moved onto itself', () =>
+    movedOntoItself(1));
+
+  it('refuses a body that does not name exactly one of before and after', async () => {
+    const [a, b] = await pair({}, {});
+    const before = await snapshot();
+    const bodies: [string, unknown][] = [
+      ['both', { before: b, after: b }],
+      ['neither', {}],
+      ['an extra key', { before: b, also: 1 }],
+      ['an extra key beside after', { after: b, position: 0 }],
+      ['a list', [b]],
+    ];
+    for (const [what, body] of bodies) {
+      assert.equal(await api.status('POST', `/tasks/${a}/move`, body), 400, what);
+    }
+    // No body at all, not even an empty one.
+    assert.equal(await api.status('POST', `/tasks/${a}/move`), 400);
+    assert.deepEqual(await snapshot(), before);
+  });
+
+  it('refuses an anchor that is not a positive whole number, and a task id that is not one', async () => {
+    const [a, b] = await pair({}, {});
+    const before = await snapshot();
+    for (const bad of [0, -1, -b, 1.5, '2', true, null, [b]]) {
+      assert.equal(
+        await api.status('POST', `/tasks/${a}/move`, { before: bad }),
+        400,
+        `before ${JSON.stringify(bad)}`,
+      );
+      assert.equal(
+        await api.status('POST', `/tasks/${a}/move`, { after: bad }),
+        400,
+        `after ${JSON.stringify(bad)}`,
+      );
+    }
+    for (const bad of ['abc', '0', '-1', '1.5']) {
+      assert.equal(await api.status('POST', `/tasks/${bad}/move`, { before: b }), 400, bad);
+    }
+    assert.deepEqual(await snapshot(), before);
+  });
+
+  it('answers an anchor that is not a positive whole number with the schema error, not an unknown task', async () => {
+    const [a] = await pair({}, {});
+    const before = await snapshot();
+    // A 400 either way, so the status cannot tell them apart: zero or a negative number let past
+    // the schema would be looked up and come back as "Unknown task", and only the message says so.
+    for (const bad of [0, -1, 1.5]) {
+      for (const to of [{ before: bad }, { after: bad }]) {
+        const res = await api.call('POST', `/tasks/${a}/move`, to);
+        assert.equal(res.status, 400, JSON.stringify(to));
+        assert.equal(res.body.error, 'Invalid request', JSON.stringify(to));
+      }
+    }
+    assert.deepEqual(await snapshot(), before);
+  });
+
+  it('has no endpoint that reorders tasks by a list of ids any more', async () => {
+    const [a, b] = await pair({}, {});
+    const before = await snapshot();
+    assert.equal(await api.status('POST', '/tasks/reorder', { ids: [b, a] }), 404);
+    assert.deepEqual(await snapshot(), before);
+  });
+
+  it('writes every position of a move or none of them, whichever write fails', async () => {
+    const { db } = await dbMod();
+    const [a, b, c] = await trio();
+    const d = (await api.call('POST', '/tasks', { title: 'Fourth' })).body.id;
+    advance(MINUTE);
+    const before = await snapshot();
+    assert.deepEqual(
+      (await everything()).map((t: { id: number }) => t.id),
+      [a, b, c, d],
+    );
+
+    // The fourth before the second renumbers the fourth, the second and the third, in that order,
+    // and leaves the first alone. The trigger refuses the write to the second, which is the
+    // second write and comes after the fourth's has gone through, so only the transaction around
+    // them can take that one back. It is a TEMP trigger, dropped again below.
+    db.exec(`CREATE TEMP TRIGGER tripwire BEFORE UPDATE OF position ON tasks
+             WHEN NEW.id = ${b} BEGIN SELECT RAISE(ABORT, 'tripwire'); END`);
+    // The server logs the failure it answers with; keep that stack trace out of the report.
+    const quiet = mock.method(console, 'error', () => {});
+    let failed;
+    try {
+      failed = await api.call('POST', `/tasks/${d}/move`, { before: b });
+    } finally {
+      quiet.mock.restore();
+      db.exec('DROP TRIGGER IF EXISTS tripwire');
+    }
+    // Exactly the 500 the trigger causes: a 400 would mean it was refused before any write.
+    assert.equal(failed.status, 500);
+    assert.match(failed.body.details, /tripwire/);
+    assert.deepEqual(await snapshot(), before);
+
+    // Nothing is left in the way: with the trigger gone the same move goes through.
+    const ok = await api.call('POST', `/tasks/${d}/move`, { before: b });
+    assert.equal(ok.status, 200);
+    assert.deepEqual(
+      (await everything()).map((t: { id: number }) => t.id),
+      [a, d, b, c],
+    );
   });
 
   it("turns a hard-deleted project's tasks into misc ones", async () => {
@@ -1578,6 +2137,32 @@ describe('a block started on a task over the API', () => {
     assert.equal(res.body.taskTitle, null);
     assert.equal(res.body.projectId, projectId);
     assert.equal(res.body.mode, 'stopwatch');
+  });
+
+  it("files the block under the task's project when it is archived, whichever way it is started", async () => {
+    const made = (await api.call('POST', '/tasks', { title: 'On an archived project', projectId }))
+      .body;
+    assert.equal(await api.status('PATCH', `/projects/${projectId}`, { archived: true }), 200);
+    try {
+      // The Tasks tab sends the task alone and leaves the project to the server.
+      const fromTasks = await api.call('POST', '/sessions', { title: made.title, taskId: made.id });
+      assert.equal(fromTasks.status, 201);
+      assert.equal(fromTasks.body.projectId, projectId);
+      assert.equal(fromTasks.body.projectName, 'ROI Dashboard');
+      await api.call('POST', `/sessions/${fromTasks.body.id}/abandon`);
+
+      // The Focus screen names the project it shows, which is that same one.
+      const fromFocus = await api.call('POST', '/sessions', {
+        title: made.title,
+        taskId: made.id,
+        projectId,
+      });
+      assert.equal(fromFocus.status, 201);
+      assert.equal(fromFocus.body.projectId, projectId);
+      assert.equal(fromFocus.body.taskId, made.id);
+    } finally {
+      await api.call('PATCH', `/projects/${projectId}`, { archived: false });
+    }
   });
 });
 
@@ -1706,6 +2291,392 @@ describe('moving a logged block between tasks', () => {
     assert.equal(res.body.taskId, t.id);
     assert.equal(res.body.elapsedSeconds, 1200);
     assert.equal(await logged(t.id), 1200);
+  });
+});
+
+/* ------------------------------------- linking a block to a task afterwards */
+
+describe('linking a block to a task from the block log', () => {
+  let projectId = 0;
+  let otherProject = 0;
+  let api: Awaited<ReturnType<typeof serve>>;
+
+  before(async () => {
+    await reset();
+    projectId = await makeProject('ROI Dashboard', '#0ea5e9');
+    otherProject = await makeProject('Crew Mgmt Ops', '#f59e0b');
+    api = await serve();
+  });
+
+  beforeEach(async () => {
+    const { db } = await dbMod();
+    db.exec('DELETE FROM session_segments; DELETE FROM sessions; DELETE FROM tasks;');
+  });
+
+  afterEach(() => mock.timers.reset());
+
+  after(() => api.close());
+
+  const NOON = '2026-10-08T12:00:00.000Z';
+
+  /** A block on the clock, on no task. */
+  async function startLoose(more: Record<string, unknown> = {}) {
+    const res = await api.call('POST', '/sessions', { title: 'Forgot to pick a task', ...more });
+    assert.equal(res.status, 201);
+    return res.body;
+  }
+
+  /** A finished half hour on the 5th, on no task: three days before the clock is frozen at. */
+  async function loggedLoose(more: Record<string, unknown> = {}) {
+    const res = await api.call('POST', '/sessions/manual', {
+      title: 'Worked earlier',
+      startedAt: '2026-10-05T10:00:00.000Z',
+      minutes: 30,
+      ...more,
+    });
+    assert.equal(res.status, 201);
+    return res.body;
+  }
+
+  const link = (blockId: number, taskId: number | null, more: Record<string, unknown> = {}) =>
+    api.call('PATCH', `/sessions/${blockId}`, { taskId, ...more });
+
+  /** Put a task on hold from the Tasks tab, as a person would after starting a block on it. */
+  async function putOnHold(taskId: number) {
+    assert.equal(await api.status('PATCH', `/tasks/${taskId}`, { status: 'held_up' }), 200);
+  }
+
+  /* ---- a block still on the clock: what starting one on the task does */
+
+  it('moves a not-started task to in progress, started today, when the running block is linked to it', async () => {
+    freeze(NOON);
+    const t = await task('Picked late');
+    const block = await startLoose();
+    // Left running for two days: today is not the day the block began, and it is today that counts.
+    advance(2 * DAY);
+
+    const res = await link(block.id, t.id);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.taskId, t.id);
+    assert.equal(res.body.status, 'running');
+    const after = await reread(t.id);
+    assert.equal(after.status, 'in_progress');
+    assert.equal(after.startDate, '2026-10-10');
+  });
+
+  it('moves a held-up task to in progress when the running block is linked to it, keeping its start date', async () => {
+    freeze(NOON);
+    const t = await task('Waiting on legal', { status: 'held_up', startDate: '2026-10-01' });
+    const block = await startLoose();
+    await link(block.id, t.id);
+    const after = await reread(t.id);
+    assert.equal(after.status, 'in_progress');
+    assert.equal(after.startDate, '2026-10-01');
+  });
+
+  it("gives a held-up task that never had a start date today's when the running block is linked to it", async () => {
+    freeze(NOON);
+    const t = await task('Parked before it began', { status: 'held_up' });
+    const block = await startLoose();
+    advance(DAY);
+    await link(block.id, t.id);
+    const after = await reread(t.id);
+    assert.equal(after.status, 'in_progress');
+    assert.equal(after.startDate, '2026-10-09');
+  });
+
+  it('leaves a completed task completed when the running block is linked to it, and still links it', async () => {
+    freeze(NOON);
+    const done = await task('Shipped', { status: 'completed', completedOn: '2026-10-06' });
+    const block = await startLoose();
+    advance(MINUTE);
+    const before = await storedTask(done.id);
+
+    const res = await link(block.id, done.id);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.taskId, done.id);
+    assert.deepEqual(await storedTask(done.id), before);
+  });
+
+  it('treats a paused block like a running one', async () => {
+    freeze(NOON);
+    const t = await task('Picked late');
+    const block = await startLoose();
+    advance(10 * MINUTE);
+    assert.equal((await api.call('POST', `/sessions/${block.id}/pause`)).status, 200);
+    advance(2 * DAY);
+
+    const res = await link(block.id, t.id);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.status, 'paused');
+    const after = await reread(t.id);
+    assert.equal(after.status, 'in_progress');
+    assert.equal(after.startDate, '2026-10-10');
+  });
+
+  it("leaves the block's project alone, whatever project the task is on", async () => {
+    freeze(NOON);
+    const t = await task('On another project', { projectId: otherProject });
+    const block = await startLoose({ projectId });
+
+    const res = await link(block.id, t.id);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.projectId, projectId);
+    assert.equal(res.body.projectName, 'ROI Dashboard');
+    assert.equal((await reread(t.id)).projectId, otherProject);
+  });
+
+  /* ---- a finished block: the work happened, on the day it was worked */
+
+  it('moves a not-started task to in progress, started the day a finished block was worked, not today', async () => {
+    freeze(NOON);
+    const t = await task('Done before it was filed');
+    const block = await loggedLoose();
+    assert.equal(block.day, '2026-10-05');
+
+    const res = await link(block.id, t.id);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.status, 'completed');
+    assert.equal(res.body.taskId, t.id);
+    const after = await reread(t.id);
+    assert.equal(after.status, 'in_progress');
+    assert.equal(after.startDate, '2026-10-05');
+  });
+
+  it('starts the task on the day the block belongs to, which is not always the date it began on', async () => {
+    freeze(NOON);
+    const t = await task('Late night work');
+    // 02:30 UTC is still the 4th for someone whose day starts at 04:00.
+    const block = await loggedLoose({ startedAt: '2026-10-05T02:30:00.000Z' });
+    assert.equal(block.day, '2026-10-04');
+    await link(block.id, t.id);
+    assert.equal((await reread(t.id)).startDate, '2026-10-04');
+  });
+
+  it('keeps a start date a not-started task already has when a finished block is linked to it', async () => {
+    freeze(NOON);
+    const t = await task('Planned ahead', { startDate: '2026-10-02' });
+    const block = await loggedLoose();
+    await link(block.id, t.id);
+    const after = await reread(t.id);
+    assert.equal(after.status, 'in_progress');
+    assert.equal(after.startDate, '2026-10-02');
+  });
+
+  it('leaves a held-up task held up when a finished block is linked to it', async () => {
+    freeze(NOON);
+    const t = await task('On hold since', { status: 'held_up', startDate: '2026-10-01' });
+    const block = await loggedLoose();
+    advance(MINUTE);
+    const before = await storedTask(t.id);
+
+    const res = await link(block.id, t.id);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.taskId, t.id);
+    assert.deepEqual(await storedTask(t.id), before);
+    assert.equal((await reread(t.id)).status, 'held_up');
+  });
+
+  it('leaves a completed task completed when a finished block is linked to it', async () => {
+    freeze(NOON);
+    const done = await task('Shipped', { status: 'completed', completedOn: '2026-10-06' });
+    const block = await loggedLoose();
+    advance(MINUTE);
+    const before = await storedTask(done.id);
+
+    const res = await link(block.id, done.id);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.taskId, done.id);
+    assert.deepEqual(await storedTask(done.id), before);
+  });
+
+  it('leaves a task already in progress as it is when a finished block is linked to it', async () => {
+    freeze(NOON);
+    const t = await task('Mid-flight', { status: 'in_progress', startDate: '2026-10-07' });
+    const block = await loggedLoose();
+    advance(MINUTE);
+    const before = await storedTask(t.id);
+    await link(block.id, t.id);
+    assert.deepEqual(await storedTask(t.id), before);
+  });
+
+  /* ---- a discarded block, or a break: not work on the task */
+
+  it('leaves the task alone when the block was abandoned, and still links it', async () => {
+    freeze(NOON);
+    const t = await task('Not started');
+    const block = await startLoose();
+    advance(MINUTE);
+    assert.equal(await api.status('POST', `/sessions/${block.id}/abandon`), 200);
+    advance(MINUTE);
+    const before = await storedTask(t.id);
+
+    const res = await link(block.id, t.id);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.status, 'abandoned');
+    assert.equal(res.body.taskId, t.id);
+    assert.deepEqual(await storedTask(t.id), before);
+  });
+
+  it('leaves the task alone when the block is a break, finished or on the clock', async () => {
+    freeze(NOON);
+    const t = await task('Not started');
+    const before = await storedTask(t.id);
+
+    const finished = await loggedLoose({ kind: 'break' });
+    const res = await link(finished.id, t.id);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.taskId, t.id);
+    assert.deepEqual(await storedTask(t.id), before);
+
+    advance(MINUTE);
+    const live = await startLoose({ kind: 'break' });
+    const resLive = await link(live.id, t.id);
+    assert.equal(resLive.status, 200);
+    assert.equal(resLive.body.taskId, t.id);
+    assert.deepEqual(await storedTask(t.id), before);
+  });
+
+  /* ---- an edit that does not change the block's task changes no task */
+
+  it('leaves a task on hold when the same task is sent again with a change of title', async () => {
+    freeze(NOON);
+    const t = await task('Mid-flight');
+    const block = (await api.call('POST', '/sessions', { title: 'Working', taskId: t.id })).body;
+    advance(MINUTE);
+    await putOnHold(t.id);
+    advance(MINUTE);
+    const before = await storedTask(t.id);
+
+    const res = await link(block.id, t.id, { title: 'Working, renamed' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.title, 'Working, renamed');
+    assert.equal(res.body.taskId, t.id);
+    assert.deepEqual(await storedTask(t.id), before);
+    assert.equal((await reread(t.id)).status, 'held_up');
+  });
+
+  it('leaves a task on hold when the edit does not mention a task at all', async () => {
+    freeze(NOON);
+    const t = await task('Mid-flight');
+    const block = (await api.call('POST', '/sessions', { title: 'Working', taskId: t.id })).body;
+    advance(MINUTE);
+    await putOnHold(t.id);
+    advance(MINUTE);
+    const before = await storedTask(t.id);
+
+    const res = await api.call('PATCH', `/sessions/${block.id}`, { title: 'Working, renamed' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.taskId, t.id);
+    assert.deepEqual(await storedTask(t.id), before);
+  });
+
+  it('leaves the task alone when the block is unlinked from it', async () => {
+    freeze(NOON);
+    const t = await task('Mid-flight');
+    const block = (await api.call('POST', '/sessions', { title: 'Working', taskId: t.id })).body;
+    advance(MINUTE);
+    await putOnHold(t.id);
+    advance(MINUTE);
+    const before = await storedTask(t.id);
+
+    const res = await link(block.id, null);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.taskId, null);
+    assert.equal(res.body.taskTitle, null);
+    assert.deepEqual(await storedTask(t.id), before);
+  });
+
+  it('moves the task a block is moved to, and leaves the one it came from', async () => {
+    freeze(NOON);
+    const a = await task('A');
+    const b = await task('B');
+    const block = (await api.call('POST', '/sessions', { title: 'Working', taskId: a.id })).body;
+    advance(MINUTE);
+    // A has been put on hold since, so moving the block off it that restarted A would show.
+    await putOnHold(a.id);
+    advance(MINUTE);
+    const aBefore = await storedTask(a.id);
+
+    const res = await link(block.id, b.id);
+    assert.equal(res.status, 200);
+    assert.equal(res.body.taskId, b.id);
+    const after = await reread(b.id);
+    assert.equal(after.status, 'in_progress');
+    assert.equal(after.startDate, '2026-10-08');
+    assert.deepEqual(await storedTask(a.id), aBefore);
+    assert.equal((await reread(a.id)).status, 'held_up');
+  });
+
+  /* ---- all of it or none of it */
+
+  it('applies the link and the move of the task together or not at all', async () => {
+    freeze(NOON);
+    const { db } = await dbMod();
+    const t = await task('Wants a block');
+    const block = await startLoose();
+    advance(MINUTE);
+    const blockBefore = await storedBlock(block.id);
+    const taskBefore = await storedTask(t.id);
+
+    // The task is moved first and the block's own update then fails, as a full disk would:
+    // both must unwind. The failure is made by a TEMP trigger, dropped again below.
+    db.exec(`CREATE TEMP TRIGGER fail_the_edit BEFORE UPDATE OF title ON sessions
+             WHEN NEW.title = 'tripwire' BEGIN SELECT RAISE(ABORT, 'tripwire'); END`);
+    // The server logs the failure it answers with; keep that stack trace out of the report.
+    const quiet = mock.method(console, 'error', () => {});
+    let failed;
+    try {
+      failed = await link(block.id, t.id, { title: 'tripwire' });
+    } finally {
+      quiet.mock.restore();
+      db.exec('DROP TRIGGER IF EXISTS fail_the_edit');
+    }
+    // Exactly the 500 the trigger causes: a 400 would mean it was refused before any write.
+    assert.equal(failed.status, 500);
+    assert.match(failed.body.details, /tripwire/);
+    assert.deepEqual(await storedBlock(block.id), blockBefore);
+    assert.deepEqual(await storedTask(t.id), taskBefore);
+    assert.equal((await reread(t.id)).status, 'not_started');
+
+    // Nothing is left in the way: without the failing title the same request goes through.
+    const ok = await link(block.id, t.id);
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.taskId, t.id);
+    assert.equal((await reread(t.id)).status, 'in_progress');
+  });
+
+  it('edits nothing of the block when the task cannot be moved along', async () => {
+    freeze(NOON);
+    const { db } = await dbMod();
+    const t = await task('Cannot be moved');
+    // Finished, so its time can be rewritten in the same edit, and is before the task moves.
+    const block = await loggedLoose();
+    advance(MINUTE);
+    const blockBefore = await storedBlock(block.id);
+    const taskBefore = await storedTask(t.id);
+    assert.equal(blockBefore.block.active_seconds, 1800);
+
+    db.exec(`CREATE TEMP TRIGGER refuse_the_move BEFORE UPDATE ON tasks WHEN OLD.id = ${t.id}
+             BEGIN SELECT RAISE(ABORT, 'the move was refused'); END`);
+    const quiet = mock.method(console, 'error', () => {});
+    let failed;
+    try {
+      failed = await link(block.id, t.id, { title: 'Renamed', activeSeconds: 60 });
+    } finally {
+      quiet.mock.restore();
+      db.exec('DROP TRIGGER IF EXISTS refuse_the_move');
+    }
+    assert.equal(failed.status, 500);
+    assert.match(failed.body.details, /the move was refused/);
+    // The time was rewritten before the move was tried, so it has to have been taken back.
+    assert.deepEqual(await storedBlock(block.id), blockBefore);
+    assert.deepEqual(await storedTask(t.id), taskBefore);
+
+    const ok = await link(block.id, t.id, { title: 'Renamed', activeSeconds: 60 });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.elapsedSeconds, 60);
+    assert.equal((await reread(t.id)).status, 'in_progress');
   });
 });
 

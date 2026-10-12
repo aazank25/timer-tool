@@ -17,7 +17,7 @@ import {
   stopSession,
   toView,
 } from '../lib/sessions.js';
-import { requireProject, requireTask } from '../lib/tasks.js';
+import { requireProject, requireTask, startTaskForLinkedBlock } from '../lib/tasks.js';
 import { focusDay, nowIso } from '../lib/time.js';
 
 export const sessionsRouter = Router();
@@ -164,7 +164,10 @@ sessionsRouter.post(
   ),
 );
 
-/** Edit a logged block after the fact — retitle it, reassign it, re-rate it. */
+/**
+ * Edit a logged block after the fact — retitle it, reassign it, re-rate it, or link it
+ * to the task it was the work on, which moves that task along (startTaskForLinkedBlock).
+ */
 sessionsRouter.patch(
   '/:id',
   handler((req) => {
@@ -198,12 +201,14 @@ sessionsRouter.patch(
       args.push(val);
     }
     // One transaction, so a request that fails partway cannot leave the block with
-    // its time rewritten and nothing else. A project or task that is not there is
-    // refused first, ahead of the first write, as a 400 rather than a foreign-key 500.
+    // its time rewritten and nothing else, or linked to a task that was not moved
+    // along with it. A project or task that is not there is refused first, ahead of
+    // the first write, as a 400 rather than a foreign-key 500.
     db.transaction(() => {
       if (body.projectId != null) requireProject(body.projectId);
       if (body.taskId != null) requireTask(body.taskId);
       if (body.activeSeconds !== undefined) overwriteActiveSeconds(id, body.activeSeconds);
+      startTaskForLinkedBlock(row, body.taskId);
       if (sets.length) {
         sets.push('updated_at = ?');
         args.push(nowIso(), id);

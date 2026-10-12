@@ -135,6 +135,13 @@ pick the task on the Focus screen, and the block counts against it — the estim
 finally has an actual beside it. A task moves to *in progress* when you start
 work on it, and deleting one keeps every block logged on it.
 
+Inside a week, the rows of one priority stay in the order you put them in: a new
+task goes to the bottom, like a row added to the end of the sheet, and you drag a
+row by its grip to put it elsewhere in its priority — or focus the grip and press
+↑ or ↓. Forgot to pick the task before you started? Click the block in Today's
+block log and link it there; the task moves along as if you had started the block
+on it.
+
 The clock is owned by the server and stored as run/pause segments, so a
 refresh, a closed lid or a restart loses nothing, and paused time is never
 counted as focus.
@@ -167,7 +174,8 @@ server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
   src/routes/   projects, sessions, tasks, timers, plan, stats, settings, calendar
   test/         timer accounting, stopwatch, saved-timer mode, day boundaries,
                 rollups, ICS parsing, migration and backup; tasks (status dates,
-                logged time, validation, reordering, migration 4)
+                logged time, validation, ordering and moves, linking a block
+                later, migration 4)
 web/      React + Vite + Tailwind. Focus · Today · Tasks · Projects · Review · Settings
 desktop/  Electron shell: menu-bar clock, hotkeys, packaging
   main.mjs      window, tray, shortcuts; starts the server in-process
