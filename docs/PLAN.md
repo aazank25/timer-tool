@@ -306,11 +306,10 @@ review*, `/wrap-up/week`, any week with `?week=`). Neither is a sidebar tab.
 - **The week** has the totals, focused time per day (all seven, zero days
   included), time per project, the tasks worked on with this week's time beside
   all that is logged against the estimate, what was completed that week, and
-  *Unfinished from this week* (the tasks from that week's sheet still open; carrying
-  them forward is done on the Tasks tab, and a marked place is kept for a carry-over
-  button of its own, which is added separately). It takes a *Next week's
-  focus* note, offers the summary to copy, and is closed with *Mark week
-  reviewed*. It opens on last week on a Monday or Tuesday, when the week just
+  *Unfinished from this week* (the tasks from that week's sheet still open; for a
+  week before the current one it has a **Carry into this week** button, see below).
+  It takes a *Next week's focus* note, offers the summary to copy, and is closed with
+  *Mark week reviewed*. It opens on last week on a Monday or Tuesday, when the week just
   finished is the one being reviewed and the new one has barely begun, and on the
   current week from Wednesday; the arrows step between weeks.
 - **A block still on the clock counts.** Every figure is built from the blocks as
@@ -345,11 +344,24 @@ review*, `/wrap-up/week`, any week with `?week=`). Neither is a sidebar tab.
   review takes any day of a week and files under its Monday. What is *unfinished*
   from a week is read off each task's `weekOf`, as the Tasks tab states it, and
   never worked out again from the day it was added.
+- **Carrying a week's leftovers forward is one button for the lot.** For a week before
+  the current one, *Unfinished from this week* has **Carry into this week**: the same
+  action as the Tasks tab's banner (`POST /api/tasks/carry-over`), which carries every
+  unfinished task of *every* earlier week and not only the ones listed, so a line under
+  the list says so and names the week they go into. While it is in flight the button
+  reads *Carrying…* and is disabled; then a status line says what was done (*Carried 3
+  tasks into the week of Oct 12*) in a live region that is on the page before it is
+  needed and stays when the button goes (once they are carried there is nothing left to
+  offer), and the task lists and the wrap-up pages are read again. A failure is shown
+  where the button was. It is not shown for the current week, and there are no buttons
+  on the rows: filing one task under another week by hand is not carrying it, and takes
+  off the mark that says it was.
 - **`wrapup_time`** (default `17:30`, `HH:MM` on a 24-hour clock, or empty for
-  off) is when the wrap-up is due. Settings has a card for it with its own Save;
-  it only stores the time. The page's own *Save settings* sends only the fields edited
+  off) is when the wrap-up is due. Settings has a card for it with its own Save.
+  The page's own *Save settings* sends only the fields edited
   in its card, and its fields follow the saved settings except the ones being edited,
   so saving a card neither discards an unsaved edit nor is undone by that button.
+  The reminder that is due at that time is one of the prompts below.
 
 API: `GET /api/wrapup/day?day=`, `PUT /api/wrapup/day/:day {note}`, `POST
 /api/wrapup/day/:day/done`, and the same three under `/api/wrapup/week` with
@@ -417,8 +429,8 @@ FocusDesk is running, with its window open or not.
 > names the reason. If pressing it does nothing, pick another. As with a pause from
 > the menu bar, a main window that is open reads the new block on its next poll.
 
-**Prompts — "needs your attention".** Done on the server and in the web app; the
-desktop app's end of it (reporting away time, notifications, nudges) follows.
+**Prompts — "needs your attention".** Done: the server, the web app (banners under
+the clock) and the desktop app (away detection, notifications, the menu-bar menu).
 
 One list of questions the app has, served as `GET /api/prompts` and answered with
 `POST /api/prompts/act`. A prompt is `{ id, kind, title, body, createdAt, actions }`,
@@ -457,12 +469,100 @@ transaction, and a provider that fails does not hide the others.
   project, linked), **Resume**, or **Log and resume** together. Logging never
   creates a second block for a meeting that is logged already.
 
+Three more are due at a time of day and not because of anything that happened. They
+live in `lib/reminders.ts`, are registered with the rest in the provider loop of
+`lib/prompts.ts`, and are worked out from the data and the settings like the others:
+what is written is only a note in `prompt_state` that one was dismissed, and listing
+is read-only and cheap, because it runs on every poll of every window.
+
+- **`wrapup:<day>`** — *Time to wrap up the day.* The focus day is a work day,
+  `wrapup_time` is set and has passed, the day has a focus block on it (not a break,
+  not a discarded one; a running one counts, by the time it has so far) and has not
+  been wrapped up (`isDayWrappedUp`) or dismissed. The body names the focused time and
+  the blocks. **Wrap up** opens `/wrap-up`, **Not today** dismisses it for that day;
+  the next day's is another id. `createdAt` is the instant of `wrapup_time`. It belongs
+  to the focus day, so after midnight it still asks about the day that has not ended,
+  until the day-start hour turns it over; a `wrapup_time` earlier than that hour is in
+  the small hours at the end of the day, and falls on the next calendar day.
+- **`week-review:<last week's Monday>`** — *Review last week.* From `work_start` on
+  the first work day of the current week (Monday, or the first of the work days if
+  Monday is not one; with no work days it never comes) until that week ends, when last
+  week had a focus block and is not reviewed (`isWeekReviewed`) or dismissed.
+  **Review** opens `/wrap-up/week?week=<that Monday>`; **Not this week** dismisses it.
+  Named by last week's Monday, so next week's is another prompt and this one is gone.
+- **`idle:<stretch start>`** — *Nothing on the clock*, `Since 2:15 PM. Start
+  something?` In work hours (`work_start` up to `work_end`) of a work day, with no
+  block live (running or paused), no timed event in progress (an all-day one says
+  nothing about the hour) and the day not wrapped up, once the quiet has lasted
+  `nudge_minutes` (0 is off). The quiet starts at the latest of: `work_start` today,
+  the end of the last block of any kind (a discarded one too: the clock stopped then),
+  the last time this nudge was dismissed, and the moment the server started, so
+  opening the app at 14:00 does not meet you with the whole morning. The id is the
+  start, so a dismissal or a new block makes the next one a different prompt, due
+  another `nudge_minutes` on, and the desktop app, which notifies once per id, tells
+  again. `createdAt` is the start plus `nudge_minutes`. **Start a block** opens `/`
+  (the desktop app opens quick switch instead of the window) and **Not now** dismisses.
+  The server's start is the process's uptime counted back from now, and
+  `setServerStartedAt` replaces it, which is what the tests do. A meeting that has
+  just ended does not restart the quiet (only the four moments above do), so the nudge
+  can come the moment a long meeting is over.
+
+Every time of day is read in the user's timezone, with the focus day turning over at
+the day-start hour, and is turned into an instant by `lib/local-time.ts`, which asks
+Intl for the zone's offset at the instant in question, and so is right across a clock
+change: a time that happens twice is its first occurrence, and one that the clocks
+skip is read with the old offset, so it lands just after the gap, as `Date` does. The
+weekday is the focus day's, and the hours are the clock's, so night work stays with its
+day. These three are in the same list as the others, oldest first by `createdAt`.
+
 Settings: `away_minutes` (10), `long_block_minutes` (120), `meeting_prompts`
 (true), `work_days` (1,2,3,4,5), `work_start` (09:00), `work_end` (18:00),
-`nudge_minutes` (15); the minutes take 0 for off. The desktop app reads the away
-threshold, the work hours and the nudge interval; the server only stores and
-validates them. The web client polls the list every 15 seconds and on window
-focus.
+`nudge_minutes` (15), `wrapup_time` (17:30); the minutes take 0 for off. The
+desktop app reads the away threshold; the server reads the rest. The web client polls
+the list every 15 seconds and on window focus.
+
+**The desktop app's half.** `desktop/away.mjs` and `desktop/attention.mjs` import
+nothing from Electron: what they need of it is handed in, so `desktop/test/` (run by
+`npm test`, with `node --test`) covers every rule without a screen to lock.
+
+- **Away detection** (`createAwayTracker`). A stretch begins at the screen locking, the
+  system sleeping, another user taking over (`user-did-resign-active`), or the
+  machine having had no input for `away_minutes`, polled every 15 s, in which case it
+  began at the last input (`now − idle time`), so nothing is watched in between. It
+  ends when none of those is true any more: at unlock, and at wake-up or the user
+  coming back only if the screen is not still locked; for idle, at the first input,
+  which is where it ended. Lock, sleep, wake and unlock is one stretch, from the
+  earliest start to the last return. When it ends it is reported (`POST
+  /api/sessions/<id>/away`) if it was at least `away_minutes` and a focus block was
+  running as it began (read from the menu bar's own poll of the live block); a paused
+  block, a break or no block is not reported. The end is clamped to now. A refused
+  report (400, 404) or any other failure is logged and dropped, and nothing ever
+  throws into Electron. The settings are read at start-up, every minute, at unlock
+  and wake, and when a window saves them (a `PATCH /api/settings` seen by the
+  session's `webRequest`).
+- **Notifications** (`createAttention`). The list is read every 15 s, after any
+  answer from the menu, and at unlock and wake. Each id is notified **once**, the
+  first time it is listed while you are there (screen not locked, and the machine
+  touched in the last two minutes); otherwise it waits until you are back. Nothing
+  is shown where `Notification.isSupported()` is false. Each notification is kept
+  until it is clicked or closed, because macOS lets go of one nothing refers to and
+  its click never arrives. A click opens the quick-switch box for an `idle` prompt, the
+  main window at the route of the prompt's *primary* answer when that opens a page, and
+  the main window for anything else. There are no action buttons: they need a signed app.
+- **The menu bar.** With prompts pending, the menu starts with *Needs attention*, a
+  submenu per prompt (its title, cut to 60 characters) with an item for each action: one
+  the server carries out is posted to `/api/prompts/act` and the list read again, and
+  one that opens a page shows the window at that route (`showWindow(route)`, which
+  loads it with the `desktop=1` flag the shell uses). A refused answer is shown in a
+  message box with the server's own words, never swallowed. The title gets a leading
+  dot while anything is pending. *Got interrupted ▸* is a submenu of the reasons from
+  `INTERRUPTION_REASONS` (re-exported from `app.ts`, so the two cannot drift) and *No
+  reason*, each posting `{ reason }`; on a break it is one item that logs at once, as in
+  the window.
+- **Test hooks**, only with `FOCUSDESK_TEST=1`: `globalThis.__focusdesk` has the
+  tracker's state and events at chosen times (`away`), the latest prompts and the ids
+  notified about (`attention`), and the menu as plain data with a way to press an item
+  by its labels (`menuTemplate`, `clickMenu`), beside what quick switch put there.
 
 ---
 
@@ -549,14 +649,25 @@ is a new adapter beside the ICS one, not a rewrite.
 
 ### Phase 6 — a real desktop app. Done.
 
-`npm run desktop:mac` produces a `.dmg`. The app carries the whole stack: the
+`npm run desktop:mac` produces a `.dmg`, for the chip of the Mac it is built on
+(`desktop/scripts/dist-mac.mjs` names the target and the one architecture to
+electron-builder, `--mac dmg --arm64` or `--x64` from the machine's chip, and says
+`arm64` for an Intel Node running under Rosetta on an Apple silicon Mac;
+`dist:mac:all` makes both, for someone else's Mac). The scripts install with `npm ci`,
+which never rewrites a lockfile. The app carries the whole stack: the
 Electron main process starts the Express server in-process on an ephemeral
 loopback port and points a window at it.
 
 - **Menu-bar clock.** A stopwatch counts up there and a Pomodoro counts down.
   The server owns the clock, so the tray polls it every five seconds and
   interpolates in between rather than keeping its own count. Its menu pauses,
-  resumes, logs an interruption, or opens the window.
+  resumes, logs an interruption (a submenu of the reasons), shows what needs your
+  attention, or opens the window.
+- **Away detection, notifications and the Needs attention section** are the desktop
+  half of the prompts (see section 2). They run in the menu bar with the window closed.
+  On a Mac the first notification may need allowing under System Settings →
+  Notifications, and an unsigned or ad-hoc signed build shows banners without action
+  buttons.
 - **Closing the window parks the app in the menu bar** and the block keeps
   running; quitting is explicit.
 - **Global hotkeys:** Cmd+Shift+F to show, Cmd+Shift+Space to pause/resume, and
@@ -600,10 +711,6 @@ assets sit in git.
 - Break timer with auto-suggested short/long breaks (the settings already exist).
 - Sending the weekly review to you (an email or a notification on Monday): the
   review itself is built, so what is left is delivering it.
-- The desktop app's half of away detection and nudges: noticing the machine was
-  locked, asleep or idle and reporting it (the server keeps, asks about and drops
-  it already), notifications for the prompt list, and the start-a-block nudge in
-  work hours.
 - CSV / JSON export.
 - Sync across machines. This is the one feature that breaks the local-first
   promise; a synced SQLite file (Litestream, iCloud/Dropbox folder) is a much
@@ -695,8 +802,10 @@ away_intervals    id, session_id→sessions (ON DELETE CASCADE), started_at,
 prompt_state      key (a prompt's id), status(done|dismissed), data(json),
                   updated_at
                   · what was done about a prompt that is worked out from other
-                    tables (a long block, a meeting); data remembers what the
-                    prompt needs, such as the block it paused for a meeting
+                    tables (a long block, a meeting, a reminder); data remembers
+                    what the prompt needs, such as the block it paused for a
+                    meeting. A dismissed `idle:` row's updated_at is also where
+                    the next quiet stretch starts
 
 settings          key, value
                   · wrapup_time: HH:MM (24-hour) or '' for off, default 17:30
