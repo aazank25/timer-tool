@@ -129,6 +129,15 @@ reinstalling it never touches your history.
    logged without a reason, or from before reasons existed, counted apart), and
    how your estimates hold up: the median of actual over estimate for finished
    blocks and completed tasks, overall and by project, over the last 90 days.
+5. **Wrap up** — at the end of the day, *Wrap up the day* (a button on Today)
+   closes it out: rate the blocks you left unrated with one tap each, move the
+   tasks you worked on along, leave yourself a line for tomorrow, and copy a
+   short plain-text summary into Slack. *Done for the day* stamps it. On Monday,
+   *Weekly review* (a button on Review) does the same for the week: totals, the
+   time per day and project, what got done and what is still open, a line for
+   the week ahead, and a summary to copy. A block still on the clock counts in
+   these totals, with the time it has so far, so wrapping up before you stop it
+   does not leave it out.
 
 **Saved timers** are the fast path. The list builds itself from the
 project + task pairs you keep returning to, so it is useful on day two without
@@ -184,15 +193,20 @@ Note that a published ICS feed can lag the real calendar by hours; see
 ```
 server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
   src/app.ts    boots the API and client on a port; embedded by the desktop app
-  src/lib/      sessions (timer), tasks, stats (rollups), calendar (ICS), time, settings
-  src/routes/   projects, sessions, tasks, timers, plan, stats, settings, calendar
+  src/lib/      sessions (timer), tasks, stats (rollups), wrapup (day and week
+                reviews), calendar (ICS), time, settings
+  src/routes/   projects, sessions, tasks, timers, plan, stats, wrapup, settings,
+                calendar
   test/         timer accounting, stopwatch, saved-timer mode, day boundaries,
                 rollups, ICS parsing, migration and backup; tasks (status dates,
                 logged time, validation, ordering and moves, linking a block
                 later, migration 4); insights (interruption reasons and their
                 stats, estimate accuracy, migration 5); carry-over (the stored
-                week, carrying unfinished tasks forward, migration 6)
-web/      React + Vite + Tailwind. Focus · Today · Tasks · Projects · Review · Settings
+                week, carrying unfinished tasks forward, migration 6); wrap-up
+                (live totals, notes, done stamps, the weekly sort, the summary
+                text, the setting, migration 7)
+web/      React + Vite + Tailwind. Focus · Today · Tasks · Projects · Review · Settings,
+          and the wrap-up pages (/wrap-up, /wrap-up/week) reached from Today and Review
 desktop/  Electron shell: menu-bar clock, hotkeys, packaging
   main.mjs      window, tray, shortcuts; starts the server in-process
   scripts/      icon generator and payload bundler (no binaries in git)

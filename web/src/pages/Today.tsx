@@ -13,6 +13,7 @@ import {
   type ProjectChoice,
 } from '../components/pickers';
 import { Button, Card, Empty, Field, inputBase, inputClass, Modal, Swatch } from '../components/ui';
+import { WrapUpLink } from '../components/wrapup';
 import {
   useActiveSession,
   useCalendarActions,
@@ -58,7 +59,12 @@ export function TodayPage({ dark }: { dark: boolean }) {
             </Button>
           )}
         </div>
-        <span className="text-xs text-muted">{dayLabel(active, { weekday: true })}</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-muted">{dayLabel(active, { weekday: true })}</span>
+          <WrapUpLink to={isToday ? '/wrap-up' : `/wrap-up?day=${active}`}>
+            Wrap up the day
+          </WrapUpLink>
+        </div>
       </div>
 
       {stats && (

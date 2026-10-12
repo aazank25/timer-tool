@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { BarsByName, Columns, Hero, StatTile } from '../components/charts';
 import { EstimatesCard, InterruptionsCard } from '../components/InsightCards';
 import { Button, Card, Empty } from '../components/ui';
+import { WrapUpLink } from '../components/wrapup';
 import { useRangeStats, useToday } from '../hooks';
 import { addDays, dayLabel, duration, hourLabel, todayKey } from '../lib/format';
 import { seriesColor } from '../lib/palette';
@@ -28,7 +29,10 @@ export function ReviewPage({ dark }: { dark: boolean }) {
       {/* Filters sit in one row above the charts. */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-lg font-semibold text-ink">Review</h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-lg font-semibold text-ink">Review</h1>
+            <WrapUpLink to="/wrap-up/week">Weekly review</WrapUpLink>
+          </div>
           <p className="text-xs text-muted">
             {dayLabel(from)} – {dayLabel(to)}
           </p>

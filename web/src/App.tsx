@@ -5,6 +5,7 @@ import { ReviewPage } from './pages/Review';
 import { SettingsPage } from './pages/Settings';
 import { TasksPage } from './pages/Tasks';
 import { TodayPage } from './pages/Today';
+import { WrapUpDayPage, WrapUpWeekPage } from './pages/WrapUp';
 import { Button } from './components/ui';
 import { useLiveSession, useSessionActions, useTheme } from './hooks';
 import { clock, duration } from './lib/format';
@@ -84,6 +85,8 @@ export default function App() {
             <Route path="/tasks" element={<TasksPage dark={dark} />} />
             <Route path="/projects" element={<ProjectsPage dark={dark} />} />
             <Route path="/review" element={<ReviewPage dark={dark} />} />
+            <Route path="/wrap-up" element={<WrapUpDayPage dark={dark} />} />
+            <Route path="/wrap-up/week" element={<WrapUpWeekPage dark={dark} />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<FocusPage dark={dark} />} />
           </Routes>

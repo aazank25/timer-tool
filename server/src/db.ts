@@ -255,6 +255,32 @@ export const migrations: Migration[] = [
     CREATE INDEX tasks_week ON tasks(week_of, priority, position);
     `,
   },
+  {
+    id: 7,
+    name: 'wrap-ups',
+    up: `
+    -- What you write when you close out a day. The key is a plain YYYY-MM-DD focus day,
+    -- like sessions.local_day, so it does not shift with the timezone. The note is the
+    -- "tomorrow" line and wrapped_up_at is when "Done for the day" was pressed. Neither
+    -- implies the other: a day can be wrapped up with no note, or carry a note and never
+    -- be wrapped up, so each stays NULL until it is set.
+    CREATE TABLE day_notes (
+      day            TEXT PRIMARY KEY,
+      note           TEXT,
+      wrapped_up_at  TEXT,
+      updated_at     TEXT NOT NULL
+    );
+
+    -- The same for a week, keyed by its Monday: weeks here are Monday-anchored, and a
+    -- review is filed under the one day that names the week whichever day it is read from.
+    CREATE TABLE week_reviews (
+      week         TEXT PRIMARY KEY,
+      note         TEXT,
+      reviewed_at  TEXT,
+      updated_at   TEXT NOT NULL
+    );
+    `,
+  },
 ];
 
 export const DEFAULT_SETTINGS: Record<string, string> = {
@@ -269,6 +295,8 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   default_timer_mode: 'stopwatch',
   /** Day rolls over at this local hour, so a 1am block counts as the day before. */
   day_start_hour: '4',
+  /** When the end-of-day wrap-up is due, as HH:MM on a 24-hour clock. '' means never. */
+  wrapup_time: '17:30',
 };
 
 /**

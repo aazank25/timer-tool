@@ -17,6 +17,8 @@ const schema = z
     autostart_breaks: z.union([z.boolean(), z.enum(['true', 'false'])]),
     default_timer_mode: z.enum(['stopwatch', 'pomodoro']),
     day_start_hour: z.coerce.number().int().min(0).max(12),
+    // A 24-hour HH:MM with both parts two digits, or '' for "no reminder".
+    wrapup_time: z.union([z.literal(''), z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)]),
   })
   .partial();
 

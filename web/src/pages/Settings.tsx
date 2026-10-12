@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ModePicker } from '../components/pickers';
+import { WrapUpSettings } from '../components/settings/WrapUpSettings';
 import { Button, Card, Empty, Field, inputBase, inputClass } from '../components/ui';
 import { useCalendarSources, useSettings, useTheme } from '../hooks';
 import { api } from '../api';
@@ -95,6 +96,8 @@ export function SettingsPage() {
           {error && <span className="text-xs text-critical">{error}</span>}
         </div>
       </Card>
+
+      <WrapUpSettings />
 
       <Card title="Appearance">
         <Field label="Theme" group>

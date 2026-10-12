@@ -10,6 +10,7 @@ import { settingsRouter } from './settings.js';
 import { statsRouter } from './stats.js';
 import { tasksRouter } from './tasks.js';
 import { timersRouter } from './timers.js';
+import { wrapupRouter } from './wrapup.js';
 
 export const apiRouter = Router();
 
@@ -40,3 +41,4 @@ apiRouter.use('/timers', timersRouter);
 apiRouter.use('/stats', statsRouter);
 apiRouter.use('/settings', settingsRouter);
 apiRouter.use('/calendar', calendarRouter);
+apiRouter.use('/wrapup', wrapupRouter);
