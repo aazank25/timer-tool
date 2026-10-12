@@ -11,6 +11,7 @@ import {
   hostChip,
   installCommand,
   isMain,
+  openImages,
   parseOptions,
 } from '../scripts/dist-mac.mjs';
 
@@ -70,6 +71,25 @@ describe('the chip of this Mac', () => {
 
   it('is read from the running process when nothing is said', () => {
     assert.equal(hostChip(), process.arch);
+  });
+});
+
+describe('the disk images in the way of a build', () => {
+  it('are the open FocusDesk images, whatever number macOS gave them, and nothing else', (t) => {
+    const volumes = fs.mkdtempSync(path.join(os.tmpdir(), 'focusdesk-volumes-'));
+    t.after(() => fs.rmSync(volumes, { recursive: true, force: true }));
+    const names = ['FocusDesk', 'FocusDesk 1', 'FocusDesk 2', 'FocusDeskOld', 'Macintosh HD'];
+    for (const name of names) fs.mkdirSync(path.join(volumes, name));
+
+    assert.deepEqual(openImages({ volumes }), [
+      path.join(volumes, 'FocusDesk'),
+      path.join(volumes, 'FocusDesk 1'),
+      path.join(volumes, 'FocusDesk 2'),
+    ]);
+  });
+
+  it('are none when there is nowhere they could be', () => {
+    assert.deepEqual(openImages({ volumes: path.join(os.tmpdir(), 'no-such-volumes-folder') }), []);
   });
 });
 

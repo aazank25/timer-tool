@@ -58,6 +58,43 @@ export function chipToBuild({ options, platform = process.platform, host }) {
   return host();
 }
 
+/**
+ * The FocusDesk disk images that are open: /Volumes/FocusDesk, and "FocusDesk 1" and so on when
+ * macOS has had to tell several apart. electron-builder makes the new image by opening it under
+ * that same name (the image's title), and with an old one still open there it writes into the
+ * old one instead and fails ("permission denied", or "Resource busy" when it cannot let go).
+ */
+export function openImages({ volumes = '/Volumes', title = 'FocusDesk' } = {}) {
+  let names;
+  try {
+    names = fs.readdirSync(volumes);
+  } catch {
+    return [];
+  }
+  return names
+    .filter((name) => name === title || name.startsWith(`${title} `))
+    .sort()
+    .map((name) => path.join(volumes, name));
+}
+
+/**
+ * Eject the open FocusDesk images before building, as the person would have to anyway. One that
+ * will not go is the app running from it (opened from the image's window and never copied to
+ * Applications): that stops the build, saying what to do, rather than failing half-way through.
+ */
+function ejectOpenImages() {
+  for (const volume of openImages()) {
+    const done = spawnSync('hdiutil', ['detach', volume], { encoding: 'utf8' });
+    if (done.status !== 0) {
+      console.error(
+        `A FocusDesk disk image is open at ${volume} and could not be ejected, so the new one cannot be made under the same name. Quit FocusDesk (it may be running from that disk image), eject it in Finder, and run this again.`,
+      );
+      process.exit(1);
+    }
+    console.log(`Ejected ${volume}: an older FocusDesk disk image that was in the way.`);
+  }
+}
+
 /** Whether this process is an Intel build being run on Apple silicon by Rosetta. */
 function runsUnderRosetta() {
   if (process.platform !== 'darwin') return false;
@@ -160,6 +197,7 @@ function main() {
     console.error(`electron-builder is not installed here. Run: ${install}`);
     process.exit(1);
   }
+  if (process.platform === 'darwin') ejectOpenImages();
   console.log(`\n> electron-builder ${args.join(' ')}`);
   const run = spawnSync(process.execPath, [cli, ...args], { cwd: desktop, stdio: 'inherit' });
   if (run.error) {
