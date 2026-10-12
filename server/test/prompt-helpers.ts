@@ -48,6 +48,7 @@ export async function reset() {
     work_start: DEFAULT_SETTINGS.work_start!,
     work_end: DEFAULT_SETTINGS.work_end!,
     nudge_minutes: DEFAULT_SETTINGS.nudge_minutes!,
+    wrapup_time: DEFAULT_SETTINGS.wrapup_time!,
   });
   // Every test is a server that has only just started. Its start is worked out at the first
   // listing and kept (a clock that goes on without the uptime is a Mac that slept), so one that

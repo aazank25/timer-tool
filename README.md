@@ -356,7 +356,9 @@ events; **Sync now** is still there for when you cannot wait.
 
 A feed that answers with something that is not a calendar (an error page, an empty
 answer, a download that stopped short) is left alone: the sync says so, and nothing is
-removed. A feed whose calendar is empty keeps the meetings it had.
+removed. A calendar with no events in it at all keeps the meetings it had, as that is at
+least as often trouble at the other end as a calendar that was emptied; one that still has
+events, none of them in the window any more (a series that has ended), has its meetings removed.
 
 That URL is a secret — anyone holding it can read the calendar. It is stored in
 your local database and never sent back to the browser, and it is never put in an

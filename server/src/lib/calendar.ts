@@ -342,7 +342,12 @@ async function syncOnce(signal: AbortSignal): Promise<SyncResult[]> {
     if (!stillSyncs(source)) continue;
     const provider = `ics:${source.id}`;
     try {
-      const events = parseFeed(await fetchText(source.url, signal), from, to);
+      const text = await fetchText(source.url, signal);
+      const events = parseFeed(text, from, to);
+      // A calendar with events in it, none of them in the window, is meetings that are over (a
+      // series that has ended): those go. One with no events in it at all is what a feed sends
+      // when something is wrong at its end at least as often as when a calendar was emptied.
+      const noEventsAtAll = !/BEGIN:VEVENT/i.test(text);
       const wrote = db.transaction((): boolean => {
         // Nothing is written for a feed that was removed while it was being read: its
         // events would be back with nothing to own them. This is the last look before the
@@ -350,9 +355,17 @@ async function syncOnce(signal: AbortSignal): Promise<SyncResult[]> {
         if (signal.aborted || !stillSyncs(source)) return false;
         const stamp = nowIso();
         const current = new Set<string>();
+        let tooLong = 0;
         for (const e of events) {
           const startIso = e.start.toISOString();
           const id = `${provider}:${e.uid}:${startIso}`;
+          // A meeting's id is carried by every prompt about it and every block logged on it, and
+          // past this length the routes would refuse it, so such an event (a UID thousands of
+          // characters long) is left out rather than shown and then impossible to answer.
+          if (id.length > MAX_EVENT_ID_LENGTH) {
+            tooLong++;
+            continue;
+          }
           current.add(id);
           upsert.run(
             id,
@@ -380,12 +393,17 @@ async function syncOnce(signal: AbortSignal): Promise<SyncResult[]> {
             'SELECT id FROM calendar_events WHERE provider = ? AND starts_at >= ? AND starts_at <= ?',
           )
           .all(provider, from.toISOString(), to.toISOString()) as { id: string }[];
-        if (!events.length && stale.length) {
-          // A feed that is a calendar but has nothing in the window, where it had meetings
-          // a moment ago, is more likely something wrong at the other end than every one of
-          // them cancelled, so what it had is kept.
+        if (tooLong) {
           console.warn(
-            `[calendar] "${source.label}" came back with no meetings in the window, so the ${stale.length} it had are kept`,
+            `[calendar] "${source.label}" has ${tooLong} event(s) whose id is too long to keep; they are left out`,
+          );
+        }
+        if (noEventsAtAll && stale.length) {
+          // A calendar with no events in it at all, where it had meetings a moment ago, is more
+          // likely something wrong at the other end than every one of them cancelled, so what it
+          // had is kept.
+          console.warn(
+            `[calendar] "${source.label}" came back with no meetings at all, so the ${stale.length} it had are kept`,
           );
           return true;
         }

@@ -41,6 +41,23 @@ export function builderArguments({ chip, both = false }) {
   return ['--mac', 'dmg', `--${chip}`];
 }
 
+/**
+ * The chip to build for: the one asked for, or none when both are (`--all`), or else this Mac's.
+ * Off a Mac there is no chip of its own to go by, and an image for whatever this machine happens
+ * to be is not what anyone asked for, so there it has to be said which.
+ *
+ * @param {{ options: { both: boolean, arch: string | null }, platform?: string, host: () => string }} what
+ */
+export function chipToBuild({ options, platform = process.platform, host }) {
+  if (options.both || options.arch !== null) return options.arch;
+  if (platform !== 'darwin') {
+    throw new Error(
+      'This is not a Mac, so there is no chip of its own to build for: say which with --arch arm64 or --arch x64, or build both with --all.',
+    );
+  }
+  return host();
+}
+
 /** Whether this process is an Intel build being run on Apple silicon by Rosetta. */
 function runsUnderRosetta() {
   if (process.platform !== 'darwin') return false;
@@ -123,7 +140,7 @@ function main() {
   try {
     const options = parseOptions(process.argv.slice(2));
     args = builderArguments({
-      chip: options.arch ?? hostChip({ translated: runsUnderRosetta() }),
+      chip: chipToBuild({ options, host: () => hostChip({ translated: runsUnderRosetta() }) }),
       both: options.both,
     });
     if (options.dryRun) {

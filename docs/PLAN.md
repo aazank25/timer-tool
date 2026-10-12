@@ -141,8 +141,10 @@ access. Recurring meetings are expanded (`RRULE`), cancelled instances honoured
   `BEGIN:VCALENDAR` and `END:VCALENDAR` (an error page that came back as a 200, an
   empty answer, a download that stopped short) is a failed read: an error result
   for that feed, and nothing written or deleted. A calendar that is valid but has no
-  meetings in the window, where the feed had some, keeps what it had and says so in
-  the log.
+  events in it at all, where the feed had meetings, keeps what it had and says so in
+  the log; one that still has events, none of them in the window (a series that has
+  ended), has the window's meetings removed. An event whose id would be longer than a
+  prompt or a logged block can carry (a UID thousands of characters long) is left out.
 - **A feed that is removed, switched off or given another address while it is being
   read writes nothing** (the check is made in the write's own transaction).
 - **The feed is read in the background** — soon after start-up, then every 15
@@ -912,6 +914,25 @@ the server into one `dist/server.mjs` with only `better-sqlite3` left external,
 so the packaged app carries no `node_modules` tree beyond that one native
 module. Icons are generated at build time by a small PNG encoder, so no binary
 assets sit in git.
+
+### Known gaps
+
+- **Log as time spent** on the Today page logs a meeting's whole scheduled time (at least
+  five minutes) even where a block was running through part of it; the meeting banner's
+  *Log* takes only the part no block holds. A meeting moved after it was logged can be
+  logged again (see the calendar section).
+- The estimate insights and the summary call blocks with no project "No project"; the
+  wrap-up's charts call them "Unassigned".
+- A request body that is not JSON, or is over the size limit, is answered with a 500
+  rather than a 400 or a 413. Calendar sources are named by the millisecond they were
+  added, so two added in the same one would share an id.
+- `tasks.week_of` is nullable in the schema; every write sets it. A day note can be
+  written for a day that has not come yet.
+- Keyboard focus falls back to the page when *Show fewer* goes because the banners
+  were answered elsewhere, and when the "Nothing else needs your attention" line goes.
+- Dependencies: React Router 7 and node-ical 0.27 fix moderate advisories but are
+  breaking upgrades. Electron 38 is out of support; Electron 42 and later move
+  notifications to UNUserNotificationCenter, which needs a signed app.
 
 ### Later, if wanted
 

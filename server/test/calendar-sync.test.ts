@@ -708,6 +708,44 @@ describe('syncing a calendar feed', () => {
     }
   });
 
+  it('removes the meetings of a feed whose events are all outside the window now, as a series that has ended', async () => {
+    await sync();
+    assert.equal((await eventsOn('2026-09-01', '2026-12-31')).length, 2);
+    // The calendar still has an event in it, years back: the meetings in the window are over,
+    // which is not the empty answer that something wrong at the other end gives.
+    feeds.feed.set([
+      { ...DESIGN_CRIT, start: '2020-01-07T14:00:00.000Z', end: '2020-01-07T15:00:00.000Z' },
+    ]);
+
+    const results = await sync();
+
+    assert.deepEqual(
+      results.map((r) => [r.ok, r.events]),
+      [[true, 0]],
+    );
+    assert.deepEqual(await eventsOn('2026-09-01', '2026-12-31'), []);
+  });
+
+  it('leaves out an event whose id would be too long to answer or log against', async () => {
+    const warned = mock.method(console, 'warn', () => {});
+    try {
+      feeds.feed.set([DESIGN_CRIT, { ...PLANNING, uid: 'u'.repeat(2_100) }]);
+
+      await sync();
+
+      assert.deepEqual(
+        (await eventsOn('2026-10-13')).map((e) => e.title),
+        ['Design crit'],
+      );
+      assert.ok(
+        warned.mock.calls.some((c) => /too long/.test(String(c.arguments[0]))),
+        'it says so',
+      );
+    } finally {
+      warned.mock.restore();
+    }
+  });
+
   it('never removes the meetings of one feed while it syncs another', async () => {
     const home = await serveFeed([{ ...PLANNING, uid: 'home-1', summary: 'Dentist' }]);
     try {

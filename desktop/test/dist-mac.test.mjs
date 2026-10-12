@@ -7,6 +7,7 @@ import { after, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   builderArguments,
+  chipToBuild,
   hostChip,
   installCommand,
   isMain,
@@ -72,6 +73,28 @@ describe('the chip of this Mac', () => {
   });
 });
 
+describe('which chip is built when none is named', () => {
+  const host = () => 'arm64';
+  const options = (arch = null, both = false) => ({ arch, both });
+
+  it("is this Mac's own on a Mac", () => {
+    assert.equal(chipToBuild({ options: options(), platform: 'darwin', host }), 'arm64');
+  });
+
+  it('is refused off a Mac, where there is no chip of its own to go by', () => {
+    assert.throws(
+      () => chipToBuild({ options: options(), platform: 'linux', host }),
+      /not a Mac.*--arch arm64 or --arch x64.*--all/,
+    );
+    assert.throws(() => chipToBuild({ options: options(), platform: 'win32', host }), /not a Mac/);
+  });
+
+  it('is the one named, or both, on any machine', () => {
+    assert.equal(chipToBuild({ options: options('x64'), platform: 'linux', host }), 'x64');
+    assert.equal(chipToBuild({ options: options(null, true), platform: 'linux', host }), null);
+  });
+});
+
 describe('the command line', () => {
   it('asks for nothing by default, which is this Mac', () => {
     assert.deepEqual(parseOptions([]), { both: false, dryRun: false, arch: null });
@@ -132,12 +155,17 @@ describe('the command line', () => {
     assert.equal(run.out, 'electron-builder --mac dmg --arm64 --x64');
   });
 
-  it('picks the chip of the machine it runs on when none is named', () => {
+  it('picks the chip of the Mac it runs on when none is named, and off a Mac asks for one', () => {
     const run = dryRun();
 
-    // Under Rosetta an Intel Node on an Apple silicon Mac builds for arm64, so only the shape is checked.
-    assert.equal(run.status, 0);
-    assert.match(run.out, /^electron-builder --mac dmg --(arm64|x64)$/);
+    if (process.platform === 'darwin') {
+      // Under Rosetta an Intel Node on an Apple silicon Mac builds for arm64, so only the shape is checked.
+      assert.equal(run.status, 0);
+      assert.match(run.out, /^electron-builder --mac dmg --(arm64|x64)$/);
+    } else {
+      assert.equal(run.status, 1);
+      assert.match(run.err, /not a Mac/);
+    }
   });
 
   it('exits with a message, not a stack, for a chip that cannot be built', () => {

@@ -87,11 +87,35 @@ export function PromptCenter() {
         bump(pairs, pair(p, a));
       }
     }
-    return (p: Prompt, a: PromptAction): string | undefined => {
+    const base = (p: Prompt, a: PromptAction): string | undefined => {
       if ((labels.get(a.label) ?? 0) < 2) return undefined;
       const named = `${a.label}: ${p.title}`;
       return (pairs.get(pair(p, a)) ?? 0) < 2 ? named : `${named}. ${p.body}`;
     };
+    // Two banners can say exactly the same (two meetings of one name that ended together), and
+    // then not even the sentence tells their buttons apart: those are numbered in the order shown.
+    const uses = new Map<string, number>();
+    for (const p of ordered) {
+      for (const a of p.actions) {
+        const name = base(p, a);
+        if (name) bump(uses, name);
+      }
+    }
+    const names = new Map<string, string | undefined>();
+    const counted = new Map<string, number>();
+    for (const p of ordered) {
+      for (const a of p.actions) {
+        const name = base(p, a);
+        const of = name ? (uses.get(name) ?? 0) : 0;
+        if (name && of > 1) {
+          bump(counted, name);
+          names.set(`${p.id}\n${a.id}`, `${name} (${counted.get(name)} of ${of})`);
+        } else {
+          names.set(`${p.id}\n${a.id}`, name);
+        }
+      }
+    }
+    return (p: Prompt, a: PromptAction): string | undefined => names.get(`${p.id}\n${a.id}`);
   }, [ordered]);
 
   // Told to a screen reader, which is not shown. Only a banner that arrives after the first list is
