@@ -4,7 +4,7 @@ import { QuickSwitchSettings } from '../components/settings/QuickSwitchSettings'
 import { WrapUpSettings } from '../components/settings/WrapUpSettings';
 import { PromptSettings } from '../components/settings/PromptSettings';
 import { Button, Card, Empty, Field, inputBase, inputClass } from '../components/ui';
-import { useCalendarSources, useSettings, useTheme } from '../hooks';
+import { keys, useCalendarSources, useSettings, useTheme } from '../hooks';
 import { api } from '../api';
 import { useQueryClient } from '@tanstack/react-query';
 
@@ -27,19 +27,47 @@ export function SettingsPage() {
   const { data: settings } = useSettings();
   const [theme, setTheme] = useTheme();
   const qc = useQueryClient();
-  const [draft, setDraft] = useState<Record<string, string>>({});
+  // What has been typed on this page and not saved from it, key by key: a key is here only
+  // while its value is not what is saved. The fields show an edit where there is one and what
+  // is saved everywhere else, so whatever lands in the saved settings (a card of its own on
+  // this page saving, another window) reaches every field the person has not touched, and
+  // never writes over one they have. Save sends the edits and only those, so it cannot undo
+  // what another card saved either, however many of them there are.
+  const [edits, setEdits] = useState<Record<string, string>>({});
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const draft: Record<string, string> = { ...settings, ...edits };
+  const changed = Object.fromEntries(Object.entries(edits).filter(([k, v]) => settings?.[k] !== v));
+
+  function edit(key: string, value: string) {
+    setEdits(({ [key]: _was, ...rest }) =>
+      settings?.[key] === value ? rest : { ...rest, [key]: value },
+    );
+  }
+
+  // An edit the saved value has caught up with is not one any more (the same value was saved
+  // from somewhere else).
   useEffect(() => {
-    if (settings) setDraft(settings);
+    if (!settings) return;
+    setEdits((now) => {
+      const keep = Object.entries(now).filter(([k, v]) => settings[k] !== v);
+      return keep.length === Object.keys(now).length ? now : Object.fromEntries(keep);
+    });
   }, [settings]);
 
   async function save() {
     setError(null);
+    const sent = changed;
     try {
-      await api.updateSettings(draft);
+      if (Object.keys(sent).length > 0) {
+        // The reply is every setting as saved, so the cache has it before the lists are read again.
+        qc.setQueryData(keys.settings, await api.updateSettings(sent));
+      }
       await qc.invalidateQueries();
+      // What was sent is what is saved now, as the server stored it ("045" is saved as 45), so
+      // it stops being an edit: unless it has been typed over since, which is still the person's.
+      setEdits((now) => Object.fromEntries(Object.entries(now).filter(([k, v]) => sent[k] !== v)));
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (err) {
@@ -66,7 +94,7 @@ export function SettingsPage() {
           >
             <ModePicker
               value={draft.default_timer_mode === 'pomodoro' ? 'pomodoro' : 'stopwatch'}
-              onChange={(mode) => setDraft({ ...draft, default_timer_mode: mode })}
+              onChange={(mode) => edit('default_timer_mode', mode)}
             />
           </Field>
           {NUMBER_FIELDS.map((f) => (
@@ -77,7 +105,7 @@ export function SettingsPage() {
                 max={f.max}
                 className={inputClass}
                 value={draft[f.key] ?? ''}
-                onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })}
+                onChange={(e) => edit(f.key, e.target.value)}
               />
             </Field>
           ))}
@@ -85,7 +113,7 @@ export function SettingsPage() {
             <input
               className={inputClass}
               value={draft.timezone ?? ''}
-              onChange={(e) => setDraft({ ...draft, timezone: e.target.value })}
+              onChange={(e) => edit('timezone', e.target.value)}
               placeholder="America/New_York"
             />
           </Field>

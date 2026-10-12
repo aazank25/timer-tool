@@ -2884,6 +2884,7 @@ describe('migration 4 on an existing database', () => {
         'updated_at',
         // Added by migration 6, which the same run applies after the 4 under test.
         'week_of',
+        'carried_from',
       ]);
       const col = (table: string, name: string) =>
         (

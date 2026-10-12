@@ -222,6 +222,7 @@ describe('migration 6 on an existing database', () => {
       >[];
       assert.equal(before.length, CASES.length);
       assert.ok(!('week_of' in before[0]!), 'precondition: the column is not there yet');
+      assert.ok(!('carried_from' in before[0]!), 'precondition: nor is the one for carrying');
 
       runMigrations(conn, file);
 
@@ -238,13 +239,18 @@ describe('migration 6 on an existing database', () => {
       >[];
       assert.equal(after.length, CASES.length);
       assert.deepEqual(
-        after.map(({ week_of: _week, ...rest }) => rest),
+        after.map(({ week_of: _week, carried_from: _carried, ...rest }) => rest),
         before,
       );
       // And each is filed under the Monday of the day it was added.
       assert.deepEqual(
         after.map((r) => [r.added_on, r.week_of]),
         CASES,
+      );
+      // Nothing has been carried yet, whatever week each was added in: the column starts empty.
+      assert.deepEqual(
+        after.map((r) => r.carried_from),
+        CASES.map(() => null),
       );
       // By the rule weekStart has, which the rest of the app goes by.
       for (const r of after) assert.equal(r.week_of, weekStart(r.added_on as string));
@@ -306,12 +312,11 @@ describe('migration 6 on an existing database', () => {
 
       assert.throws(() => runMigrations(conn, file), /index tasks_week already exists/);
 
-      assert.ok(
-        !(conn.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).some(
-          (c) => c.name === 'week_of',
-        ),
-        'the added column must be rolled back with the rest',
+      const columns = (conn.prepare('PRAGMA table_info(tasks)').all() as { name: string }[]).map(
+        (c) => c.name,
       );
+      assert.ok(!columns.includes('week_of'), 'the added column must be rolled back with the rest');
+      assert.ok(!columns.includes('carried_from'), 'and so must the one added beside it');
       assert.deepEqual(conn.prepare('SELECT id FROM _migrations WHERE id >= 6').all(), []);
       assert.equal((conn.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }).n, 1);
       assert.equal(backupsIn(dir).length, 1);
@@ -354,12 +359,13 @@ describe('the week a new task is filed under', () => {
     const later = await task('Filed ahead', { addedOn: '2026-10-07', weekOf: NEXT_WEEK });
     assert.equal(later.addedOn, '2026-10-07');
     assert.equal(later.weekOf, NEXT_WEEK);
-    // Filed under a week it was not added in, so it says which it was added in.
-    assert.equal(later.carriedFrom, LAST_WEEK);
+    // Filed under a week it was not added in is not the same as carried into it: only the
+    // carry-over makes a task a carried one.
+    assert.equal(later.carriedFrom, null);
 
     const earlier = await task('Filed back', { addedOn: '2026-10-14', weekOf: TWO_WEEKS_BACK });
     assert.equal(earlier.weekOf, TWO_WEEKS_BACK);
-    assert.equal(earlier.carriedFrom, THIS_WEEK);
+    assert.equal(earlier.carriedFrom, null);
 
     // A week given with no day added: the day is still today, and the week is the one given.
     freeze(WEDNESDAY);
@@ -513,36 +519,65 @@ describe('carrying unfinished tasks into this week', () => {
     }
   });
 
-  it('puts them at the bottom of each band, below what was there, in the order they had', async () => {
+  it('puts them at the bottom of each band, below what was there, in the order the list had them in', async () => {
     const { carryOverTasks } = await tasksMod();
     await aFewWeeks();
     carryOverTasks();
-
-    // This week's own task first in each band, then the carried ones: the oldest week first, and
-    // inside a week the order they were in.
+    // This week's own task first in each band, then the carried ones: the NEWEST week first, as the
+    // list shows the weeks, and inside a week the order they were in.
     assert.deepEqual(await band(THIS_WEEK, 'high'), [
       'This high',
+      'Last high',
       'Old high 1',
       'Old high 2',
-      'Last high',
     ]);
-    assert.deepEqual(await band(THIS_WEEK, 'medium'), ['This medium', 'Old medium', 'Last medium']);
+    assert.deepEqual(await band(THIS_WEEK, 'medium'), ['This medium', 'Last medium', 'Old medium']);
     assert.deepEqual(await band(THIS_WEEK, 'low'), ['Old low']);
     // And the whole list: newest week first, so next week's, then this week's three bands, then
     // the two weeks that now hold only what is done.
     assert.deepEqual(await everyTitle(), [
       'Next medium',
       'This high',
+      'Last high',
       'Old high 1',
       'Old high 2',
-      'Last high',
       'This medium',
-      'Old medium',
       'Last medium',
+      'Old medium',
       'Old low',
       'Last done',
       'Old done',
     ]);
+  });
+
+  it('leaves the carried tasks in the order they were listed in, which is what carrying a week at a time gives', async () => {
+    const { carryOverTasks, listTasks } = await tasksMod();
+    const PRIORITIES = ['high', 'medium', 'low'] as const;
+    /** The titles of the given tasks of one priority, in the order they are listed in. */
+    const ofPriority = (list: TaskView[], priority: string) =>
+      list.filter((t) => t.priority === priority).map((t) => t.title);
+
+    await aFewWeeks();
+    // What the Tasks tab shows of the tasks that are about to move: the open ones in earlier weeks.
+    const behind = listTasks().filter((t) => t.weekOf < THIS_WEEK);
+    assert.equal(behind.length, 6);
+    carryOverTasks();
+    const moved = new Set(behind.map((t) => t.id));
+    const after = listTasks().filter((t) => moved.has(t.id));
+    for (const priority of PRIORITIES) {
+      assert.deepEqual(ofPriority(after, priority), ofPriority(behind, priority), priority);
+    }
+    const onceBands = await Promise.all(PRIORITIES.map((p) => band(THIS_WEEK, p)));
+
+    // The same tasks carried a week at a time, with the clock moved on a week between, make the
+    // same bands: last week's own tasks come ahead of the ones that were carried into it.
+    await reset();
+    await aFewWeeks();
+    freeze('2026-10-07T12:00:00.000Z'); // the Wednesday of the week of the 5th
+    assert.deepEqual(carryOverTasks(), { carried: 4, weekOf: LAST_WEEK });
+    freeze(WEDNESDAY);
+    assert.deepEqual(carryOverTasks(), { carried: 6, weekOf: THIS_WEEK });
+    assert.deepEqual(await Promise.all(PRIORITIES.map((p) => band(THIS_WEEK, p))), onceBands);
   });
 
   it('keeps the order a week had when the tasks in it were put in an order of their own', async () => {
@@ -555,9 +590,9 @@ describe('carrying unfinished tasks into this week', () => {
     carryOverTasks();
     assert.deepEqual(await band(THIS_WEEK, 'high'), [
       'This high',
+      'Last high',
       'Old high 2',
       'Old high 1',
-      'Last high',
     ]);
   });
 
@@ -572,8 +607,9 @@ describe('carrying unfinished tasks into this week', () => {
     assert.ok(position('Old medium') < position('This medium'));
 
     carryOverTasks();
-    assert.ok(position('Old medium') > position('This medium'));
-    assert.ok(position('Last medium') > position('Old medium'));
+    assert.ok(position('Last medium') > position('This medium'));
+    // Carried newest week first, so last week's was given its number before the older one.
+    assert.ok(position('Old medium') > position('Last medium'));
     // Past every position there was, not merely past the end of its own band.
     const others = ['This high', 'This medium', 'Next medium', 'Old done', 'Last done'];
     for (const other of others) assert.ok(position('Old low') > position(other), other);
@@ -672,21 +708,21 @@ describe('where a task was carried from', () => {
     assert.equal((await reread(t.id)).carriedFrom, null);
   });
 
-  it('is the Monday of the week it was added once it is carried into another', async () => {
+  it('is the Monday of the week it was carried from once the carry-over has moved it', async () => {
     const { carryOverTasks, listTasks } = await tasksMod();
     const t = await task('Slipped', { addedOn: '2026-10-08' });
     assert.equal(carryOverTasks().carried, 1);
 
     const carried = await reread(t.id);
     assert.equal(carried.weekOf, THIS_WEEK);
-    // The Monday of the week it was added, not the day it was added.
+    // The Monday of the week it left, not the day it was added.
     assert.equal(carried.addedOn, '2026-10-08');
     assert.equal(carried.carriedFrom, LAST_WEEK);
     // The list says the same.
     assert.equal(listTasks().find((x) => x.id === t.id)?.carriedFrom, LAST_WEEK);
   });
 
-  it('stays the week it was added through every week it is carried', async () => {
+  it('stays the week it was first carried from, through every week it is carried after that', async () => {
     const { carryOverTasks } = await tasksMod();
     const t = await task('Slips twice', { weekOf: TWO_WEEKS_BACK, addedOn: '2026-09-29' });
     carryOverTasks();
@@ -698,21 +734,88 @@ describe('where a task was carried from', () => {
     assert.equal(again.carriedFrom, TWO_WEEKS_BACK);
   });
 
-  it('goes again when the task is filed under the week it was added, or the day added moves with it', async () => {
+  it('is recorded, not worked out from the day added: a task filed under another week by hand was not carried', async () => {
+    const { listTasks } = await tasksMod();
+    // Added this week and filed under an earlier one, and the other way about: neither was carried
+    // anywhere, though neither sits in the week of the day it was added.
+    const back = await task('Filed back', { addedOn: '2026-10-14', weekOf: LAST_WEEK });
+    const ahead = await task('Filed ahead', { addedOn: '2026-10-07', weekOf: NEXT_WEEK });
+    for (const t of [back, ahead]) assert.equal((await reread(t.id)).carriedFrom, null, t.title);
+    assert.deepEqual(
+      listTasks({ view: 'all' }).map((t) => [t.title, t.carriedFrom]),
+      [
+        ['Filed ahead', null],
+        ['Filed back', null],
+      ],
+    );
+  });
+
+  it('is kept when the day added of a task that was carried is corrected', async () => {
     const { carryOverTasks, updateTask } = await tasksMod();
     const t = await task('Slipped', { addedOn: '2026-10-08' });
     carryOverTasks();
     assert.equal((await reread(t.id)).carriedFrom, LAST_WEEK);
 
-    // Put back where it was added: nothing is carried about it any more.
-    assert.equal(updateTask(t.id, { weekOf: LAST_WEEK }).carriedFrom, null);
+    // Into the week it now sits in, which used to make it look as if it had never been carried, and
+    // into a day that is nowhere near: the day added is a record, carrying is a fact about weeks.
+    for (const addedOn of ['2026-10-13', '2026-11-30', '2026-08-03']) {
+      const fixed = updateTask(t.id, { addedOn });
+      assert.equal(fixed.addedOn, addedOn);
+      assert.equal(fixed.weekOf, THIS_WEEK);
+      assert.equal(fixed.carriedFrom, LAST_WEEK, addedOn);
+    }
+  });
+
+  it('goes when the task is filed under another week by hand, and not when it is filed under the week it is in', async () => {
+    const { carryOverTasks, updateTask } = await tasksMod();
+    const t = await task('Slipped', { addedOn: '2026-10-08' });
     carryOverTasks();
     assert.equal((await reread(t.id)).carriedFrom, LAST_WEEK);
 
-    // Or the record of the day it was added is corrected to a day in the week it sits in.
-    const fixed = updateTask(t.id, { addedOn: '2026-10-13' });
-    assert.equal(fixed.weekOf, THIS_WEEK);
-    assert.equal(fixed.carriedFrom, null);
+    // The week it is already in, by any day of it, is no move, and says nothing new about it.
+    assert.equal(updateTask(t.id, { weekOf: THIS_WEEK }).carriedFrom, LAST_WEEK);
+    assert.equal(updateTask(t.id, { weekOf: '2026-10-16' }).carriedFrom, LAST_WEEK);
+    // Edits that do not mention the week leave the mark alone as well.
+    assert.equal(updateTask(t.id, { title: 'Renamed', priority: 'high' }).carriedFrom, LAST_WEEK);
+
+    // Put back where it came from, or filed under any other week: that was done by hand.
+    assert.equal(updateTask(t.id, { weekOf: LAST_WEEK }).carriedFrom, null);
+    carryOverTasks();
+    assert.equal((await reread(t.id)).carriedFrom, LAST_WEEK);
+    const ahead = updateTask(t.id, { weekOf: NEXT_WEEK });
+    assert.equal(ahead.weekOf, NEXT_WEEK);
+    assert.equal(ahead.carriedFrom, null);
+  });
+
+  it('is the week it was in when it was carried, whatever put it there first', async () => {
+    const { carryOverTasks, updateTask } = await tasksMod();
+    // Added in one week, filed by hand under the next, and only then carried: it was carried
+    // from the week it was filed under, which is not the one it was added in.
+    const t = await task('Filed, then carried', { addedOn: '2026-09-29', weekOf: LAST_WEEK });
+    assert.equal(t.carriedFrom, null);
+    assert.equal(carryOverTasks().carried, 1);
+    assert.equal((await reread(t.id)).carriedFrom, LAST_WEEK);
+
+    // Moved by hand and carried again later: the mark began again with the move.
+    updateTask(t.id, { weekOf: TWO_WEEKS_BACK });
+    assert.equal((await reread(t.id)).carriedFrom, null);
+    carryOverTasks();
+    assert.equal((await reread(t.id)).carriedFrom, TWO_WEEKS_BACK);
+  });
+
+  it('is written only for the tasks the carry-over moves', async () => {
+    const { carryOverTasks } = await tasksMod();
+    const made = await aFewWeeks();
+    carryOverTasks();
+    const carriedFrom = async (title: string) => (await reread(made[title]!.id)).carriedFrom;
+    assert.equal(await carriedFrom('Old high 1'), TWO_WEEKS_BACK);
+    assert.equal(await carriedFrom('Old low'), TWO_WEEKS_BACK);
+    assert.equal(await carriedFrom('Last high'), LAST_WEEK);
+    assert.equal(await carriedFrom('Last medium'), LAST_WEEK);
+    // Done, already in this week, or filed ahead: not moved, so not marked.
+    for (const title of ['Old done', 'Last done', 'This high', 'This medium', 'Next medium']) {
+      assert.equal(await carriedFrom(title), null, title);
+    }
   });
 });
 
@@ -870,6 +973,25 @@ describe('carrying over, over the API', () => {
     assert.equal(byTitle.get('Old low')!.id, made['Old low']!.id);
   });
 
+  it('says a task was carried once the carry-over has moved it, and stops when it is filed by hand', async () => {
+    const t = (await api.call('POST', '/tasks', { title: 'Slipped', weekOf: LAST_WEEK })).body;
+    assert.equal(t.carriedFrom, null);
+    await api.call('POST', '/tasks/carry-over');
+    const listed = (await api.call('GET', '/tasks')).body as TaskView[];
+    assert.equal(listed.find((x) => x.id === t.id)?.carriedFrom, LAST_WEEK);
+
+    // The day added is only a record; the week it sits in has not moved either.
+    const corrected = await api.call('PATCH', `/tasks/${t.id}`, { addedOn: '2026-10-13' });
+    assert.equal(corrected.body.carriedFrom, LAST_WEEK);
+    // Saying the week it is in again is no move.
+    const same = await api.call('PATCH', `/tasks/${t.id}`, { weekOf: '2026-10-15' });
+    assert.equal(same.body.carriedFrom, LAST_WEEK);
+    // A week of its own choosing is.
+    const filed = await api.call('PATCH', `/tasks/${t.id}`, { weekOf: NEXT_WEEK });
+    assert.equal(filed.body.weekOf, NEXT_WEEK);
+    assert.equal(filed.body.carriedFrom, null);
+  });
+
   it('files a task under the week it is created or edited into, taking any day to its Monday', async () => {
     const created = await api.call('POST', '/tasks', {
       title: 'Filed ahead',
@@ -879,7 +1001,8 @@ describe('carrying over, over the API', () => {
     assert.equal(created.status, 201);
     assert.equal(created.body.weekOf, NEXT_WEEK);
     assert.equal(created.body.addedOn, '2026-10-08');
-    assert.equal(created.body.carriedFrom, LAST_WEEK);
+    // Filed by hand, so not a carried one.
+    assert.equal(created.body.carriedFrom, null);
 
     const moved = await api.call('PATCH', `/tasks/${created.body.id}`, { weekOf: '2026-10-14' });
     assert.equal(moved.status, 200);

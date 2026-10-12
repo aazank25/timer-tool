@@ -71,7 +71,10 @@ export interface Task {
    * added, and moves when the task is carried forward or filed under another week.
    */
   weekOf: string;
-  /** The Monday of the week it was added, when that is not the week it sits in now. */
+  /**
+   * The Monday of the week it was first carried forward from, once it has been, otherwise null.
+   * Filing a task under another week by hand is not carrying it, and clears this.
+   */
   carriedFrom: string | null;
   startDate: string | null;
   targetDate: string | null;

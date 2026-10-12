@@ -404,6 +404,23 @@ export function addInterruption(
   })();
 }
 
+/**
+ * Take the rows of a block back to what its count says, after the count was written by hand
+ * (the block editor can set it to anything): the oldest `count` rows stay and the newer ones
+ * go, the same ones that taking an interruption back removes. Left alone, a block whose count
+ * was lowered would keep the reasons of interruptions it no longer has, and the next one
+ * logged would sit behind them and be read as the one in front, under the wrong reason. A
+ * count above the rows needs nothing: the difference is interruptions with no reason, as on a
+ * block from before reasons. Not a transaction of its own: the caller's write of the count is
+ * the other half of it.
+ */
+export function trimInterruptionRows(id: number, count: number): void {
+  db.prepare(
+    `DELETE FROM interruptions WHERE id IN (
+       SELECT id FROM interruptions WHERE session_id = ? ORDER BY id ASC LIMIT -1 OFFSET ?)`,
+  ).run(id, count);
+}
+
 export function extendSession(id: number, minutes: number): SessionView {
   const row = getSessionRow(id);
   // null + minutes is a number in JS, so without this a stopwatch would quietly

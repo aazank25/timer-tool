@@ -45,10 +45,13 @@ export function useDraft(saved: string | null): [string, (text: string) => void]
 }
 
 /**
- * A note that saves itself: when the box loses focus, or on Enter in a one-line one. It
- * says where it stands (not saved yet, saving, saved) in words, so nobody has to wonder
- * whether what they typed went anywhere. What is kept is the trimmed text, and an empty
- * box clears the note. The draft is the parent's, so the summary beside it can show it.
+ * A note that saves itself: when the box loses focus, or on Enter in a one-line one (Ctrl or
+ * Cmd+Enter in a longer one). The keys save and leave the focus where it is: making the box
+ * lose it to save would drop the focus on the page, and the next Tab would start again from
+ * the top, in the sidebar. It says where it stands (not saved yet, saving, saved) in words,
+ * so nobody has to wonder whether what they typed went anywhere. What is kept is the trimmed
+ * text, and an empty box clears the note. The draft is the parent's, so the summary beside
+ * it can show it.
  */
 export function NoteField({
   label,
@@ -122,7 +125,7 @@ export function NoteField({
           onBlur={() => void commit()}
           onKeyDown={(e) => {
             // Enter is a new line here, so the shortcut is the one a chat box uses.
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.currentTarget.blur();
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void commit();
           }}
         />
       ) : (
@@ -136,9 +139,8 @@ export function NoteField({
           onChange={(e) => onDraft(e.target.value)}
           onBlur={() => void commit()}
           onKeyDown={(e) => {
-            // Leaving the box is what saves, so Enter just leaves it. Not while an input
-            // method is composing a character: that Enter belongs to it.
-            if (e.key === 'Enter' && !e.nativeEvent.isComposing) e.currentTarget.blur();
+            // Not while an input method is composing a character: that Enter belongs to it.
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing) void commit();
           }}
         />
       )}

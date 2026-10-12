@@ -1,9 +1,14 @@
-/** "1h 25m", "45m", "—" for nothing at all. */
+/**
+ * "1h 25m", "45m", "—" for nothing at all. Whole minutes come first and the hours are taken
+ * out of those, so 1h 59m 40s reads 2h and 59m 40s reads 1h: rounding the minutes after the
+ * hours were split off said "1h 60m" and "60m".
+ */
 export function duration(seconds: number, opts: { zero?: string } = {}): string {
   const total = Math.max(0, Math.round(seconds));
   if (total < 60) return total === 0 ? (opts.zero ?? '0m') : `${total}s`;
-  const h = Math.floor(total / 3600);
-  const m = Math.round((total % 3600) / 60);
+  const minutes = Math.round(total / 60);
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
   if (h === 0) return `${m}m`;
   if (m === 0) return `${h}h`;
   return `${h}h ${m}m`;

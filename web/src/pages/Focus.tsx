@@ -495,7 +495,8 @@ function LiveBlock({
             </Button>
           )}
           <InterruptionChooser
-            onChoose={(picked) => actions.interrupt.mutate({ id: session.id, reason: picked })}
+            askReason={session.kind === 'focus'}
+            onChoose={(picked) => actions.interrupt.mutateAsync({ id: session.id, reason: picked })}
           />
           <Button variant="primary" onClick={onFinish}>
             Done

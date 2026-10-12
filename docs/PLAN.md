@@ -186,19 +186,25 @@ list to open, completed or all.
   `weekOf` on a create or an edit takes any real day and files the task under that
   day's Monday; editing `addedOn` is editing a record and moves nothing. The order,
   the bands and the moves all go by this stored week. In the task view `weekOf` is
-  that week, and `carriedFrom` is the Monday of the week it was added when that is
-  not the week it sits in, otherwise null. `POST /api/tasks/carry-over` (no body)
+  that week, and `carriedFrom` is the Monday of the week the task was first carried
+  forward from, once the carry-over has moved it, otherwise null: it is recorded
+  (`tasks.carried_from`, cleared when a task is filed under another week by hand) and
+  never worked out from the day added, so a task filed under an earlier week by hand
+  has not been carried and a carried one keeps saying so when its day added is
+  corrected. `POST /api/tasks/carry-over` (no body)
   brings every task that is not completed and whose week is before this week's
   Monday into this week, answering `{ carried, weekOf }`. This week is the user's:
   it turns over at the day-start hour like every other day. Each carried task goes to
-  the bottom of its band here, one after the other, the oldest week first and in the
-  order it had within its week, so tasks that were in an order keep it, and what was
-  already in the week stays above them. Completed tasks stay in the week they were
+  the bottom of its band here, one after the other, the newest week first (the order
+  the list shows the weeks in, and what carrying a week at a time would leave) and in
+  the order it had within its week, so tasks that were in an order keep it, and what
+  was already in the week stays above them. Completed tasks stay in the week they were
   finished in, and anything in this week or a later one is left alone. It is one
   transaction, and the second call carries nothing. On the Tasks tab a banner says
   how many unfinished tasks are left in earlier weeks and offers **Carry into this
   week**; the edit dialog has a *Week of* field, sent only when it was changed; and a
-  carried row says *carried*, with the week it was added in as its tooltip.
+  carried row says *carried*, with the week it was carried from as its tooltip. The
+  dialog's hint says the same, with the year when it is not this one.
 - **A block can be linked to a task after the fact.** Forgot to pick one? Open the
   block in Today's block log and choose its task: open tasks first, completed ones
   under their own heading. The task moves along as if the block had been started on
@@ -232,8 +238,16 @@ your guesses are.** Done.
   always has. A delta above zero adds that many rows, each with the reason; below
   zero it takes that many of the block's most recent rows away, never below zero. A
   block logged before reasons has a count and no rows, and taking one back from it
-  only lowers the count. The reason list is written once on the server
-  (`server/src/lib/interruptions.ts`) and mirrored in `web/src/lib/interruptions.ts`.
+  only lowers the count. The block editor's `PATCH /api/sessions/:id { interruptions }`
+  takes the newest rows above the new count away in the same transaction as it writes
+  the count, so the next reason logged is its own and not read as one of the old ones
+  (a count raised by hand leaves the rows alone: the difference is interruptions with
+  no reason). On a break *Got interrupted* logs at once and opens no menu, since
+  reasons are only read for focus blocks. A screen reader is told "Logged an
+  interruption: Meeting" once the request has succeeded, again for the same reason
+  twice in a row, and a failed request is an alert instead. The reason list is written
+  once on the server (`server/src/lib/interruptions.ts`) and mirrored in
+  `web/src/lib/interruptions.ts`.
 - **What interrupted you.** `GET /api/stats/interruptions?from=&to=` (days; the 7
   ending today unless given, checked like the other stats, `from` not after `to`)
   answers `{ from, to, total, byReason: [{ reason, label, count }], unspecified }`:
@@ -243,16 +257,20 @@ your guesses are.** Done.
   gave. `unspecified` is what was counted with no reason: the interruptions of blocks
   from before reasons, and those logged with *No reason*; `total` is always the
   reasons given plus that. A block's rows are only read up to its own count, so a
-  count that was lowered by hand cannot make this show more than the rest of the app
-  does. `DayStats` and `RangeStats` are unchanged. Review has a *What interrupted
-  you* card for the window picked there, with an empty state.
+  block whose rows outnumber its count (a count lowered before the editor took the
+  rows down with it) cannot make this show more than the rest of the app does. It
+  is the focus blocks' counts only, where Today's *Interruptions* tile adds up every
+  block of the day, a break included. `DayStats` and `RangeStats` are unchanged. Review
+  has a *What interrupted you* card for the window picked there, with an empty state.
 - **How your estimates hold up.** `GET /api/stats/estimates?from=&to=` (the 90 days
   ending today unless given) answers `{ from, to, blocks, tasks, byProject }`, where
   `blocks` and `tasks` are each `{ count, medianRatio }` and `byProject` has the same
   two for each project, with *No project* as the entry whose id is null and a project
   with nothing in either left out. The ratio is actual ÷ estimate. A block counts when
-  it is a completed focus block with an estimate, worked on a day in the window, and
-  its actual is its active seconds; a task counts when it is completed on a day in the
+  it is a completed focus block with an estimate and some time on it (a block of no
+  seconds has no actual to compare, as a task with nothing logged has none), worked
+  on a day in the window, and its actual is its active seconds; a task counts when it
+  is completed on a day in the
   window, has an estimate, and has focus time logged on it, counted by the rule the
   Tasks tab's *Logged* column uses (finished focus blocks only). A block is filed under
   its own project and a task under its task's, which can differ. The median rather
@@ -260,7 +278,10 @@ your guesses are.** Done.
   until there are three, because the middle of one or two numbers says nothing about
   how you usually guess. Review's *How your estimates hold up* card reads it as "Blocks
   run 1.6× your guess (8)", "about right" within a tenth either way, "finish in 70% of
-  your guess" below that, and "not enough yet" for a null. It always looks back 90
+  your guess" below that, and "not enough yet" for a null. The words go by the ratio
+  rounded to a tenth, the figure printed, so one that prints as 1.1× or 0.9× is "about
+  right" and the card never says "run 1.1×" or "finish in 90%"
+  (`web/src/lib/accuracyWords.ts`). It always looks back 90
   days, whatever window is picked above it, because a week holds too few estimated
   blocks to judge a guess by.
 
@@ -273,15 +294,21 @@ review*, `/wrap-up/week`, any week with `?week=`). Neither is a sidebar tab.
 - **The day** opens with what yesterday's wrap-up said to do (*Yesterday you
   planned: …*, or the day it is from when yesterday had no note), then the
   headline totals, then *Rate what's left* (every finished focus block with no
-  rating, one tap for 1–5, and it leaves the list once rated), *Tasks you moved*
-  (time put on each, what is logged against its estimate, and a status menu that
-  changes the task), a one-line *Tomorrow* note that saves on Enter or when you
-  leave the box, a summary to copy, and *Done for the day*, which stamps when.
+  rating, one tap for 1–5, and it leaves the list once rated; each button's name
+  carries the block's start time, since two blocks can share a title), *Tasks you
+  moved* (time put on each, what is logged against its estimate, and a status menu that
+  changes the task; completed from the wrap-up of a past day it is stamped with that
+  day, not today), a one-line *Tomorrow* note that saves on Enter or when you
+  leave the box (Ctrl or Cmd+Enter in the week's; both save and leave the focus where
+  it is), a summary to copy, and *Done for the day*, which stamps when. Today's *Avg
+  focus* and *Focus score* are averaged over the same blocks as the wrap-up: focus
+  blocks that were not thrown away.
 - **The week** has the totals, focused time per day (all seven, zero days
   included), time per project, the tasks worked on with this week's time beside
   all that is logged against the estimate, what was completed that week, and
-  *Unfinished from this week* (the tasks from that week's sheet still open, with
-  a marked place for a carry-over button, not built yet). It takes a *Next week's
+  *Unfinished from this week* (the tasks from that week's sheet still open; carrying
+  them forward is done on the Tasks tab, and a marked place is kept for a carry-over
+  button of its own, which is added separately). It takes a *Next week's
   focus* note, offers the summary to copy, and is closed with *Mark week
   reviewed*. It opens on last week on a Monday or Tuesday, when the week just
   finished is the one being reviewed and the new one has barely begun, and on the
@@ -291,7 +318,11 @@ review*, `/wrap-up/week`, any week with `?week=`). Neither is a sidebar tab.
   `active_seconds` column: that is only written when a block is paused or stopped,
   so a summary built from it would leave out the block running at the very moment
   you wrap up. A paused block counts what it had when it was paused; breaks and
-  discarded blocks are never counted.
+  discarded blocks are never counted. A block started, paused or stopped from the menu
+  bar or another window changes the page too: it is read again when the live session's
+  id or status changes, which the shared live-session poll notices within about 15
+  seconds. If the server cannot say which day it is, the page says so with a *Try
+  again* button instead of waiting on "Loading…".
 - **The summary is plain text** (`Mon Oct 12 — 5h 20m focused, 7 blocks, focus
   3.9/5`, a bullet per project with its block titles, the tasks with what is
   logged against the estimate and their status, then the Tomorrow line), written
@@ -300,9 +331,11 @@ review*, `/wrap-up/week`, any week with `?week=`). Neither is a sidebar tab.
   on the clipboard. Where the browser has no clipboard to write to, the text is
   selected and the person is told to copy it themselves. The week's version lists
   the time per project, what was worked on, completed and left open, and the
-  next-week note. The web app has no test runner of its own, so the server's
-  suite loads these small files (and `lib/weeks.ts`, which decides the week the
-  review opens on) by their path and tests them there.
+  next-week note. Its lengths of time are `duration`, the formatter every screen
+  uses (whole minutes first, so 1h 59m 40s reads 2h and never 1h 60m). The web app
+  has no test runner of its own, so the server's suite loads these small files (and
+  `lib/weeks.ts`, which decides the week the review opens on, `lib/format.ts` and
+  `lib/accuracyWords.ts`) by their path and tests them there.
 - **Notes and stamps are stored apart from the blocks** (`day_notes`,
   `week_reviews`): a note and a done stamp are each optional and independent, a
   second *Done* keeps the first stamp, and editing a note never undoes a stamp.
@@ -314,7 +347,9 @@ review*, `/wrap-up/week`, any week with `?week=`). Neither is a sidebar tab.
   never worked out again from the day it was added.
 - **`wrapup_time`** (default `17:30`, `HH:MM` on a 24-hour clock, or empty for
   off) is when the wrap-up is due. Settings has a card for it with its own Save;
-  it only stores the time.
+  it only stores the time. The page's own *Save settings* sends only the fields edited
+  in its card, and its fields follow the saved settings except the ones being edited,
+  so saving a card neither discards an unsaved edit nor is undone by that button.
 
 API: `GET /api/wrapup/day?day=`, `PUT /api/wrapup/day/:day {note}`, `POST
 /api/wrapup/day/:day/done`, and the same three under `/api/wrapup/week` with
@@ -599,8 +634,8 @@ tasks             id, project_id→projects (NULL = a misc task), title,
                   priority(high|medium|low),
                   status(not_started|in_progress|held_up|completed),
                   estimated_minutes (total effort across blocks; display only),
-                  added_on, week_of, start_date, target_date, completed_on,
-                  notes, results, position, timestamps
+                  added_on, week_of, carried_from, start_date, target_date,
+                  completed_on, notes, results, position, timestamps
                   · dates are plain YYYY-MM-DD days, not instants
                   · week_of is the Monday of the week the task sits in, stored
                     apart from added_on (migration 6 filled it from added_on, so
@@ -608,6 +643,10 @@ tasks             id, project_id→projects (NULL = a misc task), title,
                     or filing it under another week changes it and added_on
                     stays the record of when it was added. Indexed with
                     priority and position, the order the list is read in
+                  · carried_from is the week the task was first carried forward
+                    from (NULL = never carried): written by the carry-over, the
+                    first time only, and cleared when the task is filed under
+                    another week by hand. Migration 6 adds it beside week_of
                   · position orders a task inside its band (its week_of and its
                     priority) and nowhere else: a new task takes the highest
                     position + 1, a move renumbers its band 0..n-1, and a task
