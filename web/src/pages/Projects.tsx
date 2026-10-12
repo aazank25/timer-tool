@@ -53,7 +53,9 @@ export function ProjectsPage({ dark }: { dark: boolean }) {
       </Card>
 
       {active.length ? (
-        <div className="grid gap-3 md:grid-cols-2">
+        // One column that can shrink below its widest card: without it the column is as wide as
+        // the longest unbroken name, and the page scrolls sideways at a narrow width.
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           {active.map((p) => (
             <ProjectCard
               key={p.id}
@@ -144,7 +146,9 @@ function ProjectCard({
         <div className="min-w-0">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-ink">
             <Swatch color={seriesColor(project.color, dark)} />
-            <span className="truncate">{project.name}</span>
+            <span className="truncate" title={project.name}>
+              {project.name}
+            </span>
           </h3>
           {project.description && (
             <p className="mt-1 line-clamp-2 text-xs text-muted">{project.description}</p>

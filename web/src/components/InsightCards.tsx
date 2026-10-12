@@ -1,5 +1,6 @@
-import { useInterruptionStats, useEstimateStats, type Accuracy } from '../insights';
+import { useInterruptionStats, useEstimateStats } from '../insights';
 import { reason } from '../api';
+import { accuracyWords } from '../lib/accuracyWords';
 import { addDays } from '../lib/format';
 import { seriesColor } from '../lib/palette';
 import { ChartFrame } from './charts';
@@ -105,19 +106,6 @@ export function InterruptionsCard({ from, to }: { from: string; to: string }) {
  * set to: a week holds too few estimated blocks for a median to mean anything.
  */
 const ESTIMATE_DAYS = 90;
-
-/**
- * One kind of estimate in words: "Blocks run 1.6× your guess (8)". Within a tenth either way
- * is "about right", above it is how many times the guess, and below it is the share of the
- * guess it took. With too few to take a median it says so, and how many there are so far.
- */
-export function accuracyWords(subject: string, a: Accuracy): string {
-  const ratio = a.medianRatio;
-  if (ratio == null) return `${subject}: not enough yet (${a.count})`;
-  if (ratio > 1.1) return `${subject} run ${ratio.toFixed(1)}× your guess (${a.count})`;
-  if (ratio >= 0.9) return `${subject} are about right (${a.count})`;
-  return `${subject} finish in ${Math.round(ratio * 100)}% of your guess (${a.count})`;
-}
 
 export function EstimatesCard({ dark, to }: { dark: boolean; to: string }) {
   const from = addDays(to, -(ESTIMATE_DAYS - 1));

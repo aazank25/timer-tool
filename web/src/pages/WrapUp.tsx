@@ -14,11 +14,12 @@ import {
   useDraft,
 } from '../components/wrapup';
 import { useActiveSession, useSessionActions, useToday } from '../hooks';
-import { addDays, dayLabel } from '../lib/format';
+import { addDays, dayLabel, timeOfDay } from '../lib/format';
 import { seriesColor } from '../lib/palette';
 import { defaultWeek, realDay, weekStart } from '../lib/weeks';
 import { daySummary, span, weekSummary } from '../lib/wrapupSummary';
 import {
+  useRefreshWhenTheClockChanges,
   useWrapUpActions,
   useWrapUpDay,
   useWrapUpWeek,
@@ -36,6 +37,30 @@ const loggedText = (loggedSeconds: number, estimatedMinutes: number | null) =>
     ? `${span(loggedSeconds)} logged`
     : `${span(loggedSeconds)} of ${span(estimatedMinutes * 60)}`;
 
+/**
+ * A page that could not be read, and the way to try again. Both pages wait on what the server
+ * says before they read anything, and with no answer there is nothing else on the screen to
+ * say it: a bare "Loading…" that never ends is worse than the error.
+ */
+function LoadFailed({
+  message,
+  onRetry,
+  pending,
+}: {
+  message: string;
+  onRetry: () => void;
+  pending: boolean;
+}) {
+  return (
+    <div role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      <p className="text-xs text-critical">{message}</p>
+      <Button size="sm" disabled={pending} onClick={onRetry}>
+        {pending ? 'Trying…' : 'Try again'}
+      </Button>
+    </div>
+  );
+}
+
 /** One short weekday for a chart's axis: seven of the full date would run into each other. */
 const weekdayShort = (day: string) =>
   new Date(`${day}T12:00:00Z`).toLocaleDateString(undefined, { weekday: 'short', timeZone: 'UTC' });
@@ -49,13 +74,15 @@ const weekdayShort = (day: string) =>
  */
 export function WrapUpDayPage({ dark }: { dark: boolean }) {
   const [params, setParams] = useSearchParams();
-  const { data: todayInfo } = useToday();
-  const today = todayInfo?.today;
+  const todayQuery = useToday();
+  const today = todayQuery.data?.today;
   // Nothing is read until the server has said which day it is: the browser's own date is
   // not the day the user is in when they are up past midnight.
   const day = realDay(params.get('day')) ?? today;
   const running = useActiveSession().data?.session?.status === 'running';
-  const { data: view, error } = useWrapUpDay(day, { poll: running });
+  useRefreshWhenTheClockChanges();
+  const dayQuery = useWrapUpDay(day, { poll: running });
+  const { data: view, error } = dayQuery;
 
   const go = (target: string) =>
     setParams(target === today ? {} : { day: target }, { replace: true });
@@ -94,11 +121,21 @@ export function WrapUpDayPage({ dark }: { dark: boolean }) {
       </div>
 
       {error ? (
-        <p role="alert" className="text-xs text-critical">
-          {reason(error, 'Could not load the day')}
-        </p>
+        <LoadFailed
+          message={reason(error, 'Could not load the day')}
+          onRetry={() => void dayQuery.refetch()}
+          pending={dayQuery.isFetching}
+        />
       ) : !view ? (
-        <p className="text-sm text-muted">Loading…</p>
+        todayQuery.error && day === undefined ? (
+          <LoadFailed
+            message={reason(todayQuery.error, 'Could not find out which day it is')}
+            onRetry={() => void todayQuery.refetch()}
+            pending={todayQuery.isFetching}
+          />
+        ) : (
+          <p className="text-sm text-muted">Loading…</p>
+        )
       ) : (
         // Keyed by day, so stepping to another one starts its note box and its status from scratch.
         <DayScreen key={view.day} view={view} dark={dark} isToday={isToday} />
@@ -141,7 +178,13 @@ function DayScreen({ view, dark, isToday }: { view: WrapUpDay; dark: boolean; is
         onStatus={(task, status) => {
           setStatusError(null);
           actions.setTaskStatus.mutate(
-            { id: task.id, status },
+            {
+              id: task.id,
+              status,
+              // Finished from the wrap-up of a day gone by, it was finished on that day: the
+              // server stamps today unless it is told otherwise.
+              completedOn: status === 'completed' && !isToday ? view.day : undefined,
+            },
             { onError: (err) => setStatusError(reason(err, 'Could not change the status')) },
           );
         }}
@@ -276,6 +319,9 @@ function RateWhatsLeft({ view, dark }: { view: WrapUpDay; dark: boolean }) {
             // Only the block being rated is held still, and the number pressed shows as it goes.
             const saving = update.isPending && update.variables?.id === s.id;
             const pressed = saving ? update.variables?.focusRating : null;
+            // Two blocks can have the same title, and the names of their buttons would be the
+            // same: the time it began at tells them apart, as it does in the block's own row.
+            const started = timeOfDay(s.startedAt);
             return (
               <li key={s.id} className="rounded-xl border border-hairline bg-raised py-1 pr-3">
                 <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
@@ -285,7 +331,7 @@ function RateWhatsLeft({ view, dark }: { view: WrapUpDay; dark: boolean }) {
                   </div>
                   <div
                     role="group"
-                    aria-label={`Focus rating for ${s.title}`}
+                    aria-label={`Focus rating for ${s.title}, started ${started}`}
                     // Under the title when the row wraps (the block's dot and gap are 2rem wide).
                     className="flex gap-1.5 pb-1.5 pl-8"
                   >
@@ -296,7 +342,7 @@ function RateWhatsLeft({ view, dark }: { view: WrapUpDay; dark: boolean }) {
                         className="w-9 tabular"
                         variant={pressed === n ? 'primary' : 'default'}
                         disabled={saving}
-                        aria-label={`Rate "${s.title}" ${n} of 5`}
+                        aria-label={`Rate "${s.title}" ${n} of 5, started ${started}`}
                         onClick={() => rate(s, n)}
                       >
                         {n}
@@ -383,13 +429,15 @@ function TasksMoved({
  */
 export function WrapUpWeekPage({ dark }: { dark: boolean }) {
   const [params, setParams] = useSearchParams();
-  const { data: todayInfo } = useToday();
-  const today = todayInfo?.today;
+  const todayQuery = useToday();
+  const today = todayQuery.data?.today;
   const requested = realDay(params.get('week'));
   const week = requested ? weekStart(requested) : today ? defaultWeek(today) : undefined;
   const current = today ? weekStart(today) : undefined;
   const running = useActiveSession().data?.session?.status === 'running';
-  const { data: view, error } = useWrapUpWeek(week, { poll: running });
+  useRefreshWhenTheClockChanges();
+  const weekQuery = useWrapUpWeek(week, { poll: running });
+  const { data: view, error } = weekQuery;
 
   // Landing back on the week it opens on leaves the address as plain as it was.
   const go = (target: string) =>
@@ -435,11 +483,21 @@ export function WrapUpWeekPage({ dark }: { dark: boolean }) {
       </div>
 
       {error ? (
-        <p role="alert" className="text-xs text-critical">
-          {reason(error, 'Could not load the week')}
-        </p>
+        <LoadFailed
+          message={reason(error, 'Could not load the week')}
+          onRetry={() => void weekQuery.refetch()}
+          pending={weekQuery.isFetching}
+        />
       ) : !view ? (
-        <p className="text-sm text-muted">Loading…</p>
+        todayQuery.error && week === undefined ? (
+          <LoadFailed
+            message={reason(todayQuery.error, 'Could not find out which day it is')}
+            onRetry={() => void todayQuery.refetch()}
+            pending={todayQuery.isFetching}
+          />
+        ) : (
+          <p className="text-sm text-muted">Loading…</p>
+        )
       ) : (
         <WeekScreen key={view.week} view={view} dark={dark} />
       )}
@@ -515,7 +573,7 @@ function WeekScreen({ view, dark }: { view: WrapUpWeek; dark: boolean }) {
         )}
       </Card>
 
-      {/* Carrying these into next week is the next thing to land: see UnfinishedFromWeek. */}
+      {/* Carrying them forward is done on the Tasks tab; a button for it goes in this card. */}
       <UnfinishedFromWeek tasks={view.unfinished} dark={dark} />
 
       <Card
@@ -627,7 +685,8 @@ function WeekTaskRow({
 /**
  * The tasks from this week's sheet that are still open: what a carry-over is about.
  *
- * Carrying them into next week is not built yet, and this is where it goes. The list
+ * Carrying them forward is done on the Tasks tab (its banner says *Carry into this week*).
+ * A button for it here is being added separately, and this is where it goes. The list
  * already takes a button for each task (`renderCarryOver`, drawn at the end of the row)
  * and one for the whole list (`carryAll`, drawn in the card's header); give it either
  * and it is shown, leave them out and nothing is.

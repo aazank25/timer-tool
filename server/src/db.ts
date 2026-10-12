@@ -246,6 +246,13 @@ export const migrations: Migration[] = [
     -- Always the Monday of that week, as a plain YYYY-MM-DD day.
     ALTER TABLE tasks ADD COLUMN week_of TEXT;
 
+    -- The week a task was first carried forward from, once the carry-over has moved it: NULL
+    -- for a task that never was. Written when the carry-over moves it and not worked out from
+    -- added_on, because a task can sit in a week other than the one it was added in without
+    -- having been carried (it was filed there by hand), and the day added of a carried task
+    -- can be corrected afterwards. No task has been carried yet, so every one starts as NULL.
+    ALTER TABLE tasks ADD COLUMN carried_from TEXT;
+
     -- Every task so far sat in the week it was added, so that is where it stays. Back six
     -- days and then forward to a Monday lands on the day itself for a Monday and on the
     -- Monday just gone for every other day, a Sunday included: the same rule as weekStart.

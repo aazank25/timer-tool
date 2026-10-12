@@ -10,9 +10,9 @@ const HH_MM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 /**
  * When the end-of-day wrap-up is due, or never. It is a card of its own, with its own
- * draft and its own Save, and it sends the one setting it owns: the page's Save settings
- * button sends everything the page has loaded, and a second way of saving the same card
- * beside it would be two answers to which of them wins.
+ * draft and its own Save, and it sends the one setting it owns. The page's Save settings
+ * button sends only the fields edited in its own card, and this key is not one of them, so
+ * the two never write the same setting and neither can undo the other.
  */
 export function WrapUpSettings() {
   const { data: settings } = useSettings();
@@ -40,9 +40,8 @@ export function WrapUpSettings() {
     setError(null);
     try {
       const all = await api.updateSettings({ wrapup_time: wanted });
-      // The Settings page keeps its own copy of every setting and saves all of them with
-      // its own button. Handing it this one now means that button writes the time back as
-      // it is, and does not undo this save with the value it loaded before it.
+      // The saved settings are one cache for the page: the fields on it that nobody has
+      // edited follow it, so they have this one as it is now without a second read.
       qc.setQueryData(keys.settings, all);
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2000);

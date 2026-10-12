@@ -249,6 +249,50 @@ describe('daily rollups', () => {
     assert.equal(d.avgFocusRating, 3.7); // (4 + 5 + 2) / 3
   });
 
+  it('averages the rating and the score over the focus blocks that were kept, not breaks or discarded ones', async () => {
+    const { logManualSession, startSession, stopSession } = await mod();
+    const { db } = await dbMod();
+    const { dayStats } = await stats();
+    // A day of its own, so the blocks above are not part of it.
+    const day = '2026-09-12';
+    const at = (time: string) => `${day}T${time}:00.000Z`;
+    logManualSession({
+      projectId: roi,
+      title: 'Good',
+      startedAt: at('09:00'),
+      minutes: 30,
+      focusRating: 5,
+    });
+    logManualSession({
+      projectId: roi,
+      title: 'Fine',
+      startedAt: at('10:00'),
+      minutes: 30,
+      focusRating: 3,
+    });
+    // Rated low, so an average that took them in would show it: a rest, and a block thrown away.
+    logManualSession({
+      projectId: roi,
+      title: 'Rated rest',
+      kind: 'break',
+      startedAt: at('11:00'),
+      minutes: 10,
+      focusRating: 1,
+    });
+    const thrown = startSession({ projectId: roi, title: 'Thrown away', plannedMinutes: 45 });
+    stopSession(thrown.id, 'abandoned', { activeSeconds: 600, focusRating: 1 });
+    db.prepare('UPDATE sessions SET local_day = ? WHERE id = ?').run(day, thrown.id);
+
+    const d = dayStats(day);
+    assert.equal(d.blocks, 2);
+    assert.equal(d.abandonedBlocks, 1);
+    // Two rated blocks, 5 and 3: where every row of the day would say 2.5 from four.
+    assert.equal(d.ratedBlocks, 2);
+    assert.equal(d.avgFocusRating, 4);
+    // Planned and worked for the same time, so only the rating and the calm differ: 100 and 70.
+    assert.equal(d.avgFocusScore, 85);
+  });
+
   it('splits a block that crosses the hour across both hours', async () => {
     const { dayStats } = await stats();
     const byHour = new Map(dayStats('2026-09-10').byHour.map((h) => [h.hour, h.seconds]));

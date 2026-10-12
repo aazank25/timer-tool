@@ -155,8 +155,10 @@ is its own: it starts as the week the task was added and stays put when you edit
 the day it was added. What moves it is the *Week of* field in the edit dialog (any
 day of the week will do) or the banner that appears when unfinished tasks are
 left behind in earlier weeks: **Carry into this week** brings them all forward at
-once, to the bottom of their priority and in the order they had. A task that has
-been carried says so, with the week it was added in on hover.
+once, to the bottom of their priority and in the order the list had them in (the
+newest week first). A task that has been carried says so, with the week it was
+carried from on hover; one you filed under another week by hand has not been
+carried, so it does not.
 
 Inside a week, the rows of one priority stay in the order you put them in: a new
 task goes to the bottom, like a row added to the end of the sheet, and you drag a

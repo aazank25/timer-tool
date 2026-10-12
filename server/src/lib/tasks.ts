@@ -22,6 +22,8 @@ export interface TaskRow {
   added_on: string;
   /** The Monday of the week it sits in. Stored, not worked out from `added_on`: see migration 6. */
   week_of: string;
+  /** The week it was first carried forward from, once it has been: see migration 6. */
+  carried_from: string | null;
   start_date: string | null;
   target_date: string | null;
   completed_on: string | null;
@@ -54,7 +56,11 @@ export interface TaskView {
    * added and moves when the task is carried forward or filed under another week by hand.
    */
   weekOf: string;
-  /** The Monday of the week it was added, when that is not the week it sits in now. */
+  /**
+   * The Monday of the week it was first carried forward from, once the carry-over has moved
+   * it, otherwise null. It is recorded when that happens: a task filed under another week by
+   * hand has not been carried, and one that was keeps saying so through every week after.
+   */
   carriedFrom: string | null;
   startDate: string | null;
   targetDate: string | null;
@@ -146,7 +152,6 @@ function toView(row: TaskRow, day: string, clock: OnTheClock | null): TaskView {
     live && (row.last_worked_at == null || live.startedAt > row.last_worked_at)
       ? live.startedAt
       : row.last_worked_at;
-  const addedWeek = weekStart(row.added_on);
   return {
     id: row.id,
     projectId: row.project_id,
@@ -158,7 +163,7 @@ function toView(row: TaskRow, day: string, clock: OnTheClock | null): TaskView {
     estimatedMinutes: row.estimated_minutes,
     addedOn: row.added_on,
     weekOf: row.week_of,
-    carriedFrom: addedWeek === row.week_of ? null : addedWeek,
+    carriedFrom: row.carried_from,
     startDate: row.start_date,
     targetDate: row.target_date,
     completedOn: row.completed_on,
@@ -336,13 +341,14 @@ export function updateTask(id: number, patch: TaskPatch): TaskView {
   // already in, by any day of it, is not a change.
   const weekOf = patch.weekOf === undefined ? undefined : weekStart(patch.weekOf);
 
+  const movesWeek = weekOf !== undefined && weekOf !== row.week_of;
+
   // A task that lands in another band goes to the bottom of it, like one added there.
   // One that stays in its band keeps its place whatever else about it is edited, so saying
   // the priority again is not a move. Neither is the day it was added, whatever that is
   // changed to: the day is a record, and only the week it is filed under puts it elsewhere.
   const changesBand =
-    (patch.priority !== undefined && patch.priority !== row.priority) ||
-    (weekOf !== undefined && weekOf !== row.week_of);
+    (patch.priority !== undefined && patch.priority !== row.priority) || movesWeek;
 
   const map: Record<string, unknown> = {
     project_id: patch.projectId,
@@ -352,6 +358,9 @@ export function updateTask(id: number, patch: TaskPatch): TaskView {
     estimated_minutes: patch.estimatedMinutes,
     added_on: patch.addedOn,
     week_of: weekOf,
+    // Filing a task under another week by hand is a decision of its own and not the carry-over,
+    // so the mark that it had been carried goes with the move. Staying in its week keeps it.
+    carried_from: movesWeek ? null : undefined,
     target_date: patch.targetDate,
     notes: patch.notes,
     results: patch.results,
@@ -444,9 +453,18 @@ export function moveTask(id: number, to: TaskMove): void {
  * Monday of today. A task that is done stays in the week it was finished in, and one filed
  * under this week or a later one is not touched. Each carried task goes to the bottom of
  * its band here (this week, its own priority), like a row added to the end of the sheet,
- * and they keep the order they had: the oldest week first, then the order within its band,
- * so one that was ahead of another still is. Each is given the highest position yet, one
- * after the other, which is what puts it last and keeps them in that order.
+ * and they keep the order the list shows them in: the NEWEST week first, then the order
+ * within its band. They are read below by the list's own ORDER, so what was above another
+ * task on screen still is. It is also what carrying a week at a time gives: last week's own
+ * tasks, then the ones that had been carried into last week, which sit at the bottom of its
+ * bands. The oldest week first would put the old tasks ahead of last week's, the reverse of
+ * both. Each is given the highest position yet, one after the other, which is what puts it
+ * last and keeps them in that order.
+ *
+ * The week a task is carried from stays on it as `carried_from`, the first time only: one
+ * carried through several weeks says the week it first slipped from. In the UPDATE the
+ * `week_of` inside COALESCE is the week the task is leaving, since every expression in a SET
+ * reads the row as it was before the update.
  *
  * One transaction, so a failure part way carries none of them. Done twice it carries
  * nothing the second time, because by then no unfinished task is left in an earlier week.
@@ -457,12 +475,12 @@ export function carryOverTasks(): { carried: number; weekOf: string } {
     const due = db
       .prepare(
         `SELECT t.id FROM tasks t
-          WHERE t.status <> 'completed' AND t.week_of < ?
-          ORDER BY t.week_of ASC, ${PRIORITY_RANK}, t.position ASC, t.id ASC`,
+          WHERE t.status <> 'completed' AND t.week_of < ?${ORDER}`,
       )
       .all(thisWeek) as { id: number }[];
     const carry = db.prepare(
-      `UPDATE tasks SET week_of = ?, position = ${NEXT_POSITION}, updated_at = ? WHERE id = ?`,
+      `UPDATE tasks SET carried_from = COALESCE(carried_from, week_of), week_of = ?,
+              position = ${NEXT_POSITION}, updated_at = ? WHERE id = ?`,
     );
     const now = nowIso();
     for (const { id } of due) carry.run(thisWeek, now, id);

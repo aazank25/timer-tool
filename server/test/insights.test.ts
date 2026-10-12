@@ -322,6 +322,119 @@ describe('logging an interruption with a reason', () => {
     assert.deepEqual(await reasonsOf(id), ['chat']);
   });
 
+  it('takes the newest rows down with a count that is lowered in the block editor, so the next reason is its own', async () => {
+    const id = await startBlock();
+    for (const reason of ['chat', 'phone', 'email', 'chat']) await log(id, { reason });
+    await api.call('POST', `/sessions/${id}/pause`);
+
+    // Four down to two: the two newest rows go, the two oldest are what the block still has.
+    const lowered = await api.call('PATCH', `/sessions/${id}`, { interruptions: 2 });
+    assert.equal(lowered.status, 200);
+    assert.equal(lowered.body.interruptions, 2);
+    assert.deepEqual(await reasonsOf(id), ['chat', 'phone']);
+
+    // And the next one logged is the newest, not a row behind the ones that were left.
+    assert.equal((await log(id, { reason: 'meeting' })).body.interruptions, 3);
+    assert.deepEqual(await reasonsOf(id), ['chat', 'phone', 'meeting']);
+
+    // To nothing at all, and the same again.
+    await api.call('PATCH', `/sessions/${id}`, { interruptions: 0 });
+    assert.deepEqual(await reasonsOf(id), []);
+    assert.equal((await log(id, { reason: 'email' })).body.interruptions, 1);
+    assert.deepEqual(await reasonsOf(id), ['email']);
+  });
+
+  it('reports the reason of an interruption logged after the count was set to zero as itself', async () => {
+    const id = await startBlock();
+    for (let n = 0; n < 3; n++) await log(id, { reason: 'chat' });
+    await api.call('POST', `/sessions/${id}/pause`);
+    assert.equal((await api.call('PATCH', `/sessions/${id}`, { interruptions: 0 })).status, 200);
+    await log(id, { reason: 'meeting' });
+
+    const day = (await api.call('GET', '/stats/today')).body.today;
+    const res = await api.call('GET', `/stats/interruptions?from=${day}&to=${day}`);
+    // One interruption, and it was a meeting: the chats that were taken back are not in it.
+    assert.deepEqual(res.body.byReason, [{ reason: 'meeting', label: 'Meeting', count: 1 }]);
+    assert.equal(res.body.total, 1);
+    assert.equal(res.body.unspecified, 0);
+  });
+
+  it('leaves the rows of a block alone when the count is raised or set to what it is, or something else is edited', async () => {
+    const id = await startBlock();
+    await log(id, { reason: 'chat' });
+    await log(id, { reason: 'phone' });
+
+    for (const interruptions of [2, 5, 999]) {
+      assert.equal((await api.call('PATCH', `/sessions/${id}`, { interruptions })).status, 200);
+      assert.deepEqual(await reasonsOf(id), ['chat', 'phone'], `count ${interruptions}`);
+    }
+    // The ones that were added have no reason: the stats call them unspecified.
+    await api.call('PATCH', `/sessions/${id}`, { interruptions: 5 });
+    const day = (await api.call('GET', '/stats/today')).body.today;
+    const res = await api.call('GET', `/stats/interruptions?from=${day}&to=${day}`);
+    assert.equal(res.body.total, 5);
+    assert.equal(res.body.unspecified, 3);
+
+    // A count is not in the request: no row is touched, whatever else is.
+    await api.call('PATCH', `/sessions/${id}`, { title: 'Renamed', notes: 'Fine' });
+    assert.deepEqual(await reasonsOf(id), ['chat', 'phone']);
+  });
+
+  it('only takes down the rows of the block that was edited, and only lowers the count of a block with none', async () => {
+    const first = await startBlock('First');
+    await log(first, { reason: 'chat' });
+    await log(first, { reason: 'phone' });
+    await api.call('POST', `/sessions/${first}/complete`, {});
+    const second = await startBlock('Second');
+    await log(second, { reason: 'email' });
+    await api.call('POST', `/sessions/${second}/pause`);
+
+    await api.call('PATCH', `/sessions/${second}`, { interruptions: 0 });
+    assert.deepEqual(await reasonsOf(second), []);
+    // The finished block is as it was, rows and count.
+    assert.deepEqual(await reasonsOf(first), ['chat', 'phone']);
+    assert.equal(await countOf(first), 2);
+
+    // From before reasons: a count and no rows, and lowering it has nothing to take down.
+    const { db } = await dbMod();
+    db.prepare('UPDATE sessions SET interruptions = 3 WHERE id = ?').run(second);
+    const res = await api.call('PATCH', `/sessions/${second}`, { interruptions: 1 });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.interruptions, 1);
+    assert.deepEqual(await reasonsOf(second), []);
+  });
+
+  it('lowers the count and the rows together, or neither', async () => {
+    const id = await startBlock();
+    await log(id, { reason: 'chat' });
+    await log(id, { reason: 'phone' });
+    await api.call('POST', `/sessions/${id}/pause`);
+    const { db } = await dbMod();
+    const blocks = await everyRow('sessions');
+    const rows = await everyRow('interruptions');
+    // The count is written first and the rows after it, so a row that cannot be taken down has to
+    // take the count back with it. The failure is made by a TEMP trigger, dropped again below.
+    db.exec(`CREATE TEMP TRIGGER refuse_the_delete BEFORE DELETE ON interruptions
+             BEGIN SELECT RAISE(ABORT, 'the delete was refused'); END`);
+    const quiet = mock.method(console, 'error', () => {});
+    let failed;
+    try {
+      failed = await api.call('PATCH', `/sessions/${id}`, { interruptions: 0 });
+    } finally {
+      quiet.mock.restore();
+      db.exec('DROP TRIGGER IF EXISTS refuse_the_delete');
+    }
+    assert.equal(failed.status, 500);
+    assert.match(failed.body.details, /the delete was refused/);
+    assert.deepEqual(await everyRow('sessions'), blocks);
+    assert.deepEqual(await everyRow('interruptions'), rows);
+
+    // With nothing in the way the same request goes through.
+    assert.equal((await api.call('PATCH', `/sessions/${id}`, { interruptions: 0 })).status, 200);
+    assert.deepEqual(await reasonsOf(id), []);
+    assert.equal(await countOf(id), 0);
+  });
+
   it('writes the count and the row together, or neither', async () => {
     const id = await startBlock();
     const { db } = await dbMod();
@@ -585,6 +698,83 @@ describe('what interrupted you', () => {
   });
 });
 
+/* ------------------------------------------------------ the words for a ratio */
+
+/*
+ * The wording is a plain function in a plain file, and the web app has no test runner of its
+ * own, so it is loaded here by its path, as the wrap-up's text is.
+ */
+interface Words {
+  accuracyWords(subject: string, a: { count: number; medianRatio: number | null }): string;
+}
+const wordsLib = () =>
+  import(new URL('../../web/src/lib/accuracyWords.ts', import.meta.url).href) as Promise<Words>;
+
+describe('how an estimate ratio is put into words', () => {
+  const said = async (medianRatio: number | null, count = 5) =>
+    (await wordsLib()).accuracyWords('Blocks', { count, medianRatio });
+
+  it('says there is not enough yet when there is no median, with how many there are', async () => {
+    assert.equal(await said(null, 2), 'Blocks: not enough yet (2)');
+    assert.equal(await said(null, 0), 'Blocks: not enough yet (0)');
+  });
+
+  it('says "about right" for every ratio that rounds to a tenth between 0.9 and 1.1, the ends too', async () => {
+    // On the edge, and over it by a hair: a ratio of exactly 1.1 is 66 s against a 60 s guess, and
+    // floating point puts it a hair above 1.1 as often as not.
+    for (const ratio of [
+      0.9,
+      0.895,
+      0.86,
+      0.95,
+      1,
+      1.05,
+      1.1,
+      66 / 60,
+      1.1000000000000001,
+      1.14,
+      1.149,
+    ]) {
+      assert.equal(await said(ratio), 'Blocks are about right (5)', String(ratio));
+    }
+  });
+
+  it('says how many times the guess above that, in the tenth that is printed, and never as 1.0 or 1.1', async () => {
+    assert.equal(await said(1.16), 'Blocks run 1.2× your guess (5)');
+    assert.equal(await said(1.151), 'Blocks run 1.2× your guess (5)');
+    assert.equal(await said(1.6), 'Blocks run 1.6× your guess (5)');
+    assert.equal(await said(2.04), 'Blocks run 2.0× your guess (5)');
+    assert.equal(await said(10), 'Blocks run 10.0× your guess (5)');
+  });
+
+  it('says the share of the guess in whole percent below that, and never 85 or more of it', async () => {
+    assert.equal(await said(0.84), 'Blocks finish in 84% of your guess (5)');
+    assert.equal(await said(0.7), 'Blocks finish in 70% of your guess (5)');
+    assert.equal(await said(0.5), 'Blocks finish in 50% of your guess (5)');
+    assert.equal(await said(0.333), 'Blocks finish in 33% of your guess (5)');
+  });
+
+  it('never prints a figure that contradicts the words round it, for any ratio', async () => {
+    for (let n = 0; n <= 4000; n++) {
+      const ratio = n / 1000;
+      const words = await said(ratio);
+      const times = words.match(/run (\d+\.\d)×/);
+      const percent = words.match(/finish in (\d+)%/);
+      if (times) {
+        // Printed as a multiple, so it is a multiple that is out of "about right".
+        assert.ok(Number(times[1]) >= 1.2, `${ratio}: ${words}`);
+        assert.ok(Math.abs(Number(times[1]) - ratio) <= 0.05 + 1e-9, `${ratio}: ${words}`);
+      } else if (percent) {
+        assert.ok(Number(percent[1]) <= 85, `${ratio}: ${words}`);
+        assert.ok(Math.abs(Number(percent[1]) / 100 - ratio) <= 0.005 + 1e-9, `${ratio}: ${words}`);
+      } else {
+        assert.match(words, /are about right/, `${ratio}: ${words}`);
+        assert.ok(ratio >= 0.85 - 1e-9 && ratio <= 1.15 + 1e-9, `${ratio}: ${words}`);
+      }
+    }
+  });
+});
+
 /* --------------------------------------------------------- estimate accuracy */
 
 describe('how your estimates hold up', () => {
@@ -681,6 +871,29 @@ describe('how your estimates hold up', () => {
     await block(60, 90);
     await block(60, 60);
     assert.deepEqual((await stats()).blocks, { count: 4, medianRatio: 1 });
+  });
+
+  it('leaves out a finished block that holds no time, as it does a task with nothing logged', async () => {
+    // A guess against no seconds at all is a ratio of 0: there is no actual to compare, and
+    // counted it would drag the median of the blocks that do have one down.
+    await block(60, 60); // 1
+    await block(60, 90); // 1.5
+    await block(60, 120); // 2
+    await block(60, 0); // stopped at once
+    await block(30, 0);
+    const res = await stats();
+    assert.deepEqual(res.blocks, { count: 3, medianRatio: 1.5 });
+    assert.deepEqual(
+      res.byProject.map((p: { name: string; blocks: unknown }) => [p.name, p.blocks]),
+      [['No project', { count: 3, medianRatio: 1.5 }]],
+    );
+
+    // Only blocks with no time: nothing to say at all, and no project is listed for them.
+    await reset();
+    await block(60, 0);
+    const none = await stats();
+    assert.deepEqual(none.blocks, { count: 0, medianRatio: null });
+    assert.deepEqual(none.byProject, []);
   });
 
   it('counts a completed task with an estimate by the focus time logged on it, on the day it was completed', async () => {

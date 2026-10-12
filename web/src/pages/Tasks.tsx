@@ -95,6 +95,10 @@ function mondayOf(day: string): string {
   return addDays(day, -dow);
 }
 
+/** "Oct 5", and "Oct 5, 2025" when the year is not this one: the year only where it tells. */
+const dayInYear = (day: string, thisYear: string) =>
+  `${dayLabel(day)}${day.slice(0, 4) === thisYear ? '' : `, ${day.slice(0, 4)}`}`;
+
 /** "Oct 5, 2026": with the year, because a tooltip has no heading to say which one. */
 const fullDay = (day: string) =>
   new Date(`${day}T12:00:00Z`).toLocaleDateString(undefined, {
@@ -113,9 +117,7 @@ interface Group {
 
 function groupOf(task: Task, by: GroupBy, thisYear: string): Omit<Group, 'tasks'> {
   if (by === 'week') {
-    const year = task.weekOf.slice(0, 4);
-    const label = `Week of ${dayLabel(task.weekOf)}${year === thisYear ? '' : `, ${year}`}`;
-    return { key: task.weekOf, label, color: null };
+    return { key: task.weekOf, label: `Week of ${dayInYear(task.weekOf, thisYear)}`, color: null };
   }
   if (by === 'project') {
     return {
@@ -380,6 +382,7 @@ export function TasksPage({ dark }: { dark: boolean }) {
           task={editing}
           projects={projects}
           dark={dark}
+          thisYear={thisYear}
           onClose={() => setEditing(null)}
         />
       )}
@@ -950,10 +953,10 @@ function TaskRow({
           >
             {task.title}
           </button>
-          {/* The word says it was carried; the week it was added in is in the tooltip. */}
+          {/* The word says it was carried; the week it was carried from is in the tooltip. */}
           {task.carriedFrom && (
             <span
-              title={`Added the week of ${fullDay(task.carriedFrom)}`}
+              title={`Carried from the week of ${fullDay(task.carriedFrom)}`}
               className="mt-0.5 shrink-0 rounded-full border border-hairline px-1.5 py-px
                 text-[10px] font-medium text-muted"
             >
@@ -1084,11 +1087,13 @@ function TaskDialog({
   task,
   projects,
   dark,
+  thisYear,
   onClose,
 }: {
   task: Task;
   projects: Project[];
   dark: boolean;
+  thisYear: string;
   onClose: () => void;
 }) {
   const { update, remove } = useTaskActions();
@@ -1101,6 +1106,7 @@ function TaskDialog({
   );
   const [addedOn, setAddedOn] = useState(task.addedOn);
   const [weekOf, setWeekOf] = useState(task.weekOf);
+  const carriedFrom = task.carriedFrom && dayInYear(task.carriedFrom, thisYear);
   const [startDate, setStartDate] = useState(task.startDate ?? '');
   const [targetDate, setTargetDate] = useState(task.targetDate ?? '');
   const [completedOn, setCompletedOn] = useState(task.completedOn ?? '');
@@ -1241,8 +1247,8 @@ function TaskDialog({
             <Field
               label="Week of"
               hint={
-                task.carriedFrom
-                  ? `Added the week of ${dayLabel(task.carriedFrom)}. Any day works.`
+                carriedFrom
+                  ? `Carried from the week of ${carriedFrom}. Any day works.`
                   : 'Any day works: it files under that week’s Monday.'
               }
             >

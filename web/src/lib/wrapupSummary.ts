@@ -1,10 +1,12 @@
 import type { TaskStatus } from '../api';
 import type { WrapUpDay, WrapUpWeek } from '../wrapup';
+import { duration } from './format';
 
 /*
  * The text a wrap-up pastes into a chat. Plain functions of what the server said, with
- * nothing to import at run time, so the same code runs in the browser and in the test
- * suite, which loads this file by its path (the web app has no test runner of its own).
+ * nothing to import at run time but the plain `format.ts`, so the same code runs in the
+ * browser and in the test suite, which loads this file by its path (the web app has no
+ * test runner of its own).
  */
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -18,19 +20,12 @@ const STATUS_WORDS: Record<TaskStatus, string> = {
 };
 
 /**
- * How long, the way every other screen says it: "1h 25m", "45m", "2h". The minutes are
- * rounded before they are split into hours, so 1h 59m 40s reads 2h and never 1h 60m.
- * Under a minute it is seconds, and nothing at all is 0m.
+ * How long, the way every other screen says it: "1h 25m", "45m", "2h", seconds under a
+ * minute, and 0m for nothing. It is `duration`, the one every screen uses and not a copy of
+ * it, so a figure in the pasted summary cannot read differently from the same figure on the
+ * page (two copies of the rule did, once: one said 1h 60m for 1h 59m 40s).
  */
-export function span(seconds: number): string {
-  const total = Math.max(0, Math.round(seconds));
-  if (total < 60) return total === 0 ? '0m' : `${total}s`;
-  const minutes = Math.round(total / 60);
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  if (h === 0) return `${m}m`;
-  return m === 0 ? `${h}h` : `${h}h ${m}m`;
-}
+export const span = (seconds: number): string => duration(seconds);
 
 /**
  * "Mon Oct 12", spelled the same whatever the viewer's locale: this is pasted into

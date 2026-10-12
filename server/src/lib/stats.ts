@@ -144,8 +144,11 @@ function rowsForRange(from: string, to: string): SessionRow[] {
 export function dayStats(day: string): DayStats {
   const rows = rowsForRange(day, day);
   const focusRows = rows.filter((r) => r.kind === 'focus' && r.status !== 'abandoned');
-  const ratings = rows.map((r) => r.focus_rating).filter((r): r is number => r != null);
-  const scores = rows.map(focusScore).filter((s): s is number => s != null);
+  // The averages are of the same blocks the time is: a rating given to a break, or to a block
+  // that was thrown away, says nothing about how focused the work was. The wrap-up counts the
+  // same ones, so the two screens give one figure for one day.
+  const ratings = focusRows.map((r) => r.focus_rating).filter((r): r is number => r != null);
+  const scores = focusRows.map(focusScore).filter((s): s is number => s != null);
   return {
     day,
     focusSeconds: focusRows.reduce((a, r) => a + r.active_seconds, 0),
@@ -254,15 +257,18 @@ export interface InterruptionStats {
 
 /**
  * What pulled you away from your focus blocks in a window. Breaks are not counted, being
- * interrupted on a rest is not the thing this is about, and neither status matters: a block
- * that was abandoned was still interrupted.
+ * interrupted on a rest is not the thing this is about, and no status matters: a block that
+ * was abandoned, or is still on the clock, was interrupted all the same.
  *
- * `total` is what the blocks' own counts add up to, the figure every other screen reads, and
- * the reasons are read against it. A block's rows are only counted up to its count, oldest
- * first, so a count lowered by hand (the block editor's API can do that without touching
- * the rows) cannot show more interruptions here than the block has. What the reasons do not
- * account for is `unspecified` (blocks from before reasons, and interruptions logged with
- * none), so that is worked out last, as the remainder, and the three always add up.
+ * `total` is what the focus blocks' own counts add up to, and the reasons are read against
+ * it. It is not the number on Today's Interruptions tile (`DayStats.interruptions`), which
+ * adds up every block of the day, a break included: the two differ by whatever was logged on
+ * a break. A block's rows are only counted up to its count, oldest first, so a block whose
+ * rows outnumber its count (the editor takes the rows down with the count now, but a count
+ * could once be lowered and leave them) cannot show more interruptions here than it has.
+ * What the reasons do not account for is `unspecified` (blocks from before reasons, and
+ * interruptions logged with none), so that is worked out last, as the remainder, and the
+ * three always add up.
  */
 export function interruptionStats(from: string, to: string): InterruptionStats {
   const { total } = db
@@ -356,13 +362,14 @@ interface EstimateRow {
  * Your guesses set against what the work took, over a window of days.
  *
  * A block counts when it is a focus block that was completed (a discarded block says
- * nothing about how long the work takes, and a break is not work), has an estimate, and
- * was worked on a day in the window; its actual is its active seconds. A task counts when
- * it is completed on a day in the window, has an estimate, and has focus time logged on
- * it, counted by the same rule the Tasks tab uses for its Logged column (LOGGED_ON_TASKS):
- * one with an estimate and no time logged has no actual to compare. Each is a ratio of
- * actual to estimate, and a bucket's figure is the median of its ratios: one marathon
- * block cannot drag a typical guess far, as it would an average.
+ * nothing about how long the work takes, and a break is not work), has an estimate, has
+ * some time on it (a block of no seconds has no actual to compare, as a task with nothing
+ * logged has none), and was worked on a day in the window; its actual is its active
+ * seconds. A task counts when it is completed on a day in the window, has an estimate, and
+ * has focus time logged on it, counted by the same rule the Tasks tab uses for its Logged
+ * column (LOGGED_ON_TASKS): one with an estimate and no time logged has no actual to
+ * compare. Each is a ratio of actual to estimate, and a bucket's figure is the median of
+ * its ratios: one marathon block cannot drag a typical guess far, as it would an average.
  *
  * A block is filed under the project of the block and a task under the project of the
  * task, which can differ, since a block can be billed elsewhere than the task it is on.
@@ -375,7 +382,7 @@ export function estimateStats(from: string, to: string): EstimateStats {
        FROM sessions s
        LEFT JOIN projects p ON p.id = s.project_id
        WHERE s.kind = 'focus' AND s.status = 'completed' AND s.estimated_minutes IS NOT NULL
-         AND s.local_day BETWEEN ? AND ?`,
+         AND s.active_seconds > 0 AND s.local_day BETWEEN ? AND ?`,
     )
     .all(from, to) as EstimateRow[];
   const taskRows = db

@@ -1,5 +1,7 @@
+import { useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, qs, request, type ProjectSlice, type Session, type TaskStatus } from './api';
+import { useActiveSession } from './hooks';
 
 /* ------------------------------------------------------------------- shapes */
 
@@ -128,6 +130,31 @@ export function useWrapUpWeek(week: string | undefined, { poll = false }: { poll
   });
 }
 
+/**
+ * Read the wrap-up again whenever the block on the clock changes: another one is started, or
+ * this one is paused, resumed or stopped, from the menu bar or another window. Every figure
+ * here counts the block live, so the moment it changes they are wrong, and the polling above
+ * only runs while one is running: once it has stopped nothing would read the page again, and
+ * it would go on saying the block is still on the clock. Watches the live-session query the
+ * whole app shares, which is polled and read again when the window gets the focus, so a change
+ * is noticed within that time. The first answer is not a change: it is what the page opened on.
+ */
+export function useRefreshWhenTheClockChanges() {
+  const qc = useQueryClient();
+  const { data } = useActiveSession();
+  const session = data?.session;
+  // What is on the clock, in a word: undefined until the first answer, so that is not a change.
+  const now =
+    data === undefined ? undefined : `${session?.id ?? 'none'}:${session?.status ?? 'none'}`;
+  const seen = useRef(now);
+  useEffect(() => {
+    const was = seen.current;
+    seen.current = now;
+    if (now === undefined || was === undefined || was === now) return;
+    void qc.invalidateQueries({ queryKey: wrapUpKeys.all });
+  }, [now, qc]);
+}
+
 export function useWrapUpActions() {
   const qc = useQueryClient();
   // The reply to each save is the whole day or week again, so it goes straight into the
@@ -169,8 +196,17 @@ export function useWrapUpActions() {
     // the wrap-up shows of the task, and the Tasks tab itself, both have to hear about it,
     // and useTaskActions only tells the second.
     setTaskStatus: useMutation({
-      mutationFn: ({ id, status }: { id: number; status: TaskStatus }) =>
-        api.updateTask(id, { status }),
+      // `completedOn` is for finishing a task on a day other than today: left out, the server
+      // stamps today.
+      mutationFn: ({
+        id,
+        status,
+        completedOn,
+      }: {
+        id: number;
+        status: TaskStatus;
+        completedOn?: string;
+      }) => api.updateTask(id, completedOn ? { status, completedOn } : { status }),
       onSuccess: () => {
         refresh();
         void qc.invalidateQueries({ queryKey: ['tasks'] });

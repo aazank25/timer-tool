@@ -149,10 +149,14 @@ interface Summary {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   weekSummary(view: any, note: string | null): string;
 }
+interface Format {
+  duration(seconds: number, opts?: { zero?: string }): string;
+}
 const webLib = (name: string) =>
   import(new URL(`../../web/src/lib/${name}.ts`, import.meta.url).href);
 const weeksLib = () => webLib('weeks') as Promise<Weeks>;
 const summaryLib = () => webLib('wrapupSummary') as Promise<Summary>;
+const formatLib = () => webLib('format') as Promise<Format>;
 
 /* ------------------------------------------------------------------ over HTTP */
 
@@ -441,6 +445,48 @@ describe('the wrap-up over the API', () => {
       assert.equal(live.loggedSeconds, 1200);
     });
 
+    it('puts the tasks in the order of the time put on them today, not of all that is logged on them', async () => {
+      const bigHistory = await task('Long history');
+      const fresh = await task('Fresh today');
+      // Three hours yesterday and ten minutes today, against one hour today and nothing before: the
+      // task with the longer history is ahead in all, and behind today.
+      await logBlock('2026-10-11T12:00:00.000Z', 3 * 3600, { taskId: bigHistory.id });
+      await logBlock(`${MON}T09:00:00.000Z`, 600, { taskId: bigHistory.id });
+      await logBlock(`${MON}T10:00:00.000Z`, 3600, { taskId: fresh.id });
+
+      const view = await getDay(MON);
+      assert.deepEqual(titles(view.tasks), ['Fresh today', 'Long history']);
+      assert.deepEqual(
+        view.tasks.map((t: { secondsToday: number; loggedSeconds: number }) => [
+          t.secondsToday,
+          t.loggedSeconds,
+        ]),
+        [
+          [3600, 3600],
+          [600, 3 * 3600 + 600],
+        ],
+      );
+    });
+
+    it('shows the same average focus as Today does for a day with rated breaks and discarded blocks', async () => {
+      const { dayStats } = await statsMod();
+      await logBlock(`${MON}T09:00:00.000Z`, 1800, { title: 'Good', rating: 5 });
+      await logBlock(`${MON}T10:00:00.000Z`, 1800, { title: 'Fine', rating: 3 });
+      // Rated low, so an average that took them in would show it.
+      await logBlock(`${MON}T11:00:00.000Z`, 600, { title: 'Rest', rating: 1, kind: 'break' });
+      await logBlock(`${MON}T12:00:00.000Z`, 600, {
+        title: 'Gone',
+        rating: 1,
+        status: 'abandoned',
+      });
+
+      const view = await getDay(MON);
+      const today = dayStats(MON);
+      assert.equal(view.avgFocusRating, 4);
+      assert.equal(today.avgFocusRating, view.avgFocusRating);
+      assert.equal(today.ratedBlocks, 2);
+    });
+
     it('saves a note, trims it, and clears it with null or blank text', async () => {
       assert.equal((await getDay(MON)).note, null);
 
@@ -662,6 +708,51 @@ describe('the wrap-up over the API', () => {
       );
     });
 
+    it('puts a block on the day it felt like in a timezone that is not UTC, in the day and in the week', async () => {
+      const { setSettings } = await settingsMod();
+      setSettings({ timezone: 'America/New_York', day_start_hour: 4 });
+      // October is EDT, four hours behind UTC. Each is the instant of the wall clock beside it, and
+      // the day starts at 04:00, so what is begun before then is still the day before.
+      await logBlock('2026-10-13T03:30:00.000Z', 1800, { title: 'Mon 23:30' }); // Monday 12th
+      await logBlock('2026-10-13T07:30:00.000Z', 900, { title: 'Tue 03:30' }); // still Monday 12th
+      await logBlock('2026-10-13T08:30:00.000Z', 600, { title: 'Tue 04:30' }); // Tuesday 13th
+      await logBlock('2026-10-19T02:00:00.000Z', 1200, { title: 'Sun 22:00' }); // Sunday 18th
+      await logBlock('2026-10-12T07:30:00.000Z', 300, { title: 'Mon 03:30' }); // Sunday 11th
+
+      // The day: by the day it felt like, which is not the UTC date of when it began.
+      const monday = await getDay(MON);
+      assert.deepEqual(titles(monday.sessions), ['Mon 23:30', 'Tue 03:30']);
+      assert.equal(monday.focusSeconds, 2700);
+      assert.deepEqual(titles((await getDay(TUE)).sessions), ['Tue 04:30']);
+      assert.deepEqual(titles((await getDay('2026-10-11')).sessions), ['Mon 03:30']);
+      assert.deepEqual(titles((await getDay('2026-10-18')).sessions), ['Sun 22:00']);
+
+      // The week: the same blocks in the same columns, and the Sunday evening block in the last
+      // one although by the UTC date it began on the Monday after.
+      const week = await getWeek(MON);
+      assert.deepEqual(
+        week.days.map((d: { day: string; focusSeconds: number; blocks: number }) => [
+          d.day,
+          d.focusSeconds,
+          d.blocks,
+        ]),
+        [
+          [MON, 2700, 2],
+          [TUE, 600, 1],
+          [WED, 0, 0],
+          ['2026-10-15', 0, 0],
+          ['2026-10-16', 0, 0],
+          ['2026-10-17', 0, 0],
+          ['2026-10-18', 1200, 1],
+        ],
+      );
+      assert.equal(week.focusSeconds, 2700 + 600 + 1200);
+      assert.equal(week.activeDays, 3);
+      // The block of the Sunday 11th is last week's, whichever UTC day it began on.
+      const before = await getWeek('2026-10-05');
+      assert.equal(before.days[6].focusSeconds, 300);
+    });
+
     it('is a week of zeros, not an error, when nothing was done', async () => {
       const view = await getWeek('2026-08-03');
       // The shape other screens and reminders are written against, so a field is not lost quietly.
@@ -804,6 +895,52 @@ describe('the wrap-up over the API', () => {
       }
     });
 
+    it('lists a task that was carried under the week it was carried into, and not under the one it left', async () => {
+      const slipped = await task('Slipped', { addedOn: '2026-10-07' }); // last week's sheet
+      await task('This week own', { addedOn: MON });
+      const LAST = '2026-10-05';
+      assert.deepEqual(titles((await getWeek(LAST)).unfinished), ['Slipped']);
+      assert.deepEqual(titles((await getWeek(MON)).unfinished), ['This week own']);
+
+      freeze(`${WED}T12:00:00.000Z`);
+      const carried = await api.call('POST', '/tasks/carry-over');
+      assert.deepEqual(carried.body, { carried: 1, weekOf: MON });
+      // Added in last week, and sitting in this one now: this one's, at the bottom of its band.
+      assert.deepEqual(titles((await getWeek(LAST)).unfinished), []);
+      assert.deepEqual(titles((await getWeek(MON)).unfinished), ['This week own', 'Slipped']);
+      assert.equal((await getWeek(MON)).unfinished[1].id, slipped.id);
+
+      // Filed under another week by hand, in an edit: the same, whichever week it was added in.
+      const pushed = await task('Pushed', { addedOn: TUE });
+      const back = await task('Filed back', { addedOn: WED });
+      assert.equal(
+        (await api.call('PATCH', `/tasks/${pushed.id}`, { weekOf: '2026-10-21' })).status,
+        200,
+      );
+      assert.equal((await api.call('PATCH', `/tasks/${back.id}`, { weekOf: LAST })).status, 200);
+      assert.deepEqual(titles((await getWeek(MON)).unfinished), ['This week own', 'Slipped']);
+      assert.deepEqual(titles((await getWeek('2026-10-19')).unfinished), ['Pushed']);
+      assert.deepEqual(titles((await getWeek(LAST)).unfinished), ['Filed back']);
+    });
+
+    it('does not list as completed a task that is open, whatever completion day it carries', async () => {
+      const { updateTask } = await tasksMod();
+      // The day can be typed in whatever the status is, so a day in the week does not make it done.
+      await task('Open, with a day', { status: 'in_progress', completedOn: WED, addedOn: MON });
+      const reopened = await task('Reopened', {
+        status: 'completed',
+        completedOn: WED,
+        addedOn: MON,
+      });
+      updateTask(reopened.id, { status: 'held_up', completedOn: WED });
+      await task('Really done', { status: 'completed', completedOn: WED, addedOn: MON });
+
+      const view = await getWeek(MON);
+      assert.deepEqual(titles(view.completed), ['Really done']);
+      assert.deepEqual(titles(view.unfinished), ['Open, with a day', 'Reopened']);
+      assert.equal(view.completed.length, 1);
+    });
+
     it('keeps the week unfinished list in the order the tasks sheet shows it', async () => {
       await task('Low one', { priority: 'low', addedOn: MON });
       await task('High one', { priority: 'high', addedOn: MON });
@@ -860,6 +997,34 @@ describe('the wrap-up over the API', () => {
       assert.equal(await api.status('PUT', `/wrapup/week/${MON}`, { note: 'x'.repeat(501) }), 400);
       assert.equal(await api.status('PUT', `/wrapup/week/${MON}`, {}), 400);
       assert.equal((await getWeek(MON)).note, 'x'.repeat(500));
+    });
+
+    it('files a review marked from the Sunday that ends the week under that week, not the next', async () => {
+      const { db } = await dbMod();
+      const { isWeekReviewed } = await wrapupMod();
+      const SUN = '2026-10-18';
+      const NEXT = '2026-10-19';
+      freeze(`${SUN}T20:00:00.000Z`);
+
+      const done = await api.call('POST', `/wrapup/week/${SUN}/done`);
+      assert.equal(done.status, 200);
+      assert.equal(done.body.week, MON);
+      assert.equal(done.body.reviewedAt, `${SUN}T20:00:00.000Z`);
+      assert.equal((await getWeek(MON)).reviewedAt, `${SUN}T20:00:00.000Z`);
+      assert.equal((await getWeek(NEXT)).reviewedAt, null);
+      assert.equal(isWeekReviewed(SUN), true);
+      assert.equal(isWeekReviewed(NEXT), false);
+
+      // A note written on the Sunday is the same week's too, and the Monday after is its own.
+      const note = await api.call('PUT', `/wrapup/week/${SUN}`, { note: 'From the Sunday' });
+      assert.equal(note.body.week, MON);
+      assert.equal((await getWeek(MON)).note, 'From the Sunday');
+      assert.equal((await getWeek(NEXT)).note, null);
+      assert.equal((await api.call('POST', `/wrapup/week/${NEXT}/done`)).body.week, NEXT);
+      assert.deepEqual(db.prepare('SELECT week FROM week_reviews ORDER BY week').all(), [
+        { week: MON },
+        { week: NEXT },
+      ]);
     });
 
     it('refuses a week that is not a real YYYY-MM-DD, and writes nothing for it', async () => {
@@ -1124,6 +1289,67 @@ describe('the wrap-up over the API', () => {
         wrapup_time: '06:45',
       });
     });
+  });
+});
+
+/* --------------------------------------------------------- how a length of time reads */
+
+describe('how a length of time is written', () => {
+  it('rounds to whole minutes before it splits them into hours, so nothing reads 60m', async () => {
+    const { duration } = await formatLib();
+    const cases: [number, string][] = [
+      [7190, '2h'], // 1h 59m 50s
+      [7199, '2h'],
+      [7170, '2h'], // 1h 59m 30s: the half minute rounds up
+      [7169, '1h 59m'],
+      [7200, '2h'],
+      [3600, '1h'],
+      [3599, '1h'], // 59m 59s
+      [3570, '1h'], // 59m 30s
+      [3569, '59m'],
+      [3540, '59m'],
+      [3509, '58m'],
+      [5400, '1h 30m'],
+      [3660, '1h 1m'],
+      [2700, '45m'],
+      [90, '2m'],
+      [89, '1m'],
+      [60, '1m'],
+      [59, '59s'],
+      [1, '1s'],
+      [59.6, '1m'], // rounds to a whole second first, and a whole second is a minute
+      [0.4, '0m'],
+      [0, '0m'],
+      [-5, '0m'],
+    ];
+    for (const [seconds, text] of cases) assert.equal(duration(seconds), text, `${seconds} s`);
+
+    // For every second of a day: never 60 minutes, and the minutes beside an hour are 1 to 59.
+    for (let seconds = 0; seconds <= 86_400; seconds++) {
+      const text = duration(seconds);
+      assert.match(text, /^(\d+s|\d+m|\d+h|\d+h [1-9]\d?m)$/, `${seconds} s: ${text}`);
+      assert.doesNotMatch(text, /(^|\D)60m/, `${seconds} s: ${text}`);
+    }
+  });
+
+  it('uses the words it is given for no time at all, and only for that', async () => {
+    const { duration } = await formatLib();
+    assert.equal(duration(0, { zero: '—' }), '—');
+    assert.equal(duration(0.4, { zero: '—' }), '—');
+    assert.equal(duration(-1, { zero: '—' }), '—');
+    assert.equal(duration(30, { zero: '—' }), '30s');
+    assert.equal(duration(0), '0m');
+  });
+
+  it('is written the same in the summary as on every screen, for every second to a day and a bit', async () => {
+    const { duration } = await formatLib();
+    const { span } = await summaryLib();
+    for (let seconds = 0; seconds <= 100_000; seconds++) {
+      assert.equal(span(seconds), duration(seconds), `${seconds} s`);
+    }
+    // And the lengths that were wrong on the screens, in the summary's own words.
+    assert.equal(span(7190), '2h');
+    assert.equal(span(3570), '1h');
   });
 });
 

@@ -17,6 +17,7 @@ import {
   startSession,
   stopSession,
   toView,
+  trimInterruptionRows,
 } from '../lib/sessions.js';
 import { requireProject, requireTask, startTaskForLinkedBlock } from '../lib/tasks.js';
 import { focusDay, nowIso } from '../lib/time.js';
@@ -222,6 +223,8 @@ sessionsRouter.patch(
         args.push(nowIso(), id);
         db.prepare(`UPDATE sessions SET ${sets.join(', ')} WHERE id = ?`).run(...args);
       }
+      // The rows of interruptions follow the count down, in the same transaction as it.
+      if (body.interruptions !== undefined) trimInterruptionRows(id, body.interruptions);
     })();
     return toView(getSessionRow(id));
   }),
