@@ -390,6 +390,32 @@ export function extendSession(id: number, minutes: number): SessionView {
   return toView(getSessionRow(id));
 }
 
+export interface SwitchInput {
+  /** The block to start, exactly as `startSession` takes it. */
+  start: StartInput;
+  /** How the block being left went. Nothing to rate when nothing is on the clock. */
+  rating?: number | null;
+}
+
+/**
+ * Finish the block on the clock and start another in one step: the quick-switch box.
+ * Whatever is live, running or paused, is completed (with the rating when there is
+ * one) and then the new block goes through `startSession`, so every rule for starting
+ * one applies unchanged. All of it is one transaction: a start that is refused (a task
+ * or project that is not there, a stopwatch given a length) rolls the completion back
+ * with it, and the block that was on the clock is left exactly as it was.
+ */
+export function switchSession(input: SwitchInput): {
+  stopped: SessionView | null;
+  started: SessionView;
+} {
+  return db.transaction(() => {
+    const live = liveSessionRow();
+    const stopped = live ? stopSession(live.id, 'completed', { focusRating: input.rating }) : null;
+    return { stopped, started: startSession(input.start) };
+  })();
+}
+
 /** Log a block that happened away from the timer. */
 export function logManualSession(input: {
   projectId?: number | null;

@@ -1,9 +1,33 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { normalizeAccelerator } from '../lib/accelerator.js';
 import { handler, parse } from '../lib/http.js';
 import { allSettings, setSettings } from '../lib/settings.js';
 
 export const settingsRouter = Router();
+
+/**
+ * '' turns the shortcut off. Anything else has to be a combination Electron will read as it
+ * was typed, and is kept in the one spelling normalizeAccelerator gives it. Refused here, not
+ * left to the app that registers it: Electron drops a name it does not know and registers
+ * what is left, so a typo would go on to grab some other key in every app.
+ */
+const hotkey = z
+  .string()
+  .max(80)
+  .transform((value, ctx) => {
+    if (value.trim() === '') return '';
+    const accelerator = normalizeAccelerator(value);
+    if (accelerator === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'Use one or more modifiers and one key joined with +, like CommandOrControl+Shift+K, or leave it empty to turn the shortcut off',
+      });
+      return z.NEVER;
+    }
+    return accelerator;
+  });
 
 /** Values are stored as strings; keys not listed here are rejected. */
 const schema = z
@@ -16,6 +40,7 @@ const schema = z
     daily_target_minutes: z.coerce.number().int().min(0).max(1440),
     autostart_breaks: z.union([z.boolean(), z.enum(['true', 'false'])]),
     default_timer_mode: z.enum(['stopwatch', 'pomodoro']),
+    quick_switch_hotkey: hotkey,
     day_start_hour: z.coerce.number().int().min(0).max(12),
   })
   .partial();

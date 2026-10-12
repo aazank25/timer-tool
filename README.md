@@ -40,6 +40,13 @@ To run it without packaging, for a quick look: `npm run desktop`.
   the window.
 - **Closing the window doesn't stop the clock** — the app parks in the menu bar
   and keeps counting. Quit properly from the menu-bar item or ⌘Q.
+- **Quick switch.** ⌘⇧K, from any app, pops a small box over whatever you are
+  doing. Type a few letters of a task or saved timer and press Enter: the block
+  on the clock is finished and the new one starts, and the box is gone and you
+  are back where you were. If a block was running it asks how it went first
+  (1–5, or Enter to skip). Escape backs out. It works whenever FocusDesk is
+  running, with its window open or not. Change the shortcut, or turn it off, in
+  Settings → Quick switch.
 - **Global hotkeys.** ⌘⇧F shows the window; ⌘⇧Space pauses or resumes the
   running block from anywhere.
 - **Launch at login**, off by default — the menu-bar item has the toggle.
@@ -128,6 +135,22 @@ reinstalling it never touches your history.
 project + task pairs you keep returning to, so it is useful on day two without
 anyone curating it; pin one to hold it at the top.
 
+**Quick switch** is the faster one, for moving between things without going back
+to the window: ⌘⇧K, a few letters, Enter. It searches your open tasks and saved
+timers by title and project, best match first; when nothing fits, the last row
+starts a new block with what you typed. Starting a task files the block under
+the task's project and moves the task along, exactly as starting it from the
+Tasks tab does. Finishing the old block and starting the new one is one step on
+the server, so a start that is refused (a task deleted in the meantime) leaves
+the block you were on running, as it was.
+
+An app cannot be told that another app already owns a keyboard shortcut, so if
+pressing yours does nothing, pick another in Settings. What you type there is
+checked against the key names Electron documents (one it does not know would be
+dropped without a word, and the rest registered, so a typo would grab some other
+key), and the card shows the shortcut that is really registered, or why a new
+one could not be.
+
 **Tasks** are the weekly priorities list that replaces a spreadsheet: a row for
 each thing that needs doing, with its project (or none), priority, status,
 target date and estimate, grouped by the week it was added. Press ▶ on a row, or
@@ -170,15 +193,20 @@ Note that a published ICS feed can lag the real calendar by hours; see
 ```
 server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
   src/app.ts    boots the API and client on a port; embedded by the desktop app
-  src/lib/      sessions (timer), tasks, stats (rollups), calendar (ICS), time, settings
+  src/lib/      sessions (timer, and quick switch's stop-and-start), tasks, stats
+                (rollups), calendar (ICS), time, settings, accelerator (the
+                shortcut rule)
   src/routes/   projects, sessions, tasks, timers, plan, stats, settings, calendar
   test/         timer accounting, stopwatch, saved-timer mode, day boundaries,
                 rollups, ICS parsing, migration and backup; tasks (status dates,
                 logged time, validation, ordering and moves, linking a block
-                later, migration 4)
-web/      React + Vite + Tailwind. Focus · Today · Tasks · Projects · Review · Settings
+                later, migration 4); switch (quick switch, the shortcut rule)
+web/      React + Vite + Tailwind. Focus · Today · Tasks · Projects · Review · Settings,
+          and the quick-switch box at /palette, which has no chrome of its own
 desktop/  Electron shell: menu-bar clock, hotkeys, packaging
   main.mjs      window, tray, shortcuts; starts the server in-process
+  palette.mjs   the quick-switch window: frameless, raised over other apps
+  preload.cjs   the three calls a page may make of the shell (CommonJS on purpose)
   scripts/      icon generator and payload bundler (no binaries in git)
 docs/     PLAN.md — the model, what's built, and what's next
 ```

@@ -1,5 +1,6 @@
-import { NavLink, Route, Routes, useNavigate } from 'react-router-dom';
+import { NavLink, Route, Routes, useMatch, useNavigate } from 'react-router-dom';
 import { FocusPage } from './pages/Focus';
+import { PalettePage } from './pages/Palette';
 import { ProjectsPage } from './pages/Projects';
 import { ReviewPage } from './pages/Review';
 import { SettingsPage } from './pages/Settings';
@@ -71,6 +72,9 @@ const TABS = [
 
 export default function App() {
   const [, , dark] = useTheme();
+  // The quick-switch box is a window of its own, not a screen of the app: no rail, no clock bar.
+  const standalone = useMatch('/palette');
+  if (standalone) return <PalettePage dark={dark} />;
 
   return (
     <div className="flex min-h-full">
