@@ -257,14 +257,26 @@ moment it stops being true.
   yours to decide: **Keep it**, or **Drop 40 min**, which takes exactly that
   stretch off the block. A running block keeps running; a paused or finished one is
   corrected the same way; time that was paused anyway costs it nothing. Reports of
-  the same absence merge into one, and a stretch you have answered never comes back.
+  the same absence merge into one, and a stretch you have answered never comes back:
+  a later report of an absence that overlaps it holds only what is new. Setting a
+  block's time by hand (typing it in, giving it when you finish, moving the block)
+  answers the stretches still waiting on it, since you have said what the time was.
+  An away stretch that is not from today names its day.
 - **A block left running.** Once the running block has worked
   `long_block_minutes` (two hours unless you change it) it asks *Still on …?* —
-  **Finish block** opens the finish dialog, **Keep going** hides the question until
-  the next multiple (four hours, six…). 0 turns it off.
+  **Finish block** opens the finish dialog for that block, **Keep going** hides the
+  question until the next multiple (four hours, six…), and covers the ones below it
+  too. 0 turns it off.
 - **Meetings**, from a synced calendar. When one starts while a block is running:
-  *Pause … for it?* When it ends: log it as a block linked to the meeting, and
-  pick the block you paused back up, in one click. A meeting is never logged twice.
+  *Pause … for it?* (only that block is paused: if you switched to another while the
+  question was up, it is not). When it ends: log it as a block linked to the meeting,
+  and pick the block you paused back up, in one click. Only the part of the meeting
+  that is not on a block already is logged, from the first moment of it: a block you
+  paused 14 minutes into a half-hour meeting leaves *Log 16m*, and one that ran all
+  through it leaves nothing to log. A meeting is never logged twice: one that has time
+  on it already is refused (a 409), by the prompt and by logging it by hand alike.
+  A meeting that is moved after it was handled counts as a new one and can be logged
+  again.
 - **The end of the day.** From `wrapup_time` (17:30 unless you change it; empty
   turns it off), on a work day that has had focus time on it and has not been
   wrapped up: *Time to wrap up the day*, naming the focused time so far. **Wrap up**
@@ -301,17 +313,27 @@ Settings → Calendar. Paste a private ICS feed URL — no OAuth app needed:
 - **Outlook / Microsoft 365** — Calendar → Share → Publish a calendar → *Can
   view all details* → copy the ICS link
 
-Recurring meetings are expanded. Attribute a meeting to a project once and later
-instances of the same meeting inherit it, and a sync never undoes that. You can log
-a meeting as time spent, which links the block to it so the meeting shows what was
-logged and cannot be logged twice by a second click, or add it to the day's plan.
+Recurring meetings are expanded. Attribute a meeting to a project once and the
+instances of it that turn up in later syncs take it (from the same series, or else a
+meeting of exactly the same name in the same calendar, never another's), and a sync
+never changes the project of a meeting that is there already: not one you gave it, not
+one you took off. You can log a meeting as time spent, which links the block to it so
+the meeting shows what was logged and cannot be logged twice, or add it to the day's
+plan.
 
 The feed is re-read in the background, soon after start-up and then every 15
 minutes while one is connected, so the meeting prompts are working from fresh
 events; **Sync now** is still there for when you cannot wait.
 
+A feed that answers with something that is not a calendar (an error page, an empty
+answer, a download that stopped short) is left alone: the sync says so, and nothing is
+removed. A feed whose calendar is empty keeps the meetings it had.
+
 That URL is a secret — anyone holding it can read the calendar. It is stored in
-your local database and never sent back to the browser.
+your local database and never sent back to the browser, and it is never put in an
+error message or the log (a feed is named by its label). An address with a user name
+or password in it is refused: the private addresses Google and Outlook give out need
+neither.
 
 Note that a published ICS feed can lag the real calendar by hours; see
 [docs/PLAN.md](docs/PLAN.md) for the API-based alternative.
@@ -343,8 +365,9 @@ server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
                 long-block and meeting prompts, the new settings, migration 8;
                 reminders (the wrap-up, last-week and nothing-on-the-clock
                 prompts, across timezones and clock changes); calendar sync
-                (hand attribution, removals, one sync at a time) and the
-                background timer
+                (hand attribution, inheritance, feeds that are not calendars,
+                removals, one sync at a time, addresses that stay secret) and
+                the background timer, closing included
 web/      React + Vite + Tailwind. Focus · Today · Tasks · Projects · Review · Settings,
           the wrap-up pages (/wrap-up, /wrap-up/week) reached from Today and Review,
           and the quick-switch box at /palette, which has no chrome of its own; the

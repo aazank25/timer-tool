@@ -1,6 +1,7 @@
+import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
-import { mock } from 'node:test';
+import { afterEach, beforeEach, mock } from 'node:test';
 import { freshDb } from './setup.js';
 
 /** What the prompt, away and calendar tests share: a frozen clock, a clean database, the API. */
@@ -50,6 +51,44 @@ export async function reset() {
   });
   return db;
 }
+
+/**
+ * Fail every test in the describe block this is called in that logs an error. The engine
+ * catches a provider that throws, logs it and carries on without it, which looks just like
+ * a provider with nothing to ask: so a test that says "no prompt" has to say the provider
+ * did not crash as well, and this is how every one of them does. A test that expects an
+ * error mocks console.error itself, which takes the call before it gets here.
+ */
+export function failOnLoggedErrors(): void {
+  let logged: string[] = [];
+  let spy: { mock: { restore(): void } } | undefined;
+  beforeEach(() => {
+    logged = [];
+    spy = mock.method(console, 'error', (...args: unknown[]) => {
+      const text = args.map(String).join(' ');
+      // Node says once, through here, that the mock timers these tests use are experimental.
+      if (!text.includes('ExperimentalWarning')) logged.push(text);
+    });
+  });
+  afterEach(() => {
+    spy?.mock.restore();
+    assert.deepEqual(logged, [], 'console.error was called');
+  });
+}
+
+/** The id an away stretch is asked about under: its row, and the moment it was first reported. */
+export async function awayPromptId(rowId: number): Promise<string> {
+  const { db } = await import('../src/db.js');
+  const row = db.prepare('SELECT created_at FROM away_intervals WHERE id = ?').get(rowId) as
+    | { created_at: string }
+    | undefined;
+  if (!row) throw new Error(`There is no away stretch ${rowId}`);
+  return `away:${rowId}:${Date.parse(row.created_at)}`;
+}
+
+/** The id the start of a meeting is asked about under: the meeting, and the block it would pause. */
+export const startPromptId = (eventId: string, blockId: number): string =>
+  `meeting-start:${eventId}:${blockId}`;
 
 export async function makeProject(name: string, color = '#0ea5e9'): Promise<number> {
   const { db } = await import('../src/db.js');

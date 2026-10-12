@@ -1,8 +1,9 @@
 import { db } from '../db.js';
 import { badRequest, conflict } from './http.js';
 import { minutesShort, quoted } from './prompt-text.js';
-import { promptState, setPromptState } from './prompt-state.js';
+import { promptState, promptStates, setPromptState, type PromptState } from './prompt-state.js';
 import type { PromptAction, PromptProvider } from './prompts.js';
+import { gapsIn, toSpans, type Span } from './segments.js';
 import {
   liveSessionRow,
   logManualSession,
@@ -25,7 +26,9 @@ const START_WINDOW_MS = 15 * 60_000;
 /** A meeting that ended longer ago than this is too old to be asked about. */
 const END_WINDOW_MS = 60 * 60_000;
 /** The longest block a person can log by hand, which is as long as a meeting is logged. */
-const MAX_LOG_MINUTES = 12 * 60;
+const MAX_LOG_SECONDS = 12 * 60 * 60;
+/** Less than this is not worth a block of its own. */
+const MIN_LOG_MS = 60_000;
 
 interface EventRow {
   id: string;
@@ -45,36 +48,68 @@ const meetingPromptsOn = () => getSetting('meeting_prompts') === 'true';
 const nameOf = (e: EventRow) => (e.title ?? '').trim() || '(untitled)';
 
 /**
- * Timed events that began before now and ended no longer ago than the end window: every
- * event either prompt could be about. The bounds are loose and in SQL only to keep the
- * read small; each prompt then checks the instants properly.
+ * What is written down about a meeting when its start prompt or its end prompt is handled.
+ * It is kept under the meeting and not under the block the start prompt named, so that
+ * dismissing it dismisses it for the meeting, whichever block is on the clock.
  */
-function recentEvents(now: Date): EventRow[] {
-  return db
-    .prepare(`${EVENT} WHERE e.all_day = 0 AND e.ends_at >= ? AND e.starts_at <= ?`)
-    .all(iso(now.getTime() - END_WINDOW_MS - 60_000), iso(now.getTime() + 60_000)) as EventRow[];
-}
-
-/** Whether time has been logged on the meeting, by a block linked to it that was not thrown away. */
-function isLogged(eventId: string): boolean {
-  return !!db
-    .prepare("SELECT 1 FROM sessions WHERE calendar_event_id = ? AND status <> 'abandoned' LIMIT 1")
-    .get(eventId);
-}
+const startKey = (eventId: string) => `meeting-start:${eventId}`;
+const endKey = (eventId: string) => `meeting-end:${eventId}`;
 
 /**
- * The block that was paused for this meeting, if it is still paused. The start prompt wrote
- * its id down when it paused it; the block's start time goes with it because the id of a
- * deleted block can be given to a new one.
+ * Timed events that began no longer ago than the start window and have not ended: every
+ * event the start prompt could be about. The bounds are loose and in SQL only to keep the
+ * read small; the prompt then checks the instants properly.
  */
-function pausedFor(eventId: string): SessionRow | undefined {
-  const note = promptState(`meeting-start:${eventId}`);
+function startedEvents(now: Date): EventRow[] {
+  const t = now.getTime();
+  return db
+    .prepare(
+      `${EVENT} WHERE e.all_day = 0 AND e.starts_at >= ? AND e.starts_at <= ? AND e.ends_at >= ?`,
+    )
+    .all(iso(t - START_WINDOW_MS - 60_000), iso(t + 60_000), iso(t - 60_000)) as EventRow[];
+}
+
+/** Timed events that ended no longer ago than the end window, loosely, as above. */
+function endedEvents(now: Date): EventRow[] {
+  const t = now.getTime();
+  return db
+    .prepare(`${EVENT} WHERE e.all_day = 0 AND e.ends_at >= ? AND e.ends_at <= ?`)
+    .all(iso(t - END_WINDOW_MS - 60_000), iso(t + 60_000)) as EventRow[];
+}
+
+/** Which of these meetings have time logged on them, by a block linked to them that was not thrown away. */
+function loggedAmong(eventIds: string[]): Set<string> {
+  const logged = new Set<string>();
+  // Few enough at a time to stay inside what one statement can be given.
+  for (let at = 0; at < eventIds.length; at += 500) {
+    const chunk = eventIds.slice(at, at + 500);
+    const rows = db
+      .prepare(
+        `SELECT DISTINCT calendar_event_id AS id FROM sessions
+         WHERE status <> 'abandoned' AND calendar_event_id IN (${chunk.map(() => '?').join(',')})`,
+      )
+      .all(...chunk) as { id: string }[];
+    for (const row of rows) logged.add(row.id);
+  }
+  return logged;
+}
+
+const isLogged = (eventId: string): boolean => loggedAmong([eventId]).has(eventId);
+
+/**
+ * The block that was paused for a meeting, if it is still paused, given the note its start
+ * prompt wrote down when it paused it. The block's start time is in the note with its id
+ * because the id of a deleted block can be given to a new one.
+ */
+function pausedFor(note: PromptState | null | undefined): SessionRow | undefined {
   if (note?.status !== 'done' || typeof note.data?.sessionId !== 'number') return undefined;
   const block = db
     .prepare("SELECT * FROM sessions WHERE id = ? AND status = 'paused'")
     .get(note.data.sessionId) as SessionRow | undefined;
   return block && block.started_at === note.data.startedAt ? block : undefined;
 }
+
+const pausedForMeeting = (eventId: string) => pausedFor(promptState(startKey(eventId)));
 
 /** When the clock last started running, which is when a running block began to be in the way. */
 function runningSince(block: SessionRow): string {
@@ -88,6 +123,7 @@ function runningSince(block: SessionRow): string {
 
 export const meetingStartProvider: PromptProvider = {
   kind: 'meeting-start',
+  actionIds: ['pause', 'dismiss'],
 
   list(now) {
     if (!meetingPromptsOn()) return [];
@@ -96,119 +132,215 @@ export const meetingStartProvider: PromptProvider = {
     const since = Date.parse(runningSince(block));
     const t = now.getTime();
 
-    return (
-      recentEvents(now)
-        .filter((e) => {
-          const starts = Date.parse(e.starts_at);
-          return starts <= t && t - starts <= START_WINDOW_MS && t < Date.parse(e.ends_at);
-        })
+    const begun = startedEvents(now).filter((e) => {
+      const starts = Date.parse(e.starts_at);
+      return (
+        starts <= t &&
+        t - starts <= START_WINDOW_MS &&
+        t < Date.parse(e.ends_at) &&
         // A block that is the time spent on this very meeting is not in its way.
-        .filter((e) => block.calendar_event_id !== e.id && !promptState(`meeting-start:${e.id}`))
-        .map((e) => ({
-          id: `meeting-start:${e.id}`,
-          kind: 'meeting-start',
-          title: `${nameOf(e)} has started`,
-          body: `Pause ${quoted(block.title)} for it?`,
-          // It was not due until both were true: the meeting had begun and the clock was running.
-          createdAt: iso(Math.max(Date.parse(e.starts_at), since)),
-          actions: [
-            { id: 'pause', label: 'Pause block', primary: true },
-            { id: 'dismiss', label: 'Dismiss' },
-          ],
-        }))
-    );
+        block.calendar_event_id !== e.id
+      );
+    });
+    const handled = promptStates(begun.map((e) => startKey(e.id)));
+
+    return begun
+      .filter((e) => !handled.has(startKey(e.id)))
+      .map((e) => ({
+        // The block is in the id: "Pause Deep work?" must not pause whatever is on the clock
+        // by the time it is answered.
+        id: `${startKey(e.id)}:${block.id}`,
+        kind: 'meeting-start',
+        title: `${nameOf(e)} has started`,
+        body: `Pause ${quoted(block.title)} for it?`,
+        // It was not due until both were true: the meeting had begun and the clock was running.
+        createdAt: iso(Math.max(Date.parse(e.starts_at), since)),
+        actions: [
+          { id: 'pause', label: 'Pause block', primary: true },
+          { id: 'dismiss', label: 'Dismiss' },
+        ],
+      }));
   },
 
   act(id, action) {
+    // meeting-start:<event>:<block>. An event's id has colons of its own, so the block is
+    // what comes after the last one.
+    const rest = id.slice('meeting-start:'.length);
+    const cut = rest.lastIndexOf(':');
+    const eventId = rest.slice(0, cut);
+    const blockId = Number(rest.slice(cut + 1));
+    if (cut < 1 || !Number.isInteger(blockId)) throw conflict('That prompt is no longer current');
+
     if (action === 'dismiss') {
-      setPromptState(id, 'dismissed');
+      setPromptState(startKey(eventId), 'dismissed');
     } else if (action === 'pause') {
+      // Only the block the prompt named is paused for it.
       const block = liveSessionRow();
-      if (!block) throw conflict('That prompt is no longer current');
+      if (!block || block.id !== blockId || block.status !== 'running') {
+        throw conflict('That prompt is no longer current');
+      }
       pauseSession(block.id);
-      setPromptState(id, 'done', { sessionId: block.id, startedAt: block.started_at });
+      setPromptState(startKey(eventId), 'done', {
+        sessionId: block.id,
+        startedAt: block.started_at,
+      });
     } else {
       throw badRequest(`Unknown action: ${action}`);
     }
   },
 };
 
-/** The length a meeting is logged at: what was scheduled, as whole minutes, within what a block can be. */
-function loggedMinutes(e: EventRow): number {
-  const scheduled = (Date.parse(e.ends_at) - Date.parse(e.starts_at)) / 60_000;
-  return Math.min(MAX_LOG_MINUTES, Math.max(1, Math.round(scheduled)));
+/** The stretch a meeting is logged over: what was scheduled, and at least a minute of it. */
+function windowOf(e: EventRow): { from: number; to: number } {
+  const from = Date.parse(e.starts_at);
+  return { from, to: Math.max(Date.parse(e.ends_at), from + MIN_LOG_MS) };
 }
 
-/** Log the meeting as a finished block over its scheduled time, unless time is already logged on it. */
-function logMeeting(e: EventRow): void {
+/**
+ * The runs of every focus block that was not thrown away, near the stretch from `from` to
+ * `to`: what the meetings in it have to be set against. The bounds in SQL are a day wider
+ * each way, because the times of a block logged by hand can carry an offset and so do not
+ * sort as instants; they are compared exactly afterwards.
+ */
+function focusRuns(from: number, to: number): Span[] {
+  const day = 86_400_000;
+  return toSpans(
+    db
+      .prepare(
+        `SELECT g.started_at, g.ended_at
+         FROM sessions s JOIN session_segments g ON g.session_id = s.id
+         WHERE s.kind = 'focus' AND s.status <> 'abandoned'
+           AND s.started_at <= ? AND (s.ended_at IS NULL OR s.ended_at >= ?)
+           AND g.started_at <= ? AND (g.ended_at IS NULL OR g.ended_at >= ?)`,
+      )
+      .all(iso(to + day), iso(from - day), iso(to + day), iso(from - day)) as {
+      started_at: string;
+      ended_at: string | null;
+    }[],
+  );
+}
+
+/**
+ * What logging a meeting would add: the part of its scheduled time that no focus block was
+ * ticking through, as the first instant of it and how long all of it comes to. Time that is
+ * on a block already is not counted a second time, so a block that ran through the first 14
+ * minutes of a meeting leaves the other 16 to log, and one that ran all through it leaves
+ * nothing. Never more than a block can be, and null when less than a minute is left.
+ */
+function uncounted(
+  e: EventRow,
+  runs: Span[],
+  now: number,
+): { startsAt: number; seconds: number } | null {
+  const { from, to } = windowOf(e);
+  const near = runs.filter((s) => s.start < to && (s.end ?? now) > from);
+  const gaps = gapsIn(near, from, to, now);
+  const first = gaps[0];
+  const ms = gaps.reduce((sum, gap) => sum + (gap.end - gap.start), 0);
+  if (!first || ms < MIN_LOG_MS) return null;
+  return { startsAt: first.start, seconds: Math.min(MAX_LOG_SECONDS, Math.round(ms / 1000)) };
+}
+
+/** The length of the part to log, as the buttons and the question say it: "16m". */
+const lengthOf = (part: { seconds: number }) => minutesShort(Math.round(part.seconds / 60));
+
+/**
+ * Log the meeting as a finished block, unless time is logged on it already. It holds only
+ * the time that is not on a block already, from the first moment of it.
+ */
+function logMeeting(e: EventRow, now: Date): void {
   if (isLogged(e.id)) return;
+  const { from, to } = windowOf(e);
+  const part = uncounted(e, focusRuns(from, to), now.getTime());
+  // Everything it scheduled is on other blocks, so there is nothing to add.
+  if (!part) return;
   logManualSession({
     projectId: e.project_id,
     title: nameOf(e).slice(0, 300),
-    startedAt: iso(Date.parse(e.starts_at)),
-    minutes: loggedMinutes(e),
+    startedAt: iso(part.startsAt),
+    minutes: part.seconds / 60,
     calendarEventId: e.id,
   });
 }
 
 function resumePaused(eventId: string): void {
-  const paused = pausedFor(eventId);
+  const paused = pausedForMeeting(eventId);
   if (paused) resumeSession(paused.id);
 }
 
 export const meetingEndProvider: PromptProvider = {
   kind: 'meeting-end',
+  actionIds: ['log-resume', 'log', 'resume', 'dismiss'],
 
   list(now) {
     if (!meetingPromptsOn()) return [];
     const t = now.getTime();
 
-    return recentEvents(now).flatMap((e) => {
-      const ended = Date.parse(e.ends_at);
-      const id = `meeting-end:${e.id}`;
-      if (!(ended <= t && t - ended <= END_WINDOW_MS) || promptState(id)) return [];
-      const logged = isLogged(e.id);
-      const paused = pausedFor(e.id);
-      // Logged, and nothing left to pick back up: there is nothing to ask.
-      if (logged && !paused) return [];
+    const ended = endedEvents(now).filter((e) => {
+      const at = Date.parse(e.ends_at);
+      return at <= t && t - at <= END_WINDOW_MS;
+    });
+    const answered = promptStates(ended.map((e) => endKey(e.id)));
+    const open = ended.filter((e) => !answered.has(endKey(e.id)));
+    if (!open.length) return [];
 
-      const length = minutesShort(loggedMinutes(e));
-      const log: PromptAction = {
-        id: 'log',
-        label: e.project_name ? `Log ${length} under ${e.project_name}` : `Log ${length}`,
-      };
+    const logged = loggedAmong(open.map((e) => e.id));
+    const started = promptStates(open.map((e) => startKey(e.id)));
+    // Read once for all of them, from the first moment of the earliest to the end of the last.
+    const toLog = open.filter((e) => !logged.has(e.id));
+    const runs = toLog.length
+      ? focusRuns(
+          Math.min(...toLog.map((e) => windowOf(e).from)),
+          Math.max(...toLog.map((e) => windowOf(e).to)),
+        )
+      : [];
+
+    return open.flatMap((e) => {
+      const paused = pausedFor(started.get(startKey(e.id)));
+      const part = logged.has(e.id) ? null : uncounted(e, runs, t);
+      // Nothing to log (it is logged, or all of it is on other blocks) and nothing to pick
+      // back up: there is nothing to ask.
+      if (!part && !paused) return [];
+
       const dismiss: PromptAction = { id: 'dismiss', label: 'Dismiss' };
       let body: string;
       let actions: PromptAction[];
-      if (!logged && paused) {
-        body = `Log the ${length} and resume ${quoted(paused.title)}?`;
-        actions = [
-          { id: 'log-resume', label: `Log ${length} and resume`, primary: true },
-          log,
-          { id: 'resume', label: 'Resume' },
-          dismiss,
-        ];
-      } else if (!logged) {
-        body = `Log the ${length} as time spent?`;
-        actions = [{ ...log, primary: true }, dismiss];
+      if (part) {
+        const length = lengthOf(part);
+        const log: PromptAction = {
+          id: 'log',
+          label: e.project_name ? `Log ${length} under ${e.project_name}` : `Log ${length}`,
+        };
+        if (paused) {
+          body = `Log the ${length} and resume ${quoted(paused.title)}?`;
+          actions = [
+            { id: 'log-resume', label: `Log ${length} and resume`, primary: true },
+            log,
+            { id: 'resume', label: 'Resume' },
+            dismiss,
+          ];
+        } else {
+          body = `Log the ${length} as time spent?`;
+          actions = [{ ...log, primary: true }, dismiss];
+        }
       } else {
         body = `Resume ${quoted(paused!.title)}?`;
         actions = [{ id: 'resume', label: 'Resume', primary: true }, dismiss];
       }
       return [
         {
-          id,
+          id: endKey(e.id),
           kind: 'meeting-end',
           title: `${nameOf(e)} is over`,
           body,
-          createdAt: iso(ended),
+          createdAt: iso(Date.parse(e.ends_at)),
           actions,
         },
       ];
     });
   },
 
-  act(id, action) {
+  act(id, action, now) {
     const eventId = id.slice('meeting-end:'.length);
     const event = db.prepare(`${EVENT} WHERE e.id = ?`).get(eventId) as EventRow | undefined;
     if (!event) throw conflict('That prompt is no longer current');
@@ -218,13 +350,13 @@ export const meetingEndProvider: PromptProvider = {
         setPromptState(id, 'dismissed');
         return;
       case 'log':
-        logMeeting(event);
+        logMeeting(event, now);
         break;
       case 'resume':
         resumePaused(eventId);
         break;
       case 'log-resume':
-        logMeeting(event);
+        logMeeting(event, now);
         resumePaused(eventId);
         break;
       default:
@@ -232,6 +364,6 @@ export const meetingEndProvider: PromptProvider = {
     }
     // Once there is nothing left to offer it is finished for good, so deleting the log
     // afterwards on purpose does not bring the question back.
-    if (isLogged(eventId) && !pausedFor(eventId)) setPromptState(id, 'done');
+    if (isLogged(eventId) && !pausedForMeeting(eventId)) setPromptState(id, 'done');
   },
 };

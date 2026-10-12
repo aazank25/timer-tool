@@ -92,9 +92,11 @@ export async function startServer(
     url: `http://${host}:${actual}`,
     dataDir: config.dataDir,
     hasWebBuild: fs.existsSync(path.join(config.webDist, 'index.html')),
-    close: () => {
-      stopCalendarSync();
-      return new Promise<void>((resolve, reject) =>
+    close: async () => {
+      // Reading a feed is the one thing that goes on without a request to wait for. It is cut
+      // short and waited for, so that nothing is written once this has returned.
+      await stopCalendarSync();
+      await new Promise<void>((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve())),
       );
     },

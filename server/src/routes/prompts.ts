@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { MAX_PROMPT_ID_LENGTH } from '../lib/calendar.js';
 import { handler, parse } from '../lib/http.js';
 import { actOnPrompt, listPrompts } from '../lib/prompts.js';
 
@@ -11,9 +12,9 @@ promptsRouter.get(
   handler(() => listPrompts()),
 );
 
-// Prompt ids carry a calendar event's id, which can be long.
+// Prompt ids carry a calendar event's id, which can be long: as long as one can be logged on.
 const actSchema = z.object({
-  id: z.string().min(1).max(1000),
+  id: z.string().min(1).max(MAX_PROMPT_ID_LENGTH),
   action: z.string().min(1).max(60),
 });
 

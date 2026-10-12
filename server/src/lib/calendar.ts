@@ -28,6 +28,16 @@ export interface RedactedSource {
 const SETTING_KEY = 'calendar_sources';
 const SYNC_WINDOW_BACK_DAYS = 21;
 const SYNC_WINDOW_FORWARD_DAYS = 45;
+/** A feed that has not answered by now is not going to. */
+const FEED_TIMEOUT_MS = 20_000;
+
+/**
+ * The longest id a calendar event can have. A block logged on an event carries the id, and so
+ * does every prompt about it, so the limits on what the routes take are this one, and the
+ * limit on a prompt's id leaves room for what goes round the event's id in it.
+ */
+export const MAX_EVENT_ID_LENGTH = 2000;
+export const MAX_PROMPT_ID_LENGTH = MAX_EVENT_ID_LENGTH + 100;
 
 export function readSources(): CalendarSource[] {
   const raw = getSetting(SETTING_KEY);
@@ -56,10 +66,23 @@ export function redact(s: CalendarSource): RedactedSource {
 
 /** webcal:// is an ICS feed over https by another name. */
 function normalizeUrl(input: string): string {
-  const url = new URL(input.trim());
-  if (url.protocol === 'webcal:') url.protocol = 'https:';
+  let url: URL;
+  try {
+    // The scheme is swapped in the text: a URL cannot be moved from webcal: to https: once it is made.
+    url = new URL(input.trim().replace(/^webcal:/i, 'https:'));
+  } catch {
+    throw badRequest('That is not a web address');
+  }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
     throw badRequest('Calendar URL must be an https, http or webcal address');
+  }
+  // What the feed is asked for is a secret, and a user name and password in it would be
+  // quoted along with it by whatever goes wrong while it is read. The private addresses
+  // Google and Outlook give out need neither.
+  if (url.username || url.password) {
+    throw badRequest(
+      'Calendar URL cannot have a user name or password in it: use the private address your calendar gives you, which needs neither',
+    );
   }
   return url.toString();
 }
@@ -118,8 +141,16 @@ function attendeeNames(event: ical.VEvent): string[] {
     .slice(0, 40);
 }
 
-/** Expand a feed into concrete event instances inside [from, to]. */
+/**
+ * Expand a feed into concrete event instances inside [from, to]. A feed is a calendar from
+ * BEGIN:VCALENDAR to END:VCALENDAR, and anything else is refused: an error page that came
+ * back as a 200, an empty answer, or a download that stopped short is not a calendar with
+ * nothing in it, and reading it as one would remove every meeting the feed had given.
+ */
 export function parseFeed(icsText: string, from: Date, to: Date): ParsedEvent[] {
+  if (!/BEGIN:VCALENDAR[\s\S]*END:VCALENDAR/i.test(icsText)) {
+    throw new Error('The feed did not contain a complete calendar');
+  }
   const parsed = ical.sync.parseICS(icsText);
   const out: ParsedEvent[] = [];
 
@@ -181,34 +212,62 @@ export interface SyncResult {
   error?: string;
 }
 
-async function fetchText(url: string): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20_000);
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { accept: 'text/calendar, text/plain, */*' },
-    });
-    if (!res.ok) throw new Error(`feed responded ${res.status} ${res.statusText}`);
-    return await res.text();
-  } finally {
-    clearTimeout(timer);
-  }
+/**
+ * Read a feed. It is given up on after twenty seconds, or as soon as `signal` says the
+ * server is closing, whichever comes first.
+ */
+async function fetchText(url: string, signal: AbortSignal): Promise<string> {
+  const res = await fetch(url, {
+    signal: AbortSignal.any([signal, AbortSignal.timeout(FEED_TIMEOUT_MS)]),
+    headers: { accept: 'text/calendar, text/plain, */*' },
+  });
+  if (!res.ok) throw new Error(`feed responded ${res.status} ${res.statusText}`);
+  return await res.text();
 }
 
 /**
- * Remember how meetings were categorised: once "Team standup" has been
- * attributed to a project, later instances inherit that project on sync.
+ * What went wrong, in words that are safe to show and to log. A feed's address is a secret,
+ * and an error raised while reading it can quote it, so any address in the message is taken
+ * out of it. The feed is named by its label wherever it is named.
  */
-function inheritedProjectId(title: string, uid: string): number | null {
-  const row = db
+function describeFailure(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.replace(
+    /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]*[^\s"'<>.,;:!?)\]}]/gi,
+    'the feed address',
+  );
+}
+
+/**
+ * Remember how meetings were categorised: once one instance of "Team standup" has been
+ * given a project, instances that turn up later take the same one. Only a new meeting takes
+ * anything: one that is in the calendar already keeps what it has, whoever gave it that, and
+ * that includes nothing, so a project taken off a meeting by hand stays off.
+ *
+ * The meeting's own series comes first (the same UID in the same feed), and failing that a
+ * meeting of exactly the same title in the same feed. Never one from another calendar: a "1:1"
+ * there is somebody else's. Where they differ, the latest one counts.
+ */
+function inheritedProjectId(provider: string, uid: string, title: string): number | null {
+  // An instance's id is the feed, the UID and its start (24 characters), so the instances of one
+  // series in one feed are the ids that begin with the first two and add nothing but the start.
+  const series = `${provider}:${uid}:`;
+  const own = db
     .prepare(
       `SELECT project_id FROM calendar_events
-       WHERE project_id IS NOT NULL AND (title = ? OR id LIKE ?)
+       WHERE project_id IS NOT NULL AND instr(id, ?) = 1 AND length(id) = length(?) + 24
        ORDER BY starts_at DESC LIMIT 1`,
     )
-    .get(title, `%:${uid}:%`) as { project_id: number } | undefined;
-  return row?.project_id ?? null;
+    .get(series, series) as { project_id: number } | undefined;
+  if (own) return own.project_id;
+  const named = db
+    .prepare(
+      `SELECT project_id FROM calendar_events
+       WHERE provider = ? AND project_id IS NOT NULL AND title = ?
+       ORDER BY starts_at DESC LIMIT 1`,
+    )
+    .get(provider, title) as { project_id: number } | undefined;
+  return named?.project_id ?? null;
 }
 
 /**
@@ -218,23 +277,41 @@ function inheritedProjectId(title: string, uid: string): number | null {
  * the sources afresh, which is also what lets a feed that was added a moment ago be picked up.
  */
 let lastSync: Promise<unknown> = Promise.resolve();
+/** The syncs that are waiting their turn or running, so that closing the server can stop them. */
+const unfinished = new Set<AbortController>();
 
 export function syncCalendars(): Promise<SyncResult[]> {
-  const run = lastSync.then(syncOnce);
+  const controller = new AbortController();
+  unfinished.add(controller);
+  const run = lastSync
+    .then(() => syncOnce(controller.signal))
+    .finally(() => unfinished.delete(controller));
   // Whatever happens to this one, the next in line still runs.
   lastSync = run.catch(() => undefined);
   return run;
 }
 
-async function syncOnce(): Promise<SyncResult[]> {
+/**
+ * Stop every sync that is waiting or running: the read of a feed is cut short, and nothing is
+ * written for it. Resolves once they have all stopped, so that once it has, nothing more is
+ * written. Syncs asked for afterwards run as usual.
+ */
+export function stopCalendarSyncs(): Promise<void> {
+  for (const controller of unfinished) controller.abort();
+  return lastSync.then(() => undefined);
+}
+
+async function syncOnce(signal: AbortSignal): Promise<SyncResult[]> {
+  const results: SyncResult[] = [];
   const sources = readSources().filter((s) => s.enabled);
   const now = new Date();
   const from = new Date(now.getTime() - SYNC_WINDOW_BACK_DAYS * 86_400_000);
   const to = new Date(now.getTime() + SYNC_WINDOW_FORWARD_DAYS * 86_400_000);
   const zone = tz();
   const startHour = dayStartHour();
-  const results: SyncResult[] = [];
 
+  // A row that is there already keeps its project, whatever it is: the update leaves it alone.
+  // The project on the insert is for a new row, and only a new row is worked out one.
   const upsert = db.prepare(
     `INSERT INTO calendar_events
        (id, provider, calendar_id, title, description, location, starts_at, ends_at,
@@ -245,17 +322,33 @@ async function syncOnce(): Promise<SyncResult[]> {
        location = excluded.location, starts_at = excluded.starts_at,
        ends_at = excluded.ends_at, all_day = excluded.all_day,
        attendees = excluded.attendees, local_day = excluded.local_day,
-       -- a hand-made attribution always wins over an inherited guess
-       project_id = COALESCE(calendar_events.project_id, excluded.project_id),
        synced_at = excluded.synced_at`,
   );
+  const known = db.prepare('SELECT 1 FROM calendar_events WHERE id = ?');
+
+  /**
+   * Whether the source is still one to sync as it was when it was read: not removed, not
+   * switched off, and not given another address. Looked at again after the read, because a
+   * read can take twenty seconds and the person can do any of those meanwhile.
+   */
+  const stillSyncs = (source: CalendarSource) => {
+    const latest = readSources().find((s) => s.id === source.id);
+    return !!latest && latest.enabled && latest.url === source.url;
+  };
 
   for (const source of sources) {
+    // Stopped, whether while it waited its turn or between two feeds.
+    if (signal.aborted) break;
+    if (!stillSyncs(source)) continue;
     const provider = `ics:${source.id}`;
     try {
-      const events = parseFeed(await fetchText(source.url), from, to);
-      const stamp = nowIso();
-      db.transaction(() => {
+      const events = parseFeed(await fetchText(source.url, signal), from, to);
+      const wrote = db.transaction((): boolean => {
+        // Nothing is written for a feed that was removed while it was being read: its
+        // events would be back with nothing to own them. This is the last look before the
+        // writes, in the same transaction, so nothing can change between the two.
+        if (signal.aborted || !stillSyncs(source)) return false;
+        const stamp = nowIso();
         const current = new Set<string>();
         for (const e of events) {
           const startIso = e.start.toISOString();
@@ -273,7 +366,7 @@ async function syncOnce(): Promise<SyncResult[]> {
             e.allDay ? 1 : 0,
             e.attendees.length ? JSON.stringify(e.attendees) : null,
             focusDay(startIso, zone, startHour),
-            inheritedProjectId(e.title, e.uid),
+            known.get(id) ? null : inheritedProjectId(provider, e.uid, e.title),
             stamp,
           );
         }
@@ -287,21 +380,35 @@ async function syncOnce(): Promise<SyncResult[]> {
             'SELECT id FROM calendar_events WHERE provider = ? AND starts_at >= ? AND starts_at <= ?',
           )
           .all(provider, from.toISOString(), to.toISOString()) as { id: string }[];
+        if (!events.length && stale.length) {
+          // A feed that is a calendar but has nothing in the window, where it had meetings
+          // a moment ago, is more likely something wrong at the other end than every one of
+          // them cancelled, so what it had is kept.
+          console.warn(
+            `[calendar] "${source.label}" came back with no meetings in the window, so the ${stale.length} it had are kept`,
+          );
+          return true;
+        }
         const remove = db.prepare('DELETE FROM calendar_events WHERE id = ?');
         for (const { id } of stale) if (!current.has(id)) remove.run(id);
+        return true;
       })();
-      results.push({ sourceId: source.id, label: source.label, ok: true, events: events.length });
+      if (wrote) {
+        results.push({ sourceId: source.id, label: source.label, ok: true, events: events.length });
+      }
     } catch (err) {
+      // Stopped while it was reading: the server is closing, and it is not the feed's doing.
+      if (signal.aborted) break;
       results.push({
         sourceId: source.id,
         label: source.label,
         ok: false,
         events: 0,
-        error: err instanceof Error ? err.message : String(err),
+        error: describeFailure(err),
       });
     }
   }
-  setSettings({ calendar_last_sync: nowIso() });
+  if (!signal.aborted) setSettings({ calendar_last_sync: nowIso() });
   return results;
 }
 
@@ -311,7 +418,9 @@ async function syncOnce(): Promise<SyncResult[]> {
  * soon after start-up and then every `everyMs`; nothing is fetched while no feed is switched
  * on. The next look is only set once the last one has finished, so a slow feed can never
  * have two running, and a failure is logged and waited out rather than allowed to stop it.
- * `everyMs` of 0 switches it off. Returns a function that stops it.
+ * `everyMs` of 0 switches it off. Returns a function that stops it: the wait is cancelled, any
+ * read of a feed that is under way (this one's, or a Sync now) is cut short, and the promise
+ * it returns settles once that is done, after which nothing more is written.
  */
 export function startCalendarSync(opts: {
   everyMs: number;
@@ -328,8 +437,9 @@ export function startCalendarSync(opts: {
     setTimeout(callback: () => void, ms: number): unknown;
     clearTimeout(handle: unknown): void;
   };
-}): () => void {
-  if (!(opts.everyMs > 0)) return () => undefined;
+}): () => Promise<void> {
+  // Nothing is scheduled, but a Sync now that is under way is still the server's to stop.
+  if (!(opts.everyMs > 0)) return stopCalendarSyncs;
   const sync = opts.sync ?? syncCalendars;
   const clock = opts.timers ?? {
     setTimeout: (callback: () => void, ms: number) => {
@@ -342,20 +452,27 @@ export function startCalendarSync(opts: {
   };
   let timer: unknown;
   let stopped = false;
+  /** The look that is under way, or the last one, so that stopping can wait for it. */
+  let current: Promise<void> = Promise.resolve();
 
   const schedule = (ms: number) => {
-    timer = clock.setTimeout(() => void look(), ms);
+    timer = clock.setTimeout(() => {
+      current = look();
+    }, ms);
   };
 
   async function look() {
     try {
       if (readSources().some((s) => s.enabled)) {
-        for (const r of await sync()) {
+        const results = await sync();
+        // Stopped meanwhile: what it was cut short of is not the feeds' doing, so it is not reported.
+        if (stopped) return;
+        for (const r of results) {
           if (!r.ok) console.warn(`[calendar] could not sync "${r.label}": ${r.error}`);
         }
       }
     } catch (err) {
-      console.error('[calendar] background sync failed', err);
+      if (!stopped) console.error('[calendar] background sync failed:', describeFailure(err));
     } finally {
       if (!stopped) schedule(opts.everyMs);
     }
@@ -365,6 +482,7 @@ export function startCalendarSync(opts: {
   return () => {
     stopped = true;
     clock.clearTimeout(timer);
+    return Promise.all([current, stopCalendarSyncs()]).then(() => undefined);
   };
 }
 

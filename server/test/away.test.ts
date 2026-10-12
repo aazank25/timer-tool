@@ -1,12 +1,24 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, before, beforeEach, describe, it, mock } from 'node:test';
 import type { SessionRow } from '../src/lib/sessions.js';
-import { cutOut, reachedAt, type Span } from '../src/lib/segments.js';
-import { advance, at, type Api, freeze, goTo, MINUTE, reset, serve } from './prompt-helpers.js';
+import { cutOut, gapsIn, reachedAt, type Span } from '../src/lib/segments.js';
+import {
+  advance,
+  at,
+  awayPromptId,
+  type Api,
+  failOnLoggedErrors,
+  freeze,
+  goTo,
+  MINUTE,
+  reset,
+  serve,
+} from './prompt-helpers.js';
 
 const sessionsMod = () => import('../src/lib/sessions.js');
 const promptsMod = () => import('../src/lib/prompts.js');
 const dbMod = () => import('../src/db.js');
+const settingsMod = () => import('../src/lib/settings.js');
 
 /** Start a stopwatch block on the frozen clock. */
 async function startBlock(title = 'Deep work') {
@@ -74,6 +86,7 @@ async function threeSittings() {
 
 describe('reporting away time', () => {
   let api: Api;
+  failOnLoggedErrors();
 
   before(async () => {
     api = await serve();
@@ -224,10 +237,48 @@ describe('reporting away time', () => {
     stopSession(block.id, 'completed');
     assert.equal((await report(block.id, at('10:25'), at('10:35'))).status, 201);
   });
+
+  it('refuses a stretch that falls wholly after a finished block ended', async () => {
+    const { stopSession } = await sessionsMod();
+    freeze(at('10:00'));
+    const block = await startBlock();
+    goTo(at('10:30'));
+    stopSession(block.id, 'completed');
+    goTo(at('11:30'));
+
+    const after = await report(block.id, at('10:40'), at('11:20'));
+    assert.equal(after.status, 400);
+    // It says why: not that the stretch was too short, which it was not.
+    assert.equal(after.body.error, 'Away time has to fall before the block ended');
+    // Beginning at the very moment it ended is after it as well.
+    const touching = await report(block.id, at('10:30'), at('11:00'));
+    assert.equal(touching.status, 400);
+    assert.equal(touching.body.error, 'Away time has to fall before the block ended');
+    assert.equal(await awayCount(), 0);
+  });
+
+  it('cuts a stretch that runs past the end of a finished block off at that end', async () => {
+    const { stopSession } = await sessionsMod();
+    freeze(at('10:00'));
+    const block = await startBlock();
+    goTo(at('10:30'));
+    stopSession(block.id, 'completed');
+    goTo(at('11:30'));
+
+    const res = await report(block.id, at('10:20'), at('10:50'));
+
+    assert.equal(res.status, 201);
+    assert.equal(res.body.away.startedAt, at('10:20'));
+    assert.equal(res.body.away.endedAt, at('10:30'));
+    assert.equal(res.body.away.seconds, 600);
+    // With less than a minute left of it once cut, it is refused like any other.
+    assert.equal((await report(block.id, at('10:29:30'), at('10:50'))).status, 400);
+  });
 });
 
 describe('reports of the same absence', () => {
   let api: Api;
+  failOnLoggedErrors();
   let blockId = 0;
 
   before(async () => {
@@ -313,16 +364,148 @@ describe('reports of the same absence', () => {
   it('do not merge into a stretch that has been kept or dropped already', async () => {
     const { actOnPrompt } = await promptsMod();
     const first = await report('10:10', '10:20');
-    actOnPrompt(`away:${first.id}`, 'keep');
+    actOnPrompt(await awayPromptId(first.id), 'keep');
 
-    const second = await report('10:15', '10:30');
+    // It touches the kept stretch, so there is nothing to merge into: it is a stretch of its own.
+    const second = await report('10:20', '10:30');
 
     assert.notEqual(second.id, first.id);
-    assert.equal(second.startedAt, at('10:15'));
+    assert.equal(second.startedAt, at('10:20'));
     const old = await awayRow(first.id);
     assert.equal(old?.status, 'kept');
     assert.equal(old?.ended_at, at('10:20'));
     assert.equal(await awayCount(), 2);
+  });
+
+  /** Every stretch on the block as stored, in time order. */
+  async function stretches() {
+    const { db } = await dbMod();
+    return db
+      .prepare('SELECT started_at, ended_at, status FROM away_intervals ORDER BY started_at')
+      .all() as { started_at: string; ended_at: string; status: string }[];
+  }
+
+  it('hold only what is new when they overlap a stretch that was kept, so that Drop takes off only that', async () => {
+    const { actOnPrompt } = await promptsMod();
+    const { getSessionRow, toView } = await sessionsMod();
+    const kept = await report('10:10', '10:20');
+    actOnPrompt(await awayPromptId(kept.id), 'keep');
+
+    // Five of these fifteen minutes were kept already.
+    const again = await report('10:15', '10:30');
+
+    assert.notEqual(again.id, kept.id);
+    assert.equal(again.startedAt, at('10:20'));
+    assert.equal(again.endedAt, at('10:30'));
+    assert.equal(again.seconds, 600);
+    assert.deepEqual(await stretches(), [
+      { started_at: at('10:10'), ended_at: at('10:20'), status: 'kept' },
+      { started_at: at('10:20'), ended_at: at('10:30'), status: 'pending' },
+    ]);
+
+    actOnPrompt(await awayPromptId(again.id), 'drop');
+
+    // An hour on the clock and the ten new minutes off it: the kept five are still there.
+    assert.equal(toView(getSessionRow(blockId)).elapsedSeconds, 3600 - 600);
+    assert.deepEqual(await segmentsOf(blockId), [
+      { started_at: at('10:00'), ended_at: at('10:20') },
+      { started_at: at('10:30'), ended_at: null },
+    ]);
+  });
+
+  it('hold nothing, and answer 200 with no stretch, when all of it was kept or dropped already', async () => {
+    const { actOnPrompt } = await promptsMod();
+    const kept = await report('10:10', '10:30');
+    actOnPrompt(await awayPromptId(kept.id), 'keep');
+    const dropped = await report('10:40', '10:50');
+    actOnPrompt(await awayPromptId(dropped.id), 'drop');
+    const before = await stretches();
+
+    for (const [start, end] of [
+      ['10:15', '10:25'],
+      ['10:10', '10:30'],
+      ['10:42', '10:48'],
+      ['10:40', '10:50'],
+    ] as const) {
+      const res = await api.call('POST', `/sessions/${blockId}/away`, {
+        startedAt: at(start),
+        endedAt: at(end),
+      });
+      assert.equal(res.status, 200, `${start} to ${end}`);
+      assert.deepEqual(res.body, { away: null });
+    }
+
+    assert.deepEqual(await stretches(), before);
+    const prompts = (await api.call('GET', '/prompts')).body as { kind: string }[];
+    assert.deepEqual(
+      prompts.filter((p) => p.kind === 'away'),
+      [],
+    );
+  });
+
+  it('hold each piece that is new when they run across a stretch that was kept, and answer with the earliest', async () => {
+    const { actOnPrompt } = await promptsMod();
+    const kept = await report('10:20', '10:30');
+    actOnPrompt(await awayPromptId(kept.id), 'keep');
+
+    const res = await api.call('POST', `/sessions/${blockId}/away`, {
+      startedAt: at('10:10'),
+      endedAt: at('10:40'),
+    });
+
+    assert.equal(res.status, 201);
+    assert.equal(res.body.away.startedAt, at('10:10'));
+    assert.equal(res.body.away.endedAt, at('10:20'));
+    assert.deepEqual(await stretches(), [
+      { started_at: at('10:10'), ended_at: at('10:20'), status: 'pending' },
+      { started_at: at('10:20'), ended_at: at('10:30'), status: 'kept' },
+      { started_at: at('10:30'), ended_at: at('10:40'), status: 'pending' },
+    ]);
+  });
+
+  it('leave out a piece that is under a minute once what was kept is taken away', async () => {
+    const { actOnPrompt } = await promptsMod();
+    const kept = await report('10:10', '10:20');
+    actOnPrompt(await awayPromptId(kept.id), 'keep');
+
+    // A minute as reported, but half of it is the kept stretch.
+    const res = await api.call('POST', `/sessions/${blockId}/away`, {
+      startedAt: at('10:19:30'),
+      endedAt: at('10:20:30'),
+    });
+
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body, { away: null });
+    assert.equal(await awayCount(), 1);
+  });
+
+  it('merge the new part into the pending stretch it touches, as any report is', async () => {
+    const { actOnPrompt } = await promptsMod();
+    const kept = await report('10:10', '10:20');
+    actOnPrompt(await awayPromptId(kept.id), 'keep');
+    const pending = await report('10:20', '10:25');
+
+    const again = await report('10:15', '10:30');
+
+    assert.equal(again.id, pending.id);
+    assert.deepEqual(await stretches(), [
+      { started_at: at('10:10'), ended_at: at('10:20'), status: 'kept' },
+      { started_at: at('10:20'), ended_at: at('10:30'), status: 'pending' },
+    ]);
+  });
+
+  it('do not come back over a stretch that was dropped either', async () => {
+    const { actOnPrompt } = await promptsMod();
+    const dropped = await report('10:10', '10:20');
+    actOnPrompt(await awayPromptId(dropped.id), 'drop');
+
+    const again = await report('10:15', '10:30');
+
+    assert.equal(again.startedAt, at('10:20'));
+    assert.deepEqual(await stretches(), [
+      { started_at: at('10:10'), ended_at: at('10:20'), status: 'dropped' },
+      { started_at: at('10:20'), ended_at: at('10:30'), status: 'pending' },
+    ]);
   });
 
   it('are kept apart between blocks', async () => {
@@ -344,6 +527,7 @@ describe('reports of the same absence', () => {
 
 describe('the away prompt', () => {
   let api: Api;
+  failOnLoggedErrors();
 
   before(async () => {
     api = await serve();
@@ -352,13 +536,15 @@ describe('the away prompt', () => {
   afterEach(() => mock.timers.reset());
   after(() => api.close());
 
+  /** The stretch as the route answers it, and the id its prompt is asked under. */
   async function reported(blockId: number, start: string, end: string) {
-    return (
+    const { id } = (
       await api.call('POST', `/sessions/${blockId}/away`, {
         startedAt: at(start),
         endedAt: at(end),
       })
     ).body.away as { id: number };
+    return { id, promptId: await awayPromptId(id) };
   }
 
   it('is listed while the interval is pending, naming the block and the times', async () => {
@@ -372,7 +558,7 @@ describe('the away prompt', () => {
 
     assert.equal(others.length, 0);
     assert.ok(prompt);
-    assert.equal(prompt.id, `away:${away.id}`);
+    assert.equal(prompt.id, away.promptId);
     assert.equal(prompt.kind, 'away');
     assert.equal(prompt.title, 'You were away 40 min');
     assert.match(prompt.body, /“Deep work”/);
@@ -409,7 +595,7 @@ describe('the away prompt', () => {
     goTo(at('11:00'));
     const away = await reported(block.id, '10:10', '10:50');
 
-    const res = await api.call('POST', '/prompts/act', { id: `away:${away.id}`, action: 'keep' });
+    const res = await api.call('POST', '/prompts/act', { id: away.promptId, action: 'keep' });
 
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, { prompts: [] });
@@ -421,11 +607,11 @@ describe('the away prompt', () => {
     assert.equal(toView(getSessionRow(block.id)).elapsedSeconds, 3600);
     // A resolved interval is never asked about again.
     assert.equal(
-      await api.status('POST', '/prompts/act', { id: `away:${away.id}`, action: 'keep' }),
+      await api.status('POST', '/prompts/act', { id: away.promptId, action: 'keep' }),
       409,
     );
     assert.equal(
-      await api.status('POST', '/prompts/act', { id: `away:${away.id}`, action: 'drop' }),
+      await api.status('POST', '/prompts/act', { id: away.promptId, action: 'drop' }),
       409,
     );
   });
@@ -436,7 +622,7 @@ describe('the away prompt', () => {
     goTo(at('11:00'));
     const away = await reported(block.id, '10:10', '10:50');
 
-    const res = await api.call('POST', '/prompts/act', { id: `away:${away.id}`, action: 'drop' });
+    const res = await api.call('POST', '/prompts/act', { id: away.promptId, action: 'drop' });
 
     assert.deepEqual(res.body, { prompts: [] });
     const row = await awayRow(away.id);
@@ -472,7 +658,7 @@ describe('the away prompt', () => {
     assert.equal(prompt?.actions[1]?.label, 'Drop 40 min');
     assert.match(prompt!.body, /of which 20 min was on the clock/);
 
-    await api.call('POST', '/prompts/act', { id: `away:${away.id}`, action: 'drop' });
+    await api.call('POST', '/prompts/act', { id: away.promptId, action: 'drop' });
     const { toView, getSessionRow } = await sessionsMod();
     // 40 minutes were worked and 20 of them came off, not 40.
     assert.equal(toView(getSessionRow(block.id)).elapsedSeconds, 1200);
@@ -502,12 +688,12 @@ describe('the away prompt', () => {
 
     assert.deepEqual(
       listPrompts().map((p) => p.id),
-      [`away:${first.id}`, `away:${second.id}`],
+      [first.promptId, second.promptId],
     );
-    await api.call('POST', '/prompts/act', { id: `away:${first.id}`, action: 'keep' });
+    await api.call('POST', '/prompts/act', { id: first.promptId, action: 'keep' });
     assert.deepEqual(
       listPrompts().map((p) => p.id),
-      [`away:${second.id}`],
+      [second.promptId],
     );
   });
 
@@ -550,9 +736,9 @@ describe('the away prompt', () => {
     const listed = await api.call('GET', '/prompts');
     assert.deepEqual(
       listed.body.map((p: { id: string }) => p.id),
-      [`away:${away.id}`],
+      [away.promptId],
     );
-    await api.call('POST', '/prompts/act', { id: `away:${away.id}`, action: 'drop' });
+    await api.call('POST', '/prompts/act', { id: away.promptId, action: 'drop' });
 
     assert.equal(toView(getSessionRow(block.id)).elapsedSeconds, 1200);
   });
@@ -572,7 +758,7 @@ describe('the away prompt', () => {
     const quiet = mock.method(console, 'error', () => {});
     let failed;
     try {
-      failed = await api.call('POST', '/prompts/act', { id: `away:${away.id}`, action: 'drop' });
+      failed = await api.call('POST', '/prompts/act', { id: away.promptId, action: 'drop' });
     } finally {
       quiet.mock.restore();
       db.exec('DROP TRIGGER IF EXISTS fail_the_mark');
@@ -585,13 +771,190 @@ describe('the away prompt', () => {
     assert.equal((await api.call('GET', '/prompts')).body.length, 1);
 
     // Without the failure the same answer goes through, all of it.
-    const ok = await api.call('POST', '/prompts/act', { id: `away:${away.id}`, action: 'drop' });
+    const ok = await api.call('POST', '/prompts/act', { id: away.promptId, action: 'drop' });
     assert.equal(ok.status, 200);
     assert.equal((await awayRow(away.id))?.status, 'dropped');
+  });
+
+  /** The block's time as the clock now reads it. */
+  async function elapsed(blockId: number) {
+    const { toView, getSessionRow } = await sessionsMod();
+    return toView(getSessionRow(blockId)).elapsedSeconds;
+  }
+
+  it('cannot be answered from a banner that was made for a stretch that is gone, once its row has been given to another', async () => {
+    const { stopSession } = await sessionsMod();
+    freeze(at('09:30'));
+    const first = await startBlock('Block A');
+    goTo(at('10:30'));
+    await reported(first.id, '09:40', '09:50');
+    const folded = await reported(first.id, '10:00', '10:05');
+    // What a banner on screen for the second stretch carries.
+    assert.ok(
+      (await api.call('GET', '/prompts')).body.some(
+        (p: { id: string }) => p.id === folded.promptId,
+      ),
+    );
+    // A report that joins the two folds the later row into the earlier and deletes it.
+    await reported(first.id, '09:45', '10:02');
+    stopSession(first.id, 'completed');
+    const second = await startBlock('Block B');
+    goTo(at('12:00'));
+    const other = await reported(second.id, '10:40', '11:40');
+    assert.equal(other.id, folded.id, 'the row was handed out again');
+    const before = await elapsed(second.id);
+
+    const res = await api.call('POST', '/prompts/act', { id: folded.promptId, action: 'drop' });
+
+    assert.equal(res.status, 409);
+    assert.equal(await elapsed(second.id), before);
+    assert.equal((await awayRow(other.id))?.status, 'pending');
+    // The new stretch has its own id, and that one still works.
+    assert.notEqual(other.promptId, folded.promptId);
+    assert.equal(
+      await api.status('POST', '/prompts/act', { id: other.promptId, action: 'drop' }),
+      200,
+    );
+    assert.equal(await elapsed(second.id), before - 3600);
+  });
+
+  it('cannot be answered from a banner that was made for a stretch on a block that has since been deleted, once its row has been given to another', async () => {
+    const { stopSession } = await sessionsMod();
+    freeze(at('09:30'));
+    const first = await startBlock('Block A');
+    goTo(at('10:30'));
+    const gone = await reported(first.id, '09:40', '09:45');
+    stopSession(first.id, 'completed');
+    assert.equal(await api.status('DELETE', `/sessions/${first.id}`), 200);
+    const second = await startBlock('Block B');
+    goTo(at('12:00'));
+    const other = await reported(second.id, '10:40', '11:40');
+    assert.equal(other.id, gone.id, 'the row was handed out again');
+    const before = await elapsed(second.id);
+
+    const res = await api.call('POST', '/prompts/act', { id: gone.promptId, action: 'drop' });
+
+    assert.equal(res.status, 409);
+    assert.equal(await elapsed(second.id), before);
+    assert.equal((await awayRow(other.id))?.status, 'pending');
+  });
+
+  it('is refused by the provider itself unless the id is exactly the stretch it was made for', async () => {
+    const { awayProvider } = await import('../src/lib/away.js');
+    const { stopSession } = await sessionsMod();
+    freeze(at('10:00'));
+    const block = await startBlock();
+    goTo(at('11:00'));
+    const away = await reported(block.id, '10:10', '10:30');
+    const [, row, created] = /^away:(\d+):(\d+)$/.exec(away.promptId) ?? [];
+    const before = await elapsed(block.id);
+
+    for (const id of [
+      `away:${row}`,
+      `away:${row}:`,
+      `away:${row}:${Number(created) + 1}`,
+      `away:${row}:${created}x`,
+      `away:${Number(row) + 1}:${created}`,
+      `away:x:${created}`,
+      'nonsense',
+    ]) {
+      assert.throws(() => awayProvider.act(id, 'drop', new Date()), { status: 409 }, id);
+    }
+    assert.equal(await elapsed(block.id), before);
+
+    // A stretch whose block was thrown away has nothing left to keep or drop.
+    stopSession(block.id, 'abandoned');
+    assert.throws(() => awayProvider.act(away.promptId, 'drop', new Date()), { status: 409 });
+    assert.equal((await awayRow(away.id))?.status, 'pending');
+  });
+
+  it('says the day when the stretch is not today, and both days when it crosses midnight', async () => {
+    const { listPrompts } = await promptsMod();
+    // The same way of writing a time the prompt uses, so that this holds in whatever style the machine has.
+    const style = { timeZone: 'UTC' } as const;
+    const dayStyle = { weekday: 'short', month: 'short', day: 'numeric' } as const;
+    const timeStyle = { hour: 'numeric', minute: '2-digit' } as const;
+    const day = (iso: string) =>
+      new Intl.DateTimeFormat(undefined, { ...dayStyle, ...style }).format(new Date(iso));
+    const time = (iso: string) =>
+      new Intl.DateTimeFormat(undefined, { ...timeStyle, ...style }).format(new Date(iso));
+    const dayAndTime = (iso: string) =>
+      new Intl.DateTimeFormat(undefined, { ...dayStyle, ...timeStyle, ...style }).format(
+        new Date(iso),
+      );
+
+    freeze('2026-10-09T09:00:00.000Z');
+    const block = await startBlock('Marathon');
+    goTo('2026-10-12T12:00:00.000Z');
+    const report = async (startedAt: string, endedAt: string) =>
+      (await api.call('POST', `/sessions/${block.id}/away`, { startedAt, endedAt })).body.away
+        .id as number;
+    const crossing = await report('2026-10-09T12:00:00.000Z', '2026-10-11T12:00:00.000Z');
+    const earlier = await report('2026-10-11T14:00:00.000Z', '2026-10-11T14:30:00.000Z');
+    const today = await report('2026-10-12T11:00:00.000Z', '2026-10-12T11:30:00.000Z');
+    const bodyOf = (row: number) =>
+      listPrompts().find((p) => p.id.startsWith(`away:${row}:`))!.body;
+
+    // Not "12:00 PM to 12:00 PM": both ends are named, with their days.
+    assert.ok(
+      bodyOf(crossing).startsWith(
+        `${dayAndTime('2026-10-09T12:00:00.000Z')} to ${dayAndTime('2026-10-11T12:00:00.000Z')}`,
+      ),
+      bodyOf(crossing),
+    );
+    // On another day, the day once and then the two times.
+    assert.ok(
+      bodyOf(earlier).startsWith(
+        `${day('2026-10-11T14:00:00.000Z')}, ${time('2026-10-11T14:00:00.000Z')} to ${time('2026-10-11T14:30:00.000Z')}`,
+      ),
+      bodyOf(earlier),
+    );
+    // Today it is the times alone, as it always was.
+    assert.ok(
+      bodyOf(today).startsWith(
+        `${time('2026-10-12T11:00:00.000Z')} to ${time('2026-10-12T11:30:00.000Z')}`,
+      ),
+      bodyOf(today),
+    );
+    assert.ok(!bodyOf(today).includes(day('2026-10-12T11:00:00.000Z')));
+  });
+
+  it('lists no away prompts while away detection is off, and holds what is reported meanwhile', async () => {
+    const { setSettings } = await settingsMod();
+    const { listPrompts } = await promptsMod();
+    freeze(at('10:00'));
+    const block = await startBlock();
+    goTo(at('11:00'));
+    const before = await reported(block.id, '10:10', '10:30');
+    assert.deepEqual(
+      listPrompts().map((p) => p.id),
+      [before.promptId],
+    );
+
+    setSettings({ away_minutes: 0 });
+    const during = await reported(block.id, '10:40', '10:50');
+
+    // What was reported is still on record, but nothing is asked, and nothing can be answered.
+    assert.equal(await awayCount(), 2);
+    assert.deepEqual(listPrompts(), []);
+    assert.deepEqual((await api.call('GET', '/prompts')).body, []);
+    assert.equal(
+      await api.status('POST', '/prompts/act', { id: before.promptId, action: 'keep' }),
+      409,
+    );
+    assert.equal((await awayRow(before.id))?.status, 'pending');
+
+    // Turned back on, it asks about both.
+    setSettings({ away_minutes: 10 });
+    assert.deepEqual(
+      listPrompts().map((p) => p.id),
+      [before.promptId, during.promptId],
+    );
   });
 });
 
 describe('dropping time from a block', () => {
+  failOnLoggedErrors();
   beforeEach(reset);
   afterEach(() => mock.timers.reset());
 
@@ -714,6 +1077,47 @@ describe('dropping time from a block', () => {
     ]);
   });
 
+  it('leaves no empty run when the stretch begins or ends exactly where a run does', async () => {
+    const { dropInterval } = await sessionsMod();
+    const id = await threeSittings();
+
+    // From the very start of the second run to part-way through it.
+    dropInterval(id, at('10:30'), at('10:40'));
+    assert.deepEqual(await segmentsOf(id), [
+      { started_at: at('10:00'), ended_at: at('10:20') },
+      { started_at: at('10:40'), ended_at: at('10:50') },
+      { started_at: at('11:00'), ended_at: at('11:20') },
+    ]);
+
+    // From part-way through the third to the very end of it.
+    dropInterval(id, at('11:10'), at('11:20'));
+    assert.deepEqual(await segmentsOf(id), [
+      { started_at: at('10:00'), ended_at: at('10:20') },
+      { started_at: at('10:40'), ended_at: at('10:50') },
+      { started_at: at('11:00'), ended_at: at('11:10') },
+    ]);
+
+    // The whole of a run, from its start to its end: nothing is left of it, not even an instant.
+    dropInterval(id, at('10:40'), at('10:50'));
+    const runs = await segmentsOf(id);
+    assert.deepEqual(runs, [
+      { started_at: at('10:00'), ended_at: at('10:20') },
+      { started_at: at('11:00'), ended_at: at('11:10') },
+    ]);
+    for (const run of runs) assert.ok(Date.parse(run.ended_at!) > Date.parse(run.started_at));
+  });
+
+  it('leaves no empty run behind a running block either, when the stretch begins where its run began', async () => {
+    const { dropInterval } = await sessionsMod();
+    freeze(at('10:00'));
+    const block = await startBlock();
+    goTo(at('10:50'));
+
+    dropInterval(block.id, at('10:00'), at('10:20'));
+
+    assert.deepEqual(await segmentsOf(block.id), [{ started_at: at('10:20'), ended_at: null }]);
+  });
+
   it('removes a run altogether when the stretch covers it', async () => {
     const { dropInterval } = await sessionsMod();
     const id = await threeSittings();
@@ -809,6 +1213,13 @@ describe('cutting a stretch out of spans', () => {
     assert.deepEqual(cutOut(spans, 40, 50, NOW), { spans, removedMs: 0 });
   });
 
+  it('never leaves an empty span when the stretch begins or ends exactly where a span does', () => {
+    assert.deepEqual(cutOut([S(0, 100)], 0, 40, NOW), { spans: [S(40, 100)], removedMs: 40 });
+    assert.deepEqual(cutOut([S(0, 100)], 60, 100, NOW), { spans: [S(0, 60)], removedMs: 40 });
+    assert.deepEqual(cutOut([S(0, 100)], 0, 100, NOW), { spans: [], removedMs: 100 });
+    assert.deepEqual(cutOut([S(0, null)], 0, 300, NOW), { spans: [S(300, null)], removedMs: 300 });
+  });
+
   it('puts the spans out in time order whatever order they came in', () => {
     assert.deepEqual(cutOut([S(50, 60), S(0, 10)], 5, 55, NOW), {
       spans: [S(0, 5), S(55, 60)],
@@ -837,5 +1248,146 @@ describe('cutting a stretch out of spans', () => {
     assert.equal(reachedAt(spans, 15, NOW), 205);
     assert.equal(reachedAt(spans, 10 + (NOW - 200), NOW), NOW);
     assert.equal(reachedAt(spans, 10 + (NOW - 200) + 1, NOW), null);
+  });
+});
+
+describe('finding the time that spans leave free', () => {
+  const S = (start: number, end: number | null): Span => ({ start, end });
+  const G = (start: number, end: number) => ({ start, end });
+  const NOW = 1000;
+
+  it('is the whole stretch when nothing is in it', () => {
+    assert.deepEqual(gapsIn([], 10, 50, NOW), [G(10, 50)]);
+    assert.deepEqual(gapsIn([S(60, 70), S(0, 5), S(0, 10)], 10, 50, NOW), [G(10, 50)]);
+  });
+
+  it('is what lies between the spans, in time order whatever order they came in', () => {
+    assert.deepEqual(gapsIn([S(30, 40), S(10, 20)], 0, 50, NOW), [G(0, 10), G(20, 30), G(40, 50)]);
+  });
+
+  it('takes spans that overlap, touch or reach outside the stretch as one covered stretch', () => {
+    assert.deepEqual(gapsIn([S(0, 25), S(20, 30), S(30, 35), S(45, 90)], 10, 50, NOW), [G(35, 45)]);
+  });
+
+  it('is nothing when the stretch is covered, or is not a stretch', () => {
+    assert.deepEqual(gapsIn([S(0, 100)], 10, 50, NOW), []);
+    assert.deepEqual(gapsIn([S(0, 30), S(30, 60)], 10, 50, NOW), []);
+    assert.deepEqual(gapsIn([], 50, 50, NOW), []);
+    assert.deepEqual(gapsIn([], 50, 10, NOW), []);
+  });
+
+  it('counts a span that is open as ticking up to now, and a span with no length as nothing', () => {
+    assert.deepEqual(gapsIn([S(20, null)], 10, 50, 30), [G(10, 20), G(30, 50)]);
+    // One that is said to have begun after now has not run at all.
+    assert.deepEqual(gapsIn([S(40, null)], 10, 50, 30), [G(10, 50)]);
+    assert.deepEqual(gapsIn([S(20, 20)], 10, 50, NOW), [G(10, 50)]);
+  });
+});
+
+describe('time that is set by hand while a stretch is waiting to be answered', () => {
+  let api: Api;
+  failOnLoggedErrors();
+
+  before(async () => {
+    api = await serve();
+  });
+  beforeEach(reset);
+  afterEach(() => mock.timers.reset());
+  after(() => api.close());
+
+  /** A block on the clock since 10:00, and at 11:00 the machine says it was away from 10:20 to 10:40. */
+  async function withAStretchWaiting() {
+    freeze(at('10:00'));
+    const block = await startBlock();
+    goTo(at('11:00'));
+    const res = await api.call('POST', `/sessions/${block.id}/away`, {
+      startedAt: at('10:20'),
+      endedAt: at('10:40'),
+    });
+    const away = res.body.away.id as number;
+    return { block, away, promptId: await awayPromptId(away) };
+  }
+
+  const awayPrompts = async () =>
+    ((await api.call('GET', '/prompts')).body as { kind: string }[]).filter(
+      (p) => p.kind === 'away',
+    );
+  const elapsed = async (id: number) => {
+    const { toView, getSessionRow } = await sessionsMod();
+    return toView(getSessionRow(id)).elapsedSeconds;
+  };
+
+  /** What has to be true once the person has said what the time was. */
+  async function assertSettled(away: number, promptId: string, blockId: number, seconds: number) {
+    const row = await awayRow(away);
+    assert.equal(row?.status, 'kept');
+    assert.equal(row?.resolved_at, at('11:00'));
+    assert.deepEqual(await awayPrompts(), []);
+    // The Drop button of a banner that is still on screen: it is out of date, and does nothing.
+    assert.equal(await api.status('POST', '/prompts/act', { id: promptId, action: 'drop' }), 409);
+    assert.equal(await elapsed(blockId), seconds);
+  }
+
+  it('answers the stretch as kept when the time of a finished block is typed in', async () => {
+    const { stopSession } = await sessionsMod();
+    const { block, away, promptId } = await withAStretchWaiting();
+    stopSession(block.id, 'completed');
+
+    // The twenty minutes away have been taken off by hand: forty are left.
+    const res = await api.call('PATCH', `/sessions/${block.id}`, { activeSeconds: 2400 });
+
+    assert.equal(res.status, 200);
+    await assertSettled(away, promptId, block.id, 2400);
+    assert.deepEqual(await segmentsOf(block.id), [
+      { started_at: at('10:00'), ended_at: at('10:40') },
+    ]);
+  });
+
+  it('answers the stretch as kept when a block is finished with its time given', async () => {
+    const { block, away, promptId } = await withAStretchWaiting();
+
+    const res = await api.call('POST', `/sessions/${block.id}/complete`, { activeSeconds: 2400 });
+
+    assert.equal(res.status, 200);
+    await assertSettled(away, promptId, block.id, 2400);
+  });
+
+  it('answers the stretch as kept when a finished block is moved to another time', async () => {
+    const { stopSession } = await sessionsMod();
+    const { block, away, promptId } = await withAStretchWaiting();
+    stopSession(block.id, 'completed');
+
+    // It really happened half an hour later: the stretch no longer lines up with it.
+    const res = await api.call('POST', `/sessions/${block.id}/reschedule`, {
+      startedAt: at('10:30'),
+    });
+
+    assert.equal(res.status, 200);
+    await assertSettled(away, promptId, block.id, 3600);
+    assert.deepEqual(await segmentsOf(block.id), [
+      { started_at: at('10:30'), ended_at: at('11:30') },
+    ]);
+  });
+
+  it('leaves a stretch waiting when something else about the block is edited, and one on another block', async () => {
+    const { stopSession } = await sessionsMod();
+    const { block, away } = await withAStretchWaiting();
+    stopSession(block.id, 'completed');
+    const second = await startBlock('Second block');
+    goTo(at('11:30'));
+    const other = await api.call('POST', `/sessions/${second.id}/away`, {
+      startedAt: at('11:10'),
+      endedAt: at('11:20'),
+    });
+
+    // Not the time: the stretch is still the person's to answer.
+    await api.call('PATCH', `/sessions/${block.id}`, { title: 'Renamed', focusRating: 4 });
+    assert.equal((await awayRow(away))?.status, 'pending');
+
+    // The time of one block settles that block's stretches and no other's.
+    await api.call('PATCH', `/sessions/${block.id}`, { activeSeconds: 2400 });
+    assert.equal((await awayRow(away))?.status, 'kept');
+    assert.equal((await awayRow(other.body.away.id))?.status, 'pending');
+    assert.equal((await awayPrompts()).length, 1);
   });
 });
