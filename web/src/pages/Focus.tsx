@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import type { PlanItem, SavedTimer, Session, TimerMode } from '../api';
 import { DayBar } from '../components/DayBar';
 import { EntryRow } from '../components/EntryRow';
@@ -45,6 +46,25 @@ export function FocusPage({ dark }: { dark: boolean }) {
   const actions = useSessionActions();
   const timerActions = useTimerActions();
   const [finishing, setFinishing] = useState(false);
+
+  // A long-block prompt's "Finish block" arrives as /?finish=1: open the finish dialog for the
+  // block on the clock, then take the parameter off the address (replacing the entry, so Back
+  // does not open it again). It waits for the block to load, and with none live it is just
+  // taken off, so an old link cannot leave a dialog waiting for the next block.
+  const [params, setParams] = useSearchParams();
+  const wantsFinish = params.get('finish') === '1';
+  useEffect(() => {
+    if (!wantsFinish || live.isLoading) return;
+    if (live.session) setFinishing(true);
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete('finish');
+        return next;
+      },
+      { replace: true },
+    );
+  }, [wantsFinish, live.isLoading, live.session, setParams]);
 
   const defaultMinutes = Number(settings?.focus_minutes ?? 45);
   const defaultMode: TimerMode =

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../db.js';
+import { reportAway } from '../lib/away.js';
 import { badRequest, handler, intParam, notFound, parse } from '../lib/http.js';
 import { dayStartHour, tz } from '../lib/settings.js';
 import {
@@ -58,6 +59,13 @@ const manualSchema = z.object({
   focusRating: rating.nullish(),
   notes: z.string().max(20_000).nullish(),
   kind: z.enum(['focus', 'break']).optional(),
+  // The meeting this is the time spent on. It has to exist; logManualSession checks.
+  calendarEventId: z.string().max(300).nullish(),
+});
+
+const awaySchema = z.object({
+  startedAt: z.string().datetime({ offset: true }),
+  endedAt: z.string().datetime({ offset: true }),
 });
 
 const patchSchema = z.object({
@@ -132,6 +140,20 @@ sessionsRouter.post(
 sessionsRouter.post(
   '/:id/resume',
   handler((req) => resumeSession(intParam(req.params.id, 'session id'))),
+);
+
+/**
+ * The desktop app reports time you were away while this block ran. It is kept as a prompt
+ * until you keep it or drop it (see lib/away.ts), not decided here.
+ */
+sessionsRouter.post(
+  '/:id/away',
+  handler((req, res) => {
+    const body = parse(awaySchema, req.body);
+    const away = reportAway(intParam(req.params.id, 'session id'), body.startedAt, body.endedAt);
+    res.status(201);
+    return { away };
+  }),
 );
 
 sessionsRouter.post(

@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import cors from 'cors';
 import express from 'express';
+import { startCalendarSync } from './lib/calendar.js';
 import { config } from './lib/config.js';
 import { errorMiddleware } from './lib/http.js';
 import { initDb } from './db.js';
@@ -14,6 +15,20 @@ export interface RunningServer {
   dataDir: string;
   hasWebBuild: boolean;
   close(): Promise<void>;
+}
+
+/** How often the calendar feeds are read in the background. */
+const DEFAULT_CALENDAR_SYNC_MS = 15 * 60_000;
+
+/**
+ * FOCUSDESK_CALENDAR_SYNC_MS sets it; 0 switches the background sync off, which is what a
+ * test or a machine that must never reach out wants. A value that is not a number of
+ * milliseconds, or is negative, is ignored.
+ */
+export function calendarSyncMs(): number {
+  const raw = process.env.FOCUSDESK_CALENDAR_SYNC_MS;
+  const ms = raw == null || raw.trim() === '' ? NaN : Number(raw);
+  return Number.isFinite(ms) && ms >= 0 ? Math.round(ms) : DEFAULT_CALENDAR_SYNC_MS;
 }
 
 export function createApp(): express.Express {
@@ -46,7 +61,12 @@ export function createApp(): express.Express {
  * does, so two copies of FocusDesk can never fight over one port.
  */
 export async function startServer(
-  opts: { port?: number; host?: string } = {},
+  opts: {
+    port?: number;
+    host?: string;
+    /** Milliseconds between background calendar syncs; 0 for none. Defaults to FOCUSDESK_CALENDAR_SYNC_MS, then 15 minutes. */
+    calendarSyncMs?: number;
+  } = {},
 ): Promise<RunningServer> {
   initDb();
   const app = createApp();
@@ -59,15 +79,21 @@ export async function startServer(
     s.once('error', reject);
   });
 
+  // Meeting prompts read the synced events, which would otherwise only move when Sync now
+  // is pressed. It only fetches while a feed is switched on.
+  const stopCalendarSync = startCalendarSync({ everyMs: opts.calendarSyncMs ?? calendarSyncMs() });
+
   const actual = (server.address() as AddressInfo).port;
   return {
     port: actual,
     url: `http://${host}:${actual}`,
     dataDir: config.dataDir,
     hasWebBuild: fs.existsSync(path.join(config.webDist, 'index.html')),
-    close: () =>
-      new Promise<void>((resolve, reject) =>
+    close: () => {
+      stopCalendarSync();
+      return new Promise<void>((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve())),
-      ),
+      );
+    },
   };
 }

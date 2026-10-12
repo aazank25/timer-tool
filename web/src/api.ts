@@ -236,7 +236,7 @@ export function reason(err: unknown, fallback: string): string {
   return first ? `${err.message} (${first[0]}: ${first[1]?.[0] ?? 'not allowed'})` : err.message;
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`/api${path}`, {
     method,
     headers: body === undefined ? undefined : { 'content-type': 'application/json' },
@@ -252,7 +252,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return payload as T;
 }
 
-const qs = (params: Record<string, string | number | undefined>) => {
+export const qs = (params: Record<string, string | number | undefined>) => {
   const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== '');
   return entries.length
     ? `?${new URLSearchParams(entries.map(([k, v]) => [k, String(v)])).toString()}`
@@ -297,6 +297,8 @@ export const api = {
     minutes: number;
     focusRating?: number | null;
     notes?: string | null;
+    /** The meeting this is the time spent on: it then shows what was logged on it. */
+    calendarEventId?: string | null;
   }) => request<Session>('POST', '/sessions/manual', body),
   pauseSession: (id: number) => request<Session>('POST', `/sessions/${id}/pause`),
   resumeSession: (id: number) => request<Session>('POST', `/sessions/${id}/resume`),

@@ -73,6 +73,7 @@ function invalidateTimeline(qc: QueryClient) {
   void qc.invalidateQueries({ queryKey: ['tasks'] });
   void qc.invalidateQueries({ queryKey: ['timers'] });
   void qc.invalidateQueries({ queryKey: ['calendar', 'events'] });
+  void qc.invalidateQueries({ queryKey: ['prompts'] });
 }
 
 export function useToday() {

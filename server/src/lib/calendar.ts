@@ -211,7 +211,22 @@ function inheritedProjectId(title: string, uid: string): number | null {
   return row?.project_id ?? null;
 }
 
-export async function syncCalendars(): Promise<SyncResult[]> {
+/**
+ * Syncs run one at a time, whoever asks: the timer in the background, a click on Sync now,
+ * or both at once. Two at a time would read the same feed twice and race to write the same
+ * rows, so a sync that is asked for while another is running waits for it and then reads
+ * the sources afresh, which is also what lets a feed that was added a moment ago be picked up.
+ */
+let lastSync: Promise<unknown> = Promise.resolve();
+
+export function syncCalendars(): Promise<SyncResult[]> {
+  const run = lastSync.then(syncOnce);
+  // Whatever happens to this one, the next in line still runs.
+  lastSync = run.catch(() => undefined);
+  return run;
+}
+
+async function syncOnce(): Promise<SyncResult[]> {
   const sources = readSources().filter((s) => s.enabled);
   const now = new Date();
   const from = new Date(now.getTime() - SYNC_WINDOW_BACK_DAYS * 86_400_000);
@@ -241,14 +256,13 @@ export async function syncCalendars(): Promise<SyncResult[]> {
       const events = parseFeed(await fetchText(source.url), from, to);
       const stamp = nowIso();
       db.transaction(() => {
-        // Drop the old window first so deleted and moved meetings disappear.
-        db.prepare(
-          'DELETE FROM calendar_events WHERE provider = ? AND starts_at >= ? AND starts_at <= ?',
-        ).run(provider, from.toISOString(), to.toISOString());
+        const current = new Set<string>();
         for (const e of events) {
           const startIso = e.start.toISOString();
+          const id = `${provider}:${e.uid}:${startIso}`;
+          current.add(id);
           upsert.run(
-            `${provider}:${e.uid}:${startIso}`,
+            id,
             provider,
             source.label,
             e.title,
@@ -263,6 +277,18 @@ export async function syncCalendars(): Promise<SyncResult[]> {
             stamp,
           );
         }
+        // Only now remove what the feed no longer has, so a meeting that was cancelled or
+        // moved disappears while one that is still there keeps the project it was given by
+        // hand. Clearing the whole window first used to wipe that on every sync. It comes
+        // after the writes above so that a moved instance can still inherit its project
+        // from the row it replaces.
+        const stale = db
+          .prepare(
+            'SELECT id FROM calendar_events WHERE provider = ? AND starts_at >= ? AND starts_at <= ?',
+          )
+          .all(provider, from.toISOString(), to.toISOString()) as { id: string }[];
+        const remove = db.prepare('DELETE FROM calendar_events WHERE id = ?');
+        for (const { id } of stale) if (!current.has(id)) remove.run(id);
       })();
       results.push({ sourceId: source.id, label: source.label, ok: true, events: events.length });
     } catch (err) {
@@ -277,6 +303,69 @@ export async function syncCalendars(): Promise<SyncResult[]> {
   }
   setSettings({ calendar_last_sync: nowIso() });
   return results;
+}
+
+/**
+ * Keep the calendar fresh in the background. A meeting prompt is only as good as the events
+ * it reads, and the feed used to be read only when you pressed Sync now. The first look is
+ * soon after start-up and then every `everyMs`; nothing is fetched while no feed is switched
+ * on. The next look is only set once the last one has finished, so a slow feed can never
+ * have two running, and a failure is logged and waited out rather than allowed to stop it.
+ * `everyMs` of 0 switches it off. Returns a function that stops it.
+ */
+export function startCalendarSync(opts: {
+  everyMs: number;
+  /** How long to wait before the first look. Defaults to 30 seconds, or `everyMs` if that is less. */
+  firstRunMs?: number;
+  /** What to run each time. Left out, it is the real sync; tests pass their own, so none touches the network. */
+  sync?: () => Promise<SyncResult[]>;
+  /**
+   * The clock the waiting is done with. Left out, it is the real one; tests pass one they wind
+   * by hand. Faking the global setTimeout instead would reach the sockets of every fetch that
+   * is still closing, and they clear timers too.
+   */
+  timers?: {
+    setTimeout(callback: () => void, ms: number): unknown;
+    clearTimeout(handle: unknown): void;
+  };
+}): () => void {
+  if (!(opts.everyMs > 0)) return () => undefined;
+  const sync = opts.sync ?? syncCalendars;
+  const clock = opts.timers ?? {
+    setTimeout: (callback: () => void, ms: number) => {
+      const handle = setTimeout(callback, ms);
+      // A sync is never a reason to keep the process alive.
+      handle.unref();
+      return handle;
+    },
+    clearTimeout: (handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  };
+  let timer: unknown;
+  let stopped = false;
+
+  const schedule = (ms: number) => {
+    timer = clock.setTimeout(() => void look(), ms);
+  };
+
+  async function look() {
+    try {
+      if (readSources().some((s) => s.enabled)) {
+        for (const r of await sync()) {
+          if (!r.ok) console.warn(`[calendar] could not sync "${r.label}": ${r.error}`);
+        }
+      }
+    } catch (err) {
+      console.error('[calendar] background sync failed', err);
+    } finally {
+      if (!stopped) schedule(opts.everyMs);
+    }
+  }
+
+  schedule(opts.firstRunMs ?? Math.min(30_000, opts.everyMs));
+  return () => {
+    stopped = true;
+    clock.clearTimeout(timer);
+  };
 }
 
 export interface CalendarEventView {
