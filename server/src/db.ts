@@ -293,6 +293,11 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   autostart_breaks: 'false',
   /** What a new block is when the caller does not say: 'stopwatch' or 'pomodoro'. */
   default_timer_mode: 'stopwatch',
+  /**
+   * The shortcut, in any app, that opens the quick-switch box. An Electron accelerator in
+   * the spelling lib/accelerator.ts stores it in; '' turns it off.
+   */
+  quick_switch_hotkey: 'CommandOrControl+Shift+K',
   /** Day rolls over at this local hour, so a 1am block counts as the day before. */
   day_start_hour: '4',
   /** When the end-of-day wrap-up is due, as HH:MM on a 24-hour clock. '' means never. */

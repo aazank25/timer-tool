@@ -16,6 +16,8 @@ export interface RunningServer {
   close(): Promise<void>;
 }
 
+export { normalizeAccelerator } from './lib/accelerator.js';
+
 export function createApp(): express.Express {
   const app = express();
   app.disable('x-powered-by');

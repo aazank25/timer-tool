@@ -16,6 +16,7 @@ import {
   resumeSession,
   startSession,
   stopSession,
+  switchSession,
   toView,
 } from '../lib/sessions.js';
 import { requireProject, requireTask, startTaskForLinkedBlock } from '../lib/tasks.js';
@@ -39,6 +40,12 @@ const startSchema = z.object({
   kind: z.enum(['focus', 'break']).optional(),
   planItemId: z.number().int().positive().nullish(),
   calendarEventId: z.string().max(300).nullish(),
+});
+
+/** The block to start is the start body itself, so the two can never disagree about what one is. */
+const switchSchema = z.object({
+  start: startSchema,
+  rating: rating.nullish(),
 });
 
 const stopSchema = z.object({
@@ -108,6 +115,20 @@ sessionsRouter.post(
     const body = parse(startSchema, req.body);
     res.status(201);
     return startSession(body);
+  }),
+);
+
+/**
+ * Finish the block on the clock (rated, if a rating is sent) and start another, in one
+ * request: what the quick-switch box does. A start that is refused changes nothing, the
+ * block on the clock included.
+ */
+sessionsRouter.post(
+  '/switch',
+  handler((req, res) => {
+    const body = parse(switchSchema, req.body);
+    res.status(201);
+    return switchSession(body);
   }),
 );
 

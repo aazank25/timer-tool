@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ModePicker } from '../components/pickers';
+import { QuickSwitchSettings } from '../components/settings/QuickSwitchSettings';
 import { WrapUpSettings } from '../components/settings/WrapUpSettings';
 import { Button, Card, Empty, Field, inputBase, inputClass } from '../components/ui';
 import { useCalendarSources, useSettings, useTheme } from '../hooks';
@@ -118,6 +119,7 @@ export function SettingsPage() {
         </Field>
       </Card>
 
+      <QuickSwitchSettings />
       <CalendarSettings />
     </div>
   );

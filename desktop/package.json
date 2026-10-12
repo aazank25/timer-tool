@@ -30,6 +30,8 @@
     },
     "files": [
       "main.mjs",
+      "palette.mjs",
+      "preload.cjs",
       "dist/**/*",
       "web/**/*",
       "assets/**/*",
