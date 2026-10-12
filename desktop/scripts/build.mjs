@@ -25,9 +25,14 @@ execFileSync(process.execPath, [path.join(here, 'make-icons.mjs')], { stdio: 'in
 
 step('client bundle');
 const webDist = path.join(repo, 'web', 'dist');
-if (!fs.existsSync(path.join(webDist, 'index.html'))) {
-  execFileSync('npm', ['run', 'build', '-w', 'web'], { cwd: repo, stdio: 'inherit' });
-}
+// Built every time, never reused: a web/dist left over from an earlier build is the screens as
+// they were then, and copying it put an old app on top of a new server without a word. Vite
+// takes seconds. (npm is a .cmd on Windows, which only runs through a shell.)
+execFileSync('npm', ['run', 'build', '-w', 'web'], {
+  cwd: repo,
+  stdio: 'inherit',
+  shell: process.platform === 'win32',
+});
 const webTarget = path.join(desktop, 'web');
 fs.rmSync(webTarget, { recursive: true, force: true });
 fs.cpSync(webDist, webTarget, { recursive: true });
