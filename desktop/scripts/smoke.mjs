@@ -54,6 +54,9 @@ const problems = new Set(); // page errors and console errors, as they happen
 const output = []; // what the app itself printed, shown if something fails
 let stage = 'starting';
 let app;
+// The app's process, kept from the launch: once the app has quit Playwright has let go of it, and
+// asking it for the process then throws.
+let proc = null;
 
 const say = (what) => console.log(`smoke: ${(stage = what)}`);
 const fail = (why) => {
@@ -73,7 +76,7 @@ async function run() {
     env: { ...process.env, FOCUSDESK_TEST: '1', FOCUSDESK_DATA_DIR: dataDir },
     timeout: 60_000,
   });
-  const proc = app.process();
+  proc = app.process();
   for (const stream of [proc.stdout, proc.stderr]) {
     stream?.on('data', (chunk) => output.push(String(chunk)));
   }
@@ -142,7 +145,6 @@ try {
   if (tail) console.error(`--- the last of what the app printed ---\n${tail}`);
   process.exitCode = 1;
 } finally {
-  const proc = app?.process();
   if (proc && proc.exitCode === null && proc.signalCode === null) {
     proc.kill('SIGKILL'); // still running: it failed, or it would not quit
     const gone = new Promise((resolve) => proc.once('exit', resolve));
