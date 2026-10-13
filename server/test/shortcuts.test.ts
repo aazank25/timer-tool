@@ -588,6 +588,229 @@ describe('hotkeyClash', () => {
   });
 });
 
+/** Every spelling of the command key the settings take, as typed. */
+const COMMAND_KEYS = ['Command', 'cmd', 'Control', 'ctrl', 'CommandOrControl', 'CmdOrCtrl'];
+
+/** The keys that go with the command key alone in every app: see reservedKind. */
+const EVERYDAY = [...'ACFHMNOPQRSTVWXZ'].concat('Tab');
+
+describe('shortcuts that are already something: refused where a shortcut is read', () => {
+  it('refuses the command key with one of A C F H M N O P Q R S T V W X Z or Tab, in every spelling', async () => {
+    const { normalizeAccelerator } = await acceleratorMod();
+    for (const command of COMMAND_KEYS) {
+      for (const key of EVERYDAY) {
+        for (const typed of [
+          `${command}+${key}`,
+          `${command.toUpperCase()}+${key.toLowerCase()}`,
+          ` ${command} + ${key} `,
+        ]) {
+          assert.equal(normalizeAccelerator(typed), null, typed);
+        }
+      }
+    }
+  });
+
+  it('refuses redo: Shift and the command key with Z, in either order', async () => {
+    const { normalizeAccelerator } = await acceleratorMod();
+    for (const command of COMMAND_KEYS) {
+      assert.equal(normalizeAccelerator(`Shift+${command}+Z`), null, `Shift+${command}+Z`);
+      assert.equal(normalizeAccelerator(`${command}+Shift+Z`), null, `${command}+Shift+Z`);
+    }
+  });
+
+  it('refuses Alt+F4 and Alt+Tab, and Option for Alt', async () => {
+    const { normalizeAccelerator } = await acceleratorMod();
+    for (const typed of ['Alt+F4', 'alt+f4', 'Option+F4', 'Alt+Tab', 'option+tab', ' ALT + TAB ']) {
+      assert.equal(normalizeAccelerator(typed), null, typed);
+    }
+  });
+
+  it('refuses Command+Space, which is Spotlight, and CommandOrControl+Space, which is it on a Mac', async () => {
+    const { normalizeAccelerator } = await acceleratorMod();
+    for (const typed of ['Command+Space', 'cmd+space', 'CommandOrControl+Space', 'CmdOrCtrl+SPACE']) {
+      assert.equal(normalizeAccelerator(typed), null, typed);
+    }
+    // Control+Space is not Spotlight, anywhere.
+    assert.equal(normalizeAccelerator('Control+Space'), 'Control+Space');
+  });
+
+  it('keeps the three shortcuts that ship valid, in their own spelling', async () => {
+    const { normalizeAccelerator } = await acceleratorMod();
+    for (const key of HOTKEYS) assert.equal(normalizeAccelerator(SHIPPED[key]), SHIPPED[key], key);
+  });
+
+  it('leaves alone anything with another modifier or another key: those are other shortcuts', async () => {
+    const { normalizeAccelerator } = await acceleratorMod();
+    for (const typed of [
+      // Another modifier makes it another shortcut.
+      'Command+Shift+C',
+      'Control+Alt+C',
+      'CommandOrControl+Shift+Q',
+      'CommandOrControl+Shift+Tab',
+      'Command+Alt+Z',
+      'Command+Shift+Alt+Z',
+      'Control+Command+C',
+      'Shift+Alt+F4',
+      'Control+Alt+F4',
+      'Command+Shift+Space',
+      'CommandOrControl+Alt+Space',
+      'Shift+Control+Y',
+      // Another key.
+      'Command+B',
+      'Command+K',
+      'Control+J',
+      'CommandOrControl+Y',
+      'Command+1',
+      'Command+Enter',
+      // A function key may go with Alt or Shift alone, and only Alt+F4 of them is a system key.
+      'Alt+F5',
+      'Shift+F4',
+      'Alt+F12',
+    ]) {
+      assert.notEqual(normalizeAccelerator(typed), null, typed);
+    }
+  });
+
+  it('says which it is: reserved, and not only that it is not a shortcut', async () => {
+    const { readAccelerator } = await acceleratorMod();
+
+    assert.deepEqual(readAccelerator('cmd+c', false), {
+      ok: false,
+      reason: 'reserved',
+      message:
+        'Command+C is a shortcut every app uses; pick one with Command+Shift or Command+Alt instead',
+    });
+    assert.deepEqual(readAccelerator('ctrl+tab'), {
+      ok: false,
+      reason: 'reserved',
+      message:
+        'Control+Tab is a shortcut every app uses; pick one with Control+Shift or Control+Alt instead',
+    });
+    assert.deepEqual(readAccelerator('Shift+CommandOrControl+Z'), {
+      ok: false,
+      reason: 'reserved',
+      message: 'Shift+CommandOrControl+Z is redo in nearly every app; pick another key',
+    });
+    assert.deepEqual(readAccelerator('alt+f4'), {
+      ok: false,
+      reason: 'reserved',
+      message: 'Alt+F4 closes a window on Windows; pick another shortcut',
+    });
+    assert.deepEqual(readAccelerator('Alt+Tab'), {
+      ok: false,
+      reason: 'reserved',
+      message: 'Alt+Tab switches between windows on Windows; pick another shortcut',
+    });
+    assert.deepEqual(readAccelerator('CmdOrCtrl+Space'), {
+      ok: false,
+      reason: 'reserved',
+      message:
+        'CommandOrControl+Space opens Spotlight on a Mac; pick one with CommandOrControl+Shift or CommandOrControl+Alt instead',
+    });
+
+    // Not a shortcut at all, or one that would take a key from every app, is only that.
+    for (const junk of ['Foo+A', 'K', 'Cmd+Shift', 'Shift+A', 'Alt+Space', '', 'Cmd+Shift+Ж']) {
+      assert.deepEqual(readAccelerator(junk), { ok: false, reason: 'invalid' }, JSON.stringify(junk));
+    }
+    // A good one is read as before.
+    assert.deepEqual(readAccelerator('ctrl+alt+j'), { ok: true, accelerator: 'Control+Alt+J' });
+  });
+
+  it('counts Super as the command key on a Mac, where it is, and not elsewhere, where it is the Windows key', async () => {
+    const { readAccelerator, reservedKind } = await acceleratorMod();
+    assert.equal(reservedKind(['Super'], 'C', true), 'everyday');
+    assert.equal(reservedKind(['Super'], 'Space', true), 'spotlight');
+    assert.equal(reservedKind(['Shift', 'Super'], 'Z', true), 'redo');
+    assert.equal(readAccelerator('Super+Q', true).ok, false);
+
+    assert.equal(reservedKind(['Super'], 'C', false), null);
+    assert.equal(reservedKind(['Super'], 'Space', false), null);
+    assert.equal(reservedKind(['Shift', 'Super'], 'Z', false), null);
+    assert.deepEqual(readAccelerator('Super+Q', false), { ok: true, accelerator: 'Super+Q' });
+    // Command is a Mac's key by name, and is refused on every platform.
+    assert.equal(readAccelerator('Command+Q', false).ok, false);
+    assert.equal(readAccelerator('Command+Q', true).ok, false);
+  });
+
+  it('is judged by the modifiers as a set: both command keys, or a third modifier, is another shortcut', async () => {
+    const { reservedKind } = await acceleratorMod();
+    assert.equal(reservedKind(['Command', 'Control'], 'C', true), null);
+    assert.equal(reservedKind(['Command', 'Alt'], 'C', true), null);
+    assert.equal(reservedKind(['Command', 'Shift'], 'C', true), null);
+    assert.equal(reservedKind(['Command', 'Shift'], 'Z', true), 'redo');
+    assert.equal(reservedKind(['Shift', 'Command'], 'Z', true), 'redo');
+    assert.equal(reservedKind(['Command', 'Alt', 'Shift'], 'Z', true), null);
+    assert.equal(reservedKind(['Alt', 'Shift'], 'F4', true), null);
+    assert.equal(reservedKind(['Alt'], 'F5', true), null);
+    assert.equal(reservedKind([], 'C', true), null);
+    // Shift is not the command key, so Shift+Alt+Z is not redo.
+    assert.equal(reservedKind(['Shift', 'Alt'], 'Z', true), null);
+  });
+});
+
+for (const key of HOTKEYS) {
+  describe(`the ${key} setting and the shortcuts that are already something`, () => {
+    let api: Api;
+
+    before(async () => {
+      await freshDb();
+      api = await serve();
+    });
+    beforeEach(backToShipped);
+    after(() => api.close());
+
+    it('refuses each of them with a 400 that says what it is, and writes nothing', async () => {
+      assert.equal((await api.call('PATCH', '/settings', { [key]: MINE[key] })).status, 200);
+      for (const [typed, said] of [
+        [
+          'Command+C',
+          /^Command\+C is a shortcut every app uses; pick one with Command\+Shift or Command\+Alt instead$/,
+        ],
+        ['ctrl+q', /^Control\+Q is a shortcut every app uses/],
+        ['CmdOrCtrl+Tab', /^CommandOrControl\+Tab is a shortcut every app uses/],
+        ['Control+W', /^Control\+W is a shortcut every app uses/],
+        ['CommandOrControl+Z', /^CommandOrControl\+Z is a shortcut every app uses/],
+        ['Shift+Command+Z', /^Shift\+Command\+Z is redo in nearly every app/],
+        ['Shift+Control+Z', /^Shift\+Control\+Z is redo in nearly every app/],
+        ['Alt+F4', /^Alt\+F4 closes a window on Windows/],
+        ['Alt+Tab', /^Alt\+Tab switches between windows on Windows/],
+        ['Command+Space', /^Command\+Space opens Spotlight on a Mac/],
+      ] as const) {
+        const res = await api.call('PATCH', '/settings', { [key]: typed });
+        assert.equal(res.status, 400, typed);
+        assert.equal(res.body.error, 'Invalid request', typed);
+        assert.match(res.body.details.fieldErrors[key][0], said, typed);
+      }
+      assert.equal((await api.call('GET', '/settings')).body[key], MINE[key]);
+    });
+
+    it('refuses the whole patch when this one is reserved, and nothing in it is written', async () => {
+      const was = (await api.call('GET', '/settings')).body;
+      const res = await api.call('PATCH', '/settings', { focus_minutes: 99, [key]: 'cmd+s' });
+      assert.equal(res.status, 400);
+      const now = (await api.call('GET', '/settings')).body;
+      assert.equal(now.focus_minutes, was.focus_minutes);
+      assert.equal(now[key], was[key]);
+    });
+
+    it('takes the same keys with another modifier, the one that ships, and off', async () => {
+      for (const [typed, saved] of [
+        ['cmd+shift+c', 'Command+Shift+C'],
+        ['ctrl+alt+c', 'Control+Alt+C'],
+        ['CommandOrControl+Shift+Tab', 'CommandOrControl+Shift+Tab'],
+        ['Control+Space', 'Control+Space'],
+        ['alt+f5', 'Alt+F5'],
+        [SHIPPED[key], SHIPPED[key]],
+        ['', ''],
+      ] as const) {
+        const res = await api.call('PATCH', '/settings', { [key]: typed });
+        assert.equal(res.status, 200, typed);
+        assert.equal(res.body[key], saved, typed);
+      }
+    });
+  });
+}
+
 describe('the notification settings', () => {
   let api: Api;
 

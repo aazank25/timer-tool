@@ -442,6 +442,26 @@ cancels. It works whenever FocusDesk is running, with its window open or not.
   the one spelling that is saved. The desktop app imports the very same function
   through the server bundle, so what the setting accepts and what the app will
   register cannot drift apart.
+- **A shortcut that every app or the system already has is refused.** Registered, it
+  would take the key from every app (or fail without a word where the system keeps
+  it). `reservedKind` (`server/src/lib/accelerator.ts`) names the exact combinations:
+  the command key alone with A C F H M N O P Q R S T V W X Z or Tab (Select all, Copy,
+  Find, Hide, Minimize, New, Open, Print, Quit, Reload, Save, new Tab, Paste, Close, Cut,
+  Undo, and the switcher); redo (Shift and the command key with Z); Alt+F4 and
+  Alt+Tab; and Command+Space, which is Spotlight, and CommandOrControl+Space, which is
+  Command+Space on a Mac (Control+Space is not). "The command key" is Command, Control
+  or CommandOrControl, and Super on a Mac, where it is the Command key; it is the Windows
+  key elsewhere, which none of this is about. Only the exact combination is refused:
+  with Shift or Alt as well it is another shortcut, which is why the three that ship
+  (⌘⇧F, ⌘⇧Space, ⌘⌥K) are fine. It is judged before the rule above, so that Alt+Tab is told
+  what it is. `readAccelerator` says which refusal it was (not a shortcut, or reserved, with
+  a sentence that says what it is and what to pick instead, like *Command+C is a shortcut
+  every app uses; pick one with Command+Shift or Command+Alt instead*), and the settings
+  route answers a 400 with that sentence under the field. `normalizeAccelerator` is the same
+  rule as null or the saved spelling, which is what the desktop app calls, so a stored
+  value that has since become reserved is not registered. The recorder refuses the same set
+  as it is pressed (`web/src/lib/shortcut.ts` writes the list out again, since it runs
+  before anything is sent; both sides are tested).
 - **No two of the three shortcuts are the same.** A combination can be registered
   once, and Electron answers false to a second registration of the same keys. If the
   settings were saved first and refused after, the next start would find a shortcut it
@@ -465,21 +485,64 @@ cancels. It works whenever FocusDesk is running, with its window open or not.
 - **A shortcut is recorded, not typed.** *Change* makes the row listen. Every key press
   then goes to the recorder, with its default cancelled and kept from the rest of the
   page, until one makes a shortcut, Escape is pressed on its own, the window loses
-  the focus or something else is clicked. The key is read from `KeyboardEvent.code`,
-  the physical key, and never from `key`, which is what it types (on a Mac Option+K
-  types ˚). `recordKeyPress` (`web/src/lib/shortcut.ts`) is pure and takes whether
-  this is a Mac: `KeyA`–`KeyZ`, `Digit0`–`Digit9` and `F1`–`F24` are A–Z, 0–9 and
-  F1–F24; `Space`, `Tab`, `Enter`, `Escape`, `Backspace`, `Delete`, `Insert`, `Home`,
-  `End`, `PageUp` and `PageDown` keep their names; the arrows are Up, Down, Left and
-  Right; and `Equal`, the key that types = and +, is Plus. That is every name the
-  server's rule takes, and nothing it refuses: any other key is said to be unusable
-  and the row goes on listening. A modifier on its own waits for the key. Modifiers
-  come in one order: on a Mac Command (the meta key), Control, Alt, Shift; elsewhere
-  Control, Super (the Windows key), Alt, Shift. A key with no modifier, or with only
-  Shift or Alt, is said to be too loose, as the server would refuse it (a function key
-  may go with Shift or Alt alone, but not with nothing). Whatever is accepted is sent,
-  and the server has the last word. The key that was recorded is kept from coming up
-  on the button as a click.
+  the focus, something else is clicked, or a minute has passed (the app gives its
+  shortcuts back after a minute, so the row stops before that). The key is read from
+  `KeyboardEvent.code`, the physical key, and never from `key`, which is what it types
+  with Option held (on a Mac Option+K types ˚), with the exception of the letters and
+  digits off a Mac, below. `recordKeyPress` (`web/src/lib/shortcut.ts`) is pure and takes
+  whether this is a Mac, and a layout: `KeyA`–`KeyZ`, `Digit0`–`Digit9` and `F1`–`F24`
+  are A–Z, 0–9 and F1–F24; `Space`, `Tab`, `Enter`, `Escape`, `Backspace`, `Delete`,
+  `Insert`, `Home`, `End`, `PageUp` and `PageDown` keep their names; the arrows are
+  Up, Down, Left and Right. That is every name the server's rule takes that a key
+  can be recorded as, and nothing it refuses: any other key is said to be unusable and
+  the row goes on listening. A modifier on its own waits for the key. Modifiers come in
+  one order: on a Mac Command (the meta key), Control, Alt, Shift; elsewhere Control,
+  Super (the Windows key), Alt, Shift. A key with no modifier, or with only Shift or
+  Alt, is said to be too loose, as the server would refuse it (a function key may go
+  with Shift or Alt alone, but not with nothing); a combination that every app or the
+  system already has (see above) is said to be reserved. Every refusal comes back with
+  a `hint`, a sentence for the person, so that the words are in one place and the
+  card only shows them. Whatever is accepted is sent, and the server has the last word.
+  The key that was recorded is kept from coming up on the button as a click.
+- **Off a Mac the letters and digits are what the keys type.** Windows registers a
+  shortcut by the character the layout gives the key, and X11 by its symbol, and not by
+  where the key is: on a French keyboard the key in Q's place types a, and a press of
+  it recorded by its place would have saved Q. When a row starts listening, off a Mac,
+  the card asks for `navigator.keyboard.getLayoutMap()` (Chromium has it, on
+  `http://127.0.0.1` too, which is a secure context) and hands the map to
+  `recordKeyPress`. `KeyA`–`KeyZ` and `Digit0`–`Digit9` are then the key that
+  `map.get(code)` says, in capitals, when that is one plain letter or digit; a key that
+  types anything else there (é, ç, &) is no key for a shortcut and says so. The test
+  is on plain ASCII before the capital, because `'ı'.toUpperCase()` is an I. Every other
+  key is as it was, and a browser with no layout map, or a layout that does not name
+  a key, records by place. A Mac registers by place and is not given the map. The
+  reserved list is judged on the key the layout names, since that is what is registered.
+  `Equal`, the key that types =, is not recorded either: Electron's one name for it is
+  Plus, which means Shift and = together, so a shortcut recorded from = would register a
+  key press that was not made. It says so; the server still takes `Plus` when it is typed.
+- **A key FocusDesk holds is not heard, so it is let go of.** A registered shortcut is
+  handed by the system to the app that holds it, and never reaches the page: the
+  recorder would hear nothing, its action would run (Ctrl+Shift+Space would pause the
+  block on the clock, and the quick-switch key would open the box over the card and
+  cancel the recording), and the server's *is already the shortcut to…* sentence could not
+  be reached for a key the app holds. So while a row listens the card asks
+  `suspendHotkeys(true)`, and `suspendHotkeys(false)` on every way listening ends: a key
+  recorded, Escape, a click elsewhere, the window losing the focus, the card going away.
+  The calls are made through optional chaining, so a browser is not an error. The app
+  (`createHotkeys.suspend` and `resume` in `desktop/shortcuts.mjs`) lets go of all three
+  and remembers them, so that `active()` and the tray's label do not flicker; resume takes
+  them again at once as they were (a key another app has taken meanwhile is none, and the
+  next `apply` says why), and `apply` ends a suspension too, since registering is what it is
+  for. `main.mjs` then reads the settings again (`syncHotkeys`), which is what registers a
+  change made meanwhile. Both go through the same one-at-a-time line as every registration
+  (`inHotkeyOrder`), so what is asked in an order is done in it. A page that crashes
+  mid-recording must not leave the person without shortcuts, so the app gives them back by
+  itself when the main window blurs, is hidden or closed, when its page starts another
+  document (a reload, or an address; a move inside the page is the page's own business),
+  when its renderer is gone, and after 60 s at most. Only the main window can ask: the
+  quick-switch box has the same bridge and is not one that records a key. The listening
+  prompt says that *a key that another app is using can't be recorded here*: the other
+  app gets it first, and the page never hears it.
 - **The box is a page.** `/palette` renders the palette and nothing else: no rail,
   no clock bar. It lists open tasks and saved timers together, filtered on title and
   project without regard to case, a title that starts with what was typed first,
@@ -513,29 +576,60 @@ cancels. It works whenever FocusDesk is running, with its window open or not.
   begins with the app's address and is another host, and the bridge would go along
   with the window if it were followed. (Anything else is refused in the box, and
   handed to the real browser from the main window.)
-- **Four calls cross the bridge.** `desktop/preload.cjs` puts
+- **Five calls cross the bridge.** `desktop/preload.cjs` puts
   `window.focusdesk = { closePalette(), onPaletteShow(callback), reloadHotkeys(),
-  testNotification() }` on the main window and the palette, and nothing else of
-  Electron or Node. A plain browser has no `window.focusdesk` at all. The window is
-  hidden, not closed, so the page starts itself over each time it is shown.
-  `onPaletteShow` ignores anything that is not a function. `reloadHotkeys()` reads the
-  three settings again, registers them, and answers `{ show, pause, quickSwitch }`,
-  each `{ ok, accelerator, error? }`: the shortcut registered, null when that one is
-  off, and when it could not be had, why. `testNotification()` shows a sample
-  notification from the system, whatever the notification settings say, and answers
-  `{ ok, error? }`.
+  suspendHotkeys(on), testNotification() }` on the main window and the palette, and
+  nothing else of Electron or Node. A plain browser has no `window.focusdesk` at all.
+  The window is hidden, not closed, so the page starts itself over each time it is
+  shown. `onPaletteShow` ignores anything that is not a function. `reloadHotkeys()`
+  reads the three settings again, registers them, and answers `{ show, pause,
+  quickSwitch }`, each `{ ok, accelerator, code?, error? }`: the shortcut registered,
+  null when that one is off, and when it could not be had, why (`error`) and what kind of
+  why (`code`: `taken`, when another app or another of the three has the keys; `invalid`,
+  when the setting is not a shortcut the app can register or Electron threw for it; and
+  `unreadable`, when the settings could not be read, so nothing was tried and the
+  shortcuts are as they were). `suspendHotkeys(on)` lets go of all three shortcuts for
+  `true` and takes them again for anything else (a string that says `"false"` is truthy,
+  so only exactly `true` lets go), over `hotkeys:suspend`; it resolves when that is done.
+  `testNotification()` shows a sample notification from the system, whatever the
+  notification settings say, and answers `{ ok, error? }`.
 - **The card says how each shortcut stands.** Settings → *Keyboard shortcuts* saves a
   shortcut the moment it is pressed (`PATCH /api/settings` with that one key), asks
   the app to `reloadHotkeys()`, and shows *Active*, *Off* or the error on the row. It asks
   when it opens, too, so a shortcut that never took is not a silent failure. A
-  refusal from the server (not a shortcut, or one another action has) is shown on the
-  row it was for, and nothing changes. What is saved stays saved when the app cannot
-  register it, with the reason on its row: it is the person's choice, and the other
-  app may let go of it, so nothing is written back. (Quick switch used to put the
-  setting back to the shortcut that did work. With three shortcuts and one call that
-  answers for all of them, that would be a guess at what each `accelerator` means,
-  and a wrong one would turn a shortcut off.) In a browser the card still edits and
-  saves, and says that shortcuts work in the desktop app.
+  refusal from the server (not a shortcut, one that is already something, or one another
+  action has) is shown on the row it was for, and nothing changes. The app goes on with the
+  shortcut it had when it cannot register the new one, so `keepWhatWorks` puts the setting
+  back to that one, and says *Kept ⌘⇧F*: what is saved is then what works, and the next start
+  does not try the key that was refused and end up with none. It is written back only when
+  that is right, and not on a guess about what the answer means:
+  - `code: 'unreadable'` writes nothing: the app tried nothing, and the answer is not about
+    this key. (It was found by matching the words of the error before; it is a field now.)
+  - The app has the shortcut that was saved: there is nothing to put back.
+  - The app has a shortcut: it is written back (`Kept …`), and the app is asked to read the
+    settings again, so that its answer, and the tray's item, go by what is saved now and not by
+    the key that was refused.
+  - The app has none (`accelerator: null`): `''` is written back, *It stays off*, **only if
+    the setting was `''` before this save**. Otherwise its old key may merely have failed at
+    the start (another app held it), and writing `''` would turn off a shortcut that the
+    person never turned off. The new value stays saved, and the row says that it could not be
+    registered, that it stays saved, and that it is tried again when the app starts; it also
+    is each time the card is opened. "Before" is read from the query cache when the save
+    begins and not from the render, since the key handler that saves was made when listening
+    began.
+  In a browser the card still edits and saves, and says that shortcuts work in the desktop
+  app.
+- **The tray says when a shortcut is not working.** A refused shortcut that Settings shows
+  on its row is invisible to someone who never opens Settings, and the shortcut then just does
+  nothing. `main.mjs` keeps the last answer of `apply` (`hotkeyStatuses`); when any of the
+  three is not ok the menu-bar menu (the system tray on Windows and Linux) has an item under
+  *Open FocusDesk*, *A shortcut isn't working — open Settings*, which `showWindow('/settings')`
+  (a route, which `windowPlan` moves a loaded page to without reloading it). It is in the
+  menu's signature (`hotkeyTrouble`), or a menu built without it would never be built with it;
+  `applyHotkeys` rebuilds the menu each time it has applied the settings, so the item comes
+  and goes with the answer. An answer of `unreadable` is not a registration that failed and
+  does not replace the last one. `hotkeyMenuItems(statuses, open)` is the pure form that is
+  tested; the wiring is tested as text and run end to end.
 - **Off, and back.** *Turn off* saves empty. *Turn on* saves the default, and so does
   *Reset*, which is shown only for a shortcut that differs from it, judged by the keys
   pressed on this system (`sameShortcut`): ⌘⌥K recorded on a Mac is
@@ -718,9 +812,13 @@ were there when the page opened.
 nothing from Electron: what they need of it is handed in, so `desktop/test/` (run by
 `npm test`, with `node --test`) covers their rules without a screen to lock. The rest of
 what is worth testing in the shell is in modules of its own in the same way
-(`window-route.mjs`, `menu-bar.mjs`, `requests.mjs`), and what is left in `main.mjs` is
-Electron wiring, which no unit test reaches: it is checked by driving the real app (see
-*Test hooks*).
+(`window-route.mjs`, `menu-bar.mjs`, `requests.mjs`, `shortcuts.mjs`), and what is left in
+`main.mjs` is Electron wiring, which no unit test reaches: the tests read it as text, to hold
+what it must keep doing, and it is checked by driving the real app (see *Test hooks*). The
+pages have no test runner of their own, except for the one piece of them that is pure and
+worth holding: `web/test/shortcut.test.ts` (run by `npm test`, with `node --import tsx
+--test`, after the desktop suite) tries the shortcut recorder on made-up key presses, as a
+Mac and as another keyboard, with and without a layout.
 
 - **Away detection** (`createAwayTracker`). A stretch begins at the screen locking, the
   system sleeping, another user taking over (`user-did-resign-active`), or the
@@ -828,8 +926,10 @@ Electron wiring, which no unit test reaches: it is checked by driving the real a
   the system says the screen is locked, that it goes by (`away`), the latest prompts and
   the ids notified about (`attention`), the menu as plain data with a way to press an item
   by its labels (`menuTemplate`, `clickMenu`), the words of the menu-bar title and
-  tooltip, which only a Mac shows (`trayText`), and where the main window is (`showWindow`,
-  `windowUrl`, `windowVisible`), beside what quick switch put there.
+  tooltip, which only a Mac shows (`trayText`), where the main window is (`showWindow`,
+  `windowUrl`, `windowVisible`), and whether the shortcuts are let go of while Settings
+  listens for a key (`hotkeysSuspended`) and how each stood when last registered, which is
+  what the tray goes by (`hotkeyStatuses`), beside what quick switch put there.
 
 ---
 

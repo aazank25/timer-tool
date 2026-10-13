@@ -50,12 +50,13 @@ describe('what the pages are given', () => {
     assert.deepEqual(Object.keys(exposed), ['focusdesk']);
   });
 
-  it('is these four calls: the box, the box being shown, the shortcuts, and a sample notification', () => {
+  it('is these five calls: the box, the box being shown, the shortcuts read and let go of, and a sample notification', () => {
     const { api } = load();
     assert.deepEqual(Object.keys(api).sort(), [
       'closePalette',
       'onPaletteShow',
       'reloadHotkeys',
+      'suspendHotkeys',
       'testNotification',
     ]);
     for (const name of Object.keys(api)) assert.equal(typeof api[name], 'function', name);
@@ -76,6 +77,36 @@ describe('what the pages are given', () => {
 
     assert.deepEqual(sent, [['invoke', 'hotkeys:reload']]);
     assert.deepEqual(answer, { answered: 'hotkeys:reload' });
+  });
+
+  it('asks for the shortcuts to be let go of through hotkeys:suspend, sending true, and to be taken again sending false', async () => {
+    const { api, sent } = load();
+
+    await api.suspendHotkeys(true);
+    await api.suspendHotkeys(false);
+
+    assert.deepEqual(sent, [
+      ['invoke', 'hotkeys:suspend', true],
+      ['invoke', 'hotkeys:suspend', false],
+    ]);
+  });
+
+  it('lets the shortcuts go only for exactly true: anything else, or nothing, is a request to take them again', async () => {
+    const { api, sent } = load();
+
+    // A string that says "false" is truthy, and a page that gets this wrong must not take the keys away.
+    for (const not of [undefined, null, 'true', 'false', 1, 0, {}, [], () => true]) {
+      await api.suspendHotkeys(not);
+    }
+    await api.suspendHotkeys();
+    await api.suspendHotkeys(true, 'nothing else is passed on');
+
+    assert.deepEqual(
+      sent.map(([, channel, on]) => [channel, on]),
+      [...Array(10).fill(['hotkeys:suspend', false]), ['hotkeys:suspend', true]],
+    );
+    // And the call itself sends nothing but the flag.
+    assert.ok(sent.every((call) => call.length === 3));
   });
 
   it('asks for a sample notification through notification:test, with nothing sent', async () => {
@@ -105,7 +136,7 @@ describe('what the pages are given', () => {
 
   it('has a handler in the main process behind every channel it invokes, and sends to the one it sends to', () => {
     const channels = [...preload.matchAll(/ipcRenderer\.invoke\('([^']+)'/g)].map((m) => m[1]);
-    assert.deepEqual(channels.sort(), ['hotkeys:reload', 'notification:test']);
+    assert.deepEqual(channels.sort(), ['hotkeys:reload', 'hotkeys:suspend', 'notification:test']);
     for (const channel of channels) {
       assert.match(main, new RegExp(`ipcMain\\.handle\\('${channel}'`), channel);
     }
@@ -115,7 +146,7 @@ describe('what the pages are given', () => {
 
   it('has its handlers in place before either window is made, so no page calls one that is not there', () => {
     const firstWindow = main.search(/createWindow\(\);\s*createTray\(\);/);
-    for (const channel of ['hotkeys:reload', 'notification:test']) {
+    for (const channel of ['hotkeys:reload', 'hotkeys:suspend', 'notification:test']) {
       const at = main.indexOf(`ipcMain.handle('${channel}'`);
       assert.ok(at > 0 && at < firstWindow, channel);
     }

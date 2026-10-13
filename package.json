@@ -14,7 +14,7 @@
     "build": "npm run build -w web && npm run build -w server",
     "start": "npm run start -w server",
     "typecheck": "npm run typecheck -w server && npm run typecheck -w web",
-    "test": "npm run test -w server && node --test \"desktop/test/*.test.mjs\"",
+    "test": "npm run test -w server && node --test \"desktop/test/*.test.mjs\" && node --import tsx --test \"web/test/*.test.ts\"",
     "desktop": "node desktop/scripts/ensure-deps.mjs && npm --prefix desktop start",
     "desktop:mac": "node desktop/scripts/ensure-deps.mjs && npm --prefix desktop run dist:mac",
     "desktop:mac:all": "node desktop/scripts/ensure-deps.mjs && npm --prefix desktop run dist:mac:all",

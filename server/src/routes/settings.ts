@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { HOTKEY_SETTINGS, hotkeyClash, normalizeAccelerator } from '../lib/accelerator.js';
+import { HOTKEY_SETTINGS, hotkeyClash, readAccelerator } from '../lib/accelerator.js';
 import { badRequest, handler, parse } from '../lib/http.js';
 import { allSettings, getSetting, setSettings } from '../lib/settings.js';
 
@@ -8,10 +8,12 @@ export const settingsRouter = Router();
 
 /**
  * '' turns the shortcut off. Anything else has to be a combination Electron will read as it
- * was typed, and is kept in the one spelling normalizeAccelerator gives it. Refused here, not
+ * was typed, and is kept in the one spelling readAccelerator gives it. Refused here, not
  * left to the app that registers it: Electron drops a name it does not know and registers
- * what is left, so a typo would go on to grab some other key in every app. Whether it is also
- * one of the other two shortcuts is judged by the PATCH below, where all three are known.
+ * what is left, so a typo would go on to grab some other key in every app. So is a combination
+ * the system or every app already has (Command+C, Alt+F4), which gets its own sentence saying
+ * what it is. Whether it is also one of the other two shortcuts is judged by the PATCH below,
+ * where all three are known.
  */
 const hotkey = z
   .string()
@@ -20,16 +22,18 @@ const hotkey = z
     // Only spaces are blank. trim() would also take a no-break space, which is not what
     // anyone means by "off".
     if (/^ *$/.test(value)) return '';
-    const accelerator = normalizeAccelerator(value);
-    if (accelerator === null) {
+    const read = readAccelerator(value);
+    if (!read.ok) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          'Use one key with at least one of Command, Control, CommandOrControl or Super, joined with +, like CommandOrControl+Alt+K (F1–F24 may use Shift or Alt alone), or leave it empty to turn the shortcut off',
+          read.reason === 'reserved'
+            ? read.message
+            : 'Use one key with at least one of Command, Control, CommandOrControl or Super, joined with +, like CommandOrControl+Alt+K (F1–F24 may use Shift or Alt alone), or leave it empty to turn the shortcut off',
       });
       return z.NEVER;
     }
-    return accelerator;
+    return read.accelerator;
   });
 
 /**

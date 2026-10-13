@@ -5,8 +5,12 @@ import {
   createHotkeys,
   describeHotkeys,
   HOTKEY_ACTIONS,
+  HOTKEY_FAILURES,
+  HOTKEY_TROUBLE_LABEL,
   HOTKEYS,
+  hotkeyMenuItems,
   hotkeyPlan,
+  hotkeysFailing,
   opensQuickSwitch,
 } from '../shortcuts.mjs';
 
@@ -308,6 +312,7 @@ describe('registering the shortcuts', () => {
     assert.deepEqual(answer.show, {
       ok: false,
       accelerator: DEFAULTS.show,
+      code: 'taken',
       error: 'Control+Alt+J could not be registered. Another app may be using it.',
     });
     assert.equal(shortcuts.isRegistered(DEFAULTS.show), true, 'put back');
@@ -347,6 +352,7 @@ describe('registering the shortcuts', () => {
     assert.deepEqual(answer.quickSwitch, {
       ok: false,
       accelerator: DEFAULTS.quickSwitch,
+      code: 'taken',
       error: `${DEFAULTS.pause} is already used by another FocusDesk shortcut.`,
     });
     assert.deepEqual(answer.pause, ok(DEFAULTS.pause));
@@ -422,6 +428,7 @@ describe('registering the shortcuts', () => {
     assert.deepEqual(answer.show, {
       ok: false,
       accelerator: DEFAULTS.show,
+      code: 'invalid',
       error: '"Foo+A" is not a shortcut FocusDesk can register.',
     });
     assert.equal(shortcuts.isRegistered(DEFAULTS.show), true);
@@ -436,6 +443,7 @@ describe('registering the shortcuts', () => {
     assert.deepEqual(answer.pause, {
       ok: false,
       accelerator: null,
+      code: 'invalid',
       error: '"nope" is not a shortcut FocusDesk can register.',
     });
     assert.deepEqual(answer.show, ok(DEFAULTS.show));
@@ -479,6 +487,7 @@ describe('registering the shortcuts', () => {
     assert.deepEqual(answer.show, {
       ok: false,
       accelerator: DEFAULTS.show,
+      code: 'invalid',
       error: 'Foo+A could not be registered: Invalid accelerator: Foo+A',
     });
     assert.deepEqual(answer.pause, ok('Control+Alt+P'));
@@ -540,6 +549,364 @@ describe('what is said about the shortcuts in the log', () => {
       line,
       `show: ${DEFAULTS.show} · pause: off · quick switch: Control+Alt+J could not be registered.`,
     );
+  });
+});
+
+/* ------------------------------------------------------------- the kind of failure */
+
+describe('the kind of failure a status that is not ok carries', () => {
+  it('is "taken" when another app has the keys', () => {
+    const shortcuts = fakeShortcuts({ others: ['Control+Alt+J'] });
+    const { hotkeys } = setup({ shortcuts });
+    hotkeys.apply({});
+
+    const answer = hotkeys.apply({ show_hotkey: 'Control+Alt+J' });
+
+    assert.equal(answer.show.ok, false);
+    assert.equal(answer.show.code, 'taken');
+  });
+
+  it('is "taken" when another of the app\'s own shortcuts has the keys', () => {
+    const { hotkeys } = setup();
+    hotkeys.apply({});
+
+    const answer = hotkeys.apply({ quick_switch_hotkey: DEFAULTS.pause });
+
+    assert.equal(answer.quickSwitch.code, 'taken');
+    assert.match(answer.quickSwitch.error, /another FocusDesk shortcut/);
+  });
+
+  it('is "taken" for a shortcut with none registered before, as at the start, and says there is none', () => {
+    const { hotkeys } = setup({ shortcuts: fakeShortcuts({ others: [DEFAULTS.quickSwitch] }) });
+
+    const answer = hotkeys.apply(null);
+
+    assert.deepEqual(answer.quickSwitch, {
+      ok: false,
+      accelerator: null,
+      code: 'taken',
+      error: `${DEFAULTS.quickSwitch} could not be registered. Another app may be using it.`,
+    });
+    assert.deepEqual(answer.show, ok(DEFAULTS.show));
+  });
+
+  it('is "invalid" when the setting is not a shortcut the app can register, and when Electron throws for it', () => {
+    const shortcuts = fakeShortcuts({ throwsOn: ['Foo+A'] });
+    const { hotkeys } = setup({
+      shortcuts,
+      normalize: (text) => (text === 'not a shortcut' ? null : text),
+    });
+    hotkeys.apply({});
+
+    const answer = hotkeys.apply({ show_hotkey: 'not a shortcut', pause_hotkey: 'Foo+A' });
+
+    assert.equal(answer.show.code, 'invalid');
+    assert.equal(answer.pause.code, 'invalid');
+    assert.equal(answer.quickSwitch.code, undefined);
+  });
+
+  it('is not there at all for a shortcut that is registered, or off', () => {
+    const { hotkeys } = setup();
+
+    const answer = hotkeys.apply({ pause_hotkey: '' });
+
+    assert.equal('code' in answer.show, false);
+    assert.equal('code' in answer.pause, false);
+    assert.equal('code' in answer.quickSwitch, false);
+  });
+
+  it('is one of the kinds there are: the three, of which the app says "unreadable" itself', () => {
+    assert.deepEqual([...HOTKEY_FAILURES], ['taken', 'invalid', 'unreadable']);
+    assert.throws(() => {
+      HOTKEY_FAILURES.push('another');
+    }, TypeError);
+    const shortcuts = fakeShortcuts({ others: ['Control+Alt+J'], throwsOn: ['Foo+A'] });
+    const { hotkeys } = setup({ shortcuts, normalize: (text) => (text === 'x' ? null : text) });
+    hotkeys.apply({});
+    const answer = hotkeys.apply({
+      show_hotkey: 'Control+Alt+J',
+      pause_hotkey: 'Foo+A',
+      quick_switch_hotkey: 'x',
+    });
+    for (const action of HOTKEY_ACTIONS) {
+      // Registering fails as taken or invalid; unreadable is a failure to read, which is not here.
+      assert.ok(['taken', 'invalid'].includes(answer[action].code), action);
+      assert.ok(HOTKEY_FAILURES.includes(answer[action].code), action);
+    }
+  });
+});
+
+/* ------------------------------------------------------------ letting go while recording */
+
+describe('the shortcuts being let go of while a key is recorded', () => {
+  it('are all let go of, so that pressing any of them does nothing', () => {
+    const { hotkeys, shortcuts, ran } = setup();
+    hotkeys.apply({});
+
+    hotkeys.suspend();
+
+    assert.equal(hotkeys.suspended(), true);
+    assert.deepEqual(shortcuts.held(), []);
+    for (const accelerator of Object.values(DEFAULTS)) {
+      assert.equal(shortcuts.isRegistered(accelerator), false, accelerator);
+      shortcuts.press(accelerator);
+    }
+    assert.deepEqual(ran, []);
+  });
+
+  it('are not forgotten: what each was is still what it says, and is taken again by resume', () => {
+    const { hotkeys, shortcuts, ran } = setup();
+    hotkeys.apply({ show_hotkey: 'Control+Alt+J', quick_switch_hotkey: '' });
+    hotkeys.suspend();
+
+    assert.deepEqual(hotkeys.active(), {
+      show: 'Control+Alt+J',
+      pause: DEFAULTS.pause,
+      quickSwitch: null,
+    });
+
+    hotkeys.resume();
+
+    assert.equal(hotkeys.suspended(), false);
+    assert.deepEqual(shortcuts.held().sort(), ['Control+Alt+J', DEFAULTS.pause].sort());
+    shortcuts.press('Control+Alt+J');
+    shortcuts.press(DEFAULTS.pause);
+    assert.deepEqual(ran, ['show', 'pause']);
+    assert.deepEqual(hotkeys.active(), {
+      show: 'Control+Alt+J',
+      pause: DEFAULTS.pause,
+      quickSwitch: null,
+    });
+  });
+
+  it('are let go of with the system, and taken again, in the spelling it was handed them in', () => {
+    // Off a Mac there is no Command key: it is handed over as Super (see nativeAccelerator).
+    const { hotkeys, shortcuts } = setup({
+      toSystem: (accelerator) => nativeAccelerator(accelerator, 'linux'),
+    });
+    hotkeys.apply({ show_hotkey: 'Command+Alt+J' });
+    shortcuts.calls.length = 0;
+
+    hotkeys.suspend();
+    assert.deepEqual(changes(shortcuts).sort(), [
+      ['unregister', 'CommandOrControl+Alt+K'],
+      ['unregister', 'CommandOrControl+Shift+Space'],
+      ['unregister', 'Super+Alt+J'],
+    ]);
+
+    shortcuts.calls.length = 0;
+    hotkeys.resume();
+    assert.deepEqual(changes(shortcuts).sort(), [
+      ['register', 'CommandOrControl+Alt+K'],
+      ['register', 'CommandOrControl+Shift+Space'],
+      ['register', 'Super+Alt+J'],
+    ]);
+  });
+
+  it('let go of only what is held: a shortcut that is off is not touched, and nothing held is nothing to do', () => {
+    const { hotkeys, shortcuts } = setup();
+    hotkeys.apply({ pause_hotkey: '' });
+    shortcuts.calls.length = 0;
+
+    hotkeys.suspend();
+    assert.deepEqual(changes(shortcuts), [
+      ['unregister', DEFAULTS.show],
+      ['unregister', DEFAULTS.quickSwitch],
+    ]);
+
+    // Nothing at all registered, as before the first apply.
+    const fresh = setup();
+    fresh.hotkeys.suspend();
+    assert.deepEqual(fresh.shortcuts.calls, []);
+    assert.equal(fresh.hotkeys.suspended(), true);
+  });
+
+  it('are the same let go of twice as once, and the same taken again twice as once', () => {
+    const { hotkeys, shortcuts } = setup();
+    hotkeys.apply({});
+
+    hotkeys.suspend();
+    hotkeys.suspend();
+    assert.deepEqual(shortcuts.held(), []);
+
+    hotkeys.resume();
+    shortcuts.calls.length = 0;
+    hotkeys.resume();
+    // Not suspended any more: there is nothing to take, and nothing is asked of the system.
+    assert.deepEqual(shortcuts.calls, []);
+    assert.deepEqual(shortcuts.held().sort(), Object.values(DEFAULTS).sort());
+    assert.equal(hotkeys.suspended(), false);
+  });
+
+  it('are left alone by a resume that was never preceded by a suspend', () => {
+    const { hotkeys, shortcuts } = setup();
+    hotkeys.apply({});
+    shortcuts.calls.length = 0;
+
+    hotkeys.resume();
+
+    assert.deepEqual(shortcuts.calls, []);
+    assert.equal(hotkeys.suspended(), false);
+  });
+
+  it('are not all taken again when another app has one of them by then: that one is none, and the rest are back', () => {
+    const { hotkeys, shortcuts, ran, logs } = setup();
+    hotkeys.apply({});
+    hotkeys.suspend();
+    shortcuts.take(DEFAULTS.pause);
+
+    hotkeys.resume();
+
+    assert.deepEqual(hotkeys.active(), { ...DEFAULTS, pause: null });
+    assert.deepEqual(shortcuts.held().sort(), [DEFAULTS.show, DEFAULTS.quickSwitch].sort());
+    shortcuts.press(DEFAULTS.show);
+    shortcuts.press(DEFAULTS.quickSwitch);
+    assert.deepEqual(ran, ['show', 'quickSwitch']);
+    assert.equal(logs.length, 1);
+
+    // And the next apply says so, as a status, and takes it again when the other app lets go.
+    const answer = hotkeys.apply({});
+    assert.deepEqual(answer.pause, {
+      ok: false,
+      accelerator: null,
+      code: 'taken',
+      error: `${DEFAULTS.pause} could not be registered. Another app may be using it.`,
+    });
+    assert.deepEqual(answer.show, ok(DEFAULTS.show));
+    shortcuts.release(DEFAULTS.pause);
+    assert.deepEqual(hotkeys.apply({}).pause, ok(DEFAULTS.pause));
+  });
+
+  it('are ended by apply, which registers what the settings say now, as it is, and not what they were', () => {
+    const { hotkeys, shortcuts, ran } = setup();
+    hotkeys.apply({});
+    hotkeys.suspend();
+
+    const answer = hotkeys.apply({ show_hotkey: 'Control+Alt+J', quick_switch_hotkey: '' });
+
+    assert.equal(hotkeys.suspended(), false);
+    assert.deepEqual(answer, {
+      show: ok('Control+Alt+J'),
+      pause: ok(DEFAULTS.pause),
+      quickSwitch: ok(null),
+    });
+    assert.deepEqual(shortcuts.held().sort(), ['Control+Alt+J', DEFAULTS.pause].sort());
+    shortcuts.press('Control+Alt+J');
+    shortcuts.press(DEFAULTS.pause);
+    shortcuts.press(DEFAULTS.quickSwitch);
+    assert.deepEqual(ran, ['show', 'pause']);
+  });
+
+  it('are taken again by an apply whose setting cannot be read: the one that works is not left let go of', () => {
+    const { hotkeys, shortcuts } = setup({
+      normalize: (text) => (text === 'nonsense' ? null : text),
+    });
+    hotkeys.apply({});
+    hotkeys.suspend();
+
+    const answer = hotkeys.apply({ show_hotkey: 'nonsense' });
+
+    assert.equal(answer.show.ok, false);
+    assert.equal(answer.show.accelerator, DEFAULTS.show);
+    assert.equal(shortcuts.isRegistered(DEFAULTS.show), true);
+    assert.deepEqual(shortcuts.held().sort(), Object.values(DEFAULTS).sort());
+  });
+
+  it('are let go of one by one, and a system that fails for one of them does not leave the rest held', () => {
+    const shortcuts = fakeShortcuts();
+    const { hotkeys, logs } = setup({ shortcuts });
+    hotkeys.apply({});
+    const unregister = shortcuts.unregister;
+    shortcuts.unregister = (accelerator) => {
+      if (accelerator === DEFAULTS.show) throw new Error('not now');
+      unregister(accelerator);
+    };
+
+    hotkeys.suspend();
+
+    assert.equal(logs.length, 1);
+    assert.deepEqual(shortcuts.held(), [DEFAULTS.show]);
+    assert.equal(hotkeys.suspended(), true);
+  });
+
+  it('can be let go of again after being taken again, as each recording is', () => {
+    const { hotkeys, shortcuts } = setup();
+    hotkeys.apply({});
+    for (let recording = 0; recording < 3; recording++) {
+      hotkeys.suspend();
+      assert.deepEqual(shortcuts.held(), [], `recording ${recording}`);
+      hotkeys.resume();
+      assert.deepEqual(shortcuts.held().sort(), Object.values(DEFAULTS).sort(), `recording ${recording}`);
+    }
+  });
+});
+
+/* -------------------------------------------------------------------------- the tray item */
+
+describe('the tray menu item for a shortcut that is not working', () => {
+  const calls = [];
+  const open = () => calls.push('open');
+
+  it('is none while all of them are registered or off, and before anything has been registered', () => {
+    assert.deepEqual(hotkeyMenuItems(null, open), []);
+    assert.deepEqual(hotkeyMenuItems(undefined, open), []);
+    assert.deepEqual(hotkeyMenuItems({}, open), []);
+    assert.deepEqual(
+      hotkeyMenuItems({ show: ok(DEFAULTS.show), pause: ok(null), quickSwitch: ok('Shift+F5') }, open),
+      [],
+    );
+    assert.equal(hotkeysFailing(null), false);
+    assert.equal(hotkeysFailing({ show: ok(DEFAULTS.show), pause: ok(null), quickSwitch: ok(null) }), false);
+  });
+
+  it('is one item, that says a shortcut is not working and where to look, when any one is not ok', () => {
+    const taken = { ok: false, accelerator: null, code: 'taken', error: 'Control+Alt+J could not be registered.' };
+    for (const statuses of [
+      { show: taken, pause: ok(DEFAULTS.pause), quickSwitch: ok(DEFAULTS.quickSwitch) },
+      { show: ok(DEFAULTS.show), pause: taken, quickSwitch: ok(DEFAULTS.quickSwitch) },
+      { show: ok(DEFAULTS.show), pause: ok(DEFAULTS.pause), quickSwitch: taken },
+      { show: taken, pause: taken, quickSwitch: taken },
+    ]) {
+      const items = hotkeyMenuItems(statuses, open);
+      assert.equal(items.length, 1, JSON.stringify(statuses));
+      assert.equal(items[0].label, "A shortcut isn't working — open Settings");
+      assert.equal(typeof items[0].click, 'function');
+      assert.equal(hotkeysFailing(statuses), true);
+    }
+    assert.equal(HOTKEY_TROUBLE_LABEL, "A shortcut isn't working — open Settings");
+  });
+
+  it('is there for a shortcut that is not ok whatever the kind of failure, and whether or not one still works', () => {
+    for (const status of [
+      { ok: false, accelerator: null, code: 'taken', error: 'x' },
+      { ok: false, accelerator: DEFAULTS.show, code: 'taken', error: 'x' },
+      { ok: false, accelerator: null, code: 'invalid', error: 'x' },
+      { ok: false, accelerator: DEFAULTS.show, code: 'unreadable', error: 'x' },
+      // An older answer with no kind.
+      { ok: false, accelerator: null, error: 'x' },
+    ]) {
+      assert.equal(hotkeyMenuItems({ show: status }, open).length, 1, JSON.stringify(status));
+    }
+  });
+
+  it('does what it is handed when it is chosen, and passes it nothing of what the menu gives it', () => {
+    calls.length = 0;
+    const [item] = hotkeyMenuItems({ show: { ok: false, accelerator: null } }, (...args) => calls.push(args));
+
+    item.click({ label: 'a menu item' }, { a: 'window' }, { event: true });
+
+    assert.deepEqual(calls, [[]]);
+  });
+
+  it('follows what the shortcuts answer: it is there while another app has a key, and gone when it lets go', () => {
+    // What createHotkeys answers is what the tray reads.
+    const shortcuts = fakeShortcuts({ others: [DEFAULTS.pause] });
+    const { hotkeys } = setup({ shortcuts });
+
+    assert.equal(hotkeyMenuItems(hotkeys.apply({}), open).length, 1);
+
+    shortcuts.release(DEFAULTS.pause);
+    assert.deepEqual(hotkeyMenuItems(hotkeys.apply({}), open), []);
   });
 });
 

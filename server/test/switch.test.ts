@@ -503,7 +503,8 @@ describe('normalizeAccelerator', () => {
       ['Ctrl+Alt+z', 'Control+Alt+Z'],
       ['Ctrl+F1', 'Control+F1'],
       ['Ctrl+f24', 'Control+F24'],
-      ['Ctrl+Tab', 'Control+Tab'],
+      // Not Ctrl+Tab, which every app already has: with Shift as well it is another shortcut.
+      ['Ctrl+Shift+Tab', 'Control+Shift+Tab'],
       ['Ctrl+Backspace', 'Control+Backspace'],
       ['Ctrl+Delete', 'Control+Delete'],
       ['Ctrl+Insert', 'Control+Insert'],
@@ -596,6 +597,14 @@ describe('normalizeAccelerator', () => {
       'AltGr+K',
       'Hyper+K',
       'Win+K',
+      // Already something in every app or the system (see reservedKind, and shortcuts.test.ts).
+      'Ctrl+Tab',
+      'Cmd+C',
+      'CmdOrCtrl+Q',
+      'Shift+Cmd+Z',
+      'Alt+F4',
+      'Alt+Tab',
+      'Cmd+Space',
     ];
     for (const input of rejected) {
       assert.equal(normalizeAccelerator(input), null, JSON.stringify(input));
