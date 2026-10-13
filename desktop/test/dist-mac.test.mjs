@@ -416,10 +416,11 @@ describe('the npm scripts that build the app', () => {
     }
   });
 
-  it('has the installer that decides, and it only ever runs npm ci', () => {
+  it('has the installer that decides, and it only ever runs npm ci (and the scripts it needs)', () => {
     const source = fs.readFileSync(path.join(desktop, 'scripts', 'ensure-deps.mjs'), 'utf8');
 
-    assert.match(source, /\['ci'\]/);
+    assert.match(source, /\['ci', '--ignore-scripts'\]/);
+    assert.match(source, /\['rebuild', \.\.\.INSTALL_SCRIPTS_NEEDED\]/);
     assert.doesNotMatch(source, /['"`]install['"`]/);
   });
 
