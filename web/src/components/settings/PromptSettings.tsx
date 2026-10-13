@@ -312,7 +312,7 @@ export function PromptSettings() {
         <NumberRow
           id={`${base}-nudge`}
           label="Nudge after (minutes)"
-          hint="In work hours, when nothing has been on the clock for this long, FocusDesk nudges you: a banner, and a notification from the menu-bar app. 0 turns it off."
+          hint="In work hours, when nothing has been on the clock for this long, FocusDesk nudges you: a banner, and a notification from the desktop app. 0 turns it off."
           value={value('nudge_minutes')}
           max={MAX_MINUTES.nudge_minutes}
           error={problems.nudge_minutes}

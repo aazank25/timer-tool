@@ -1,4 +1,4 @@
-const isMac = () => /Mac/i.test(navigator.userAgent);
+import { isMac } from './platform';
 
 /** How a Mac draws each modifier and key whose name is not what is on the keycap. */
 const MAC_SYMBOLS: Record<string, string> = {
@@ -28,7 +28,8 @@ const MAC_SYMBOLS: Record<string, string> = {
 /** The same keys as another keyboard names them. */
 const OTHER_NAMES: Record<string, string> = {
   CommandOrControl: 'Ctrl',
-  Command: 'Cmd',
+  // Electron registers Command off a Mac as the Windows key, as it does Super.
+  Command: 'Win',
   Control: 'Ctrl',
   Super: 'Win',
   Escape: 'Esc',

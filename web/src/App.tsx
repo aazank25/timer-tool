@@ -10,6 +10,7 @@ import { WrapUpDayPage, WrapUpWeekPage } from './pages/WrapUp';
 import { PromptCenter } from './components/PromptCenter';
 import { Button } from './components/ui';
 import { useLiveSession, useSessionActions, useTheme } from './hooks';
+import { isMac } from './lib/platform';
 import { clock, duration } from './lib/format';
 import { seriesColor } from './lib/palette';
 
@@ -56,12 +57,15 @@ const Icon = {
 };
 
 /**
- * The Electron shell loads the client with ?desktop=1. It hides the native
- * title bar, so the rail needs room for the traffic lights and the top bar
- * has to be draggable.
+ * The Electron shell loads the client with ?desktop=1. On a Mac it hides the
+ * native title bar, so the rail needs room for the traffic lights and the top
+ * bar has to be draggable. Windows keeps its own title bar, so there the page
+ * needs neither, and a drag region would only swallow clicks.
  */
-const IS_DESKTOP =
-  typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('desktop');
+const HIDDEN_TITLE_BAR =
+  typeof window !== 'undefined' &&
+  new URLSearchParams(window.location.search).has('desktop') &&
+  isMac();
 
 const TABS = [
   { to: '/', label: 'Focus', icon: Icon.focus },
@@ -106,7 +110,7 @@ function Sidebar() {
   return (
     <aside
       className={`sticky top-0 flex h-dvh w-14 shrink-0 flex-col bg-plane px-2 pb-3
-        lg:w-52 lg:px-3 ${IS_DESKTOP ? 'drag-region pt-9' : 'pt-3'}`}
+        lg:w-52 lg:px-3 ${HIDDEN_TITLE_BAR ? 'drag-region pt-9' : 'pt-3'}`}
     >
       <div className="mb-4 flex items-center gap-2 px-1 lg:px-2">
         <span
@@ -162,7 +166,7 @@ function LiveBar({ dark }: { dark: boolean }) {
     return (
       <div
         className={`sticky top-0 z-40 border-b border-hairline bg-plane/85 backdrop-blur
-          ${IS_DESKTOP ? 'drag-region' : ''}`}
+          ${HIDDEN_TITLE_BAR ? 'drag-region' : ''}`}
       >
         <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-3 px-4 py-2.5 sm:px-6">
           <span className="text-xs text-muted">Nothing running</span>
@@ -184,7 +188,7 @@ function LiveBar({ dark }: { dark: boolean }) {
   return (
     <div
       className={`sticky top-0 z-40 border-b border-hairline bg-plane/85 backdrop-blur
-        ${IS_DESKTOP ? 'drag-region' : ''}`}
+        ${HIDDEN_TITLE_BAR ? 'drag-region' : ''}`}
     >
       <div className="mx-auto flex w-full max-w-6xl items-center gap-3 px-4 py-2 sm:px-6">
         <button
