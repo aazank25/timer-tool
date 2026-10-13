@@ -111,7 +111,8 @@ describe('the shortcuts FocusDesk registers for itself', () => {
     assert.ok(start > firstWindow, 'applied before the first window and the tray');
     // And again whenever Settings asks, one at a time (see syncHotkeys).
     assert.match(main, /ipcMain\.handle\('hotkeys:reload', \(\) => syncHotkeys\(\)\)/);
-    assert.match(functionBody(main, 'syncHotkeys'), /hotkeyQueue\.then\(applyHotkeys\)/);
+    assert.match(functionBody(main, 'syncHotkeys'), /inHotkeyOrder\(applyHotkeys\)/);
+    assert.match(functionBody(main, 'inHotkeyOrder'), /hotkeyQueue\.then\(task\)/);
   });
 
   it('go through Electron only as the system spells them, in the one place that registers them', () => {
@@ -135,6 +136,122 @@ describe('the shortcuts FocusDesk registers for itself', () => {
       body,
       /label: 'Open FocusDesk',[\s\S]*?\.\.\.\(showHotkey \? \{ accelerator: forElectron\(showHotkey\) \} : \{\}\),/,
     );
+  });
+});
+
+describe('the shortcuts being let go of while Settings records a key', () => {
+  it('are let go of when the page asks over hotkeys:suspend, and given back when it asks again, from the main window only', () => {
+    const handler = main.match(
+      /ipcMain\.handle\('hotkeys:suspend', async \(event, on\) => \{([\s\S]*?)\n {2}\}\);/,
+    );
+    assert.ok(handler, 'main.mjs has no handler for hotkeys:suspend');
+    assert.match(handler[1], /if \(event\.sender !== win\?\.webContents\) return;/);
+    assert.match(handler[1], /await \(on === true \? suspendHotkeys\(\) : resumeHotkeys\(\)\);/);
+  });
+
+  it('are let go of through the one line that the registrations are in, so that what is asked in one order is done in it', () => {
+    const body = functionBody(main, 'suspendHotkeys');
+    assert.match(body, /return inHotkeyOrder\(\(\) => hotkeys\.suspend\(\)\);/);
+    assert.match(body, /suspendAsked = true;/);
+  });
+
+  it('are taken again at once as they were, and then from the settings as they are now', () => {
+    const body = functionBody(main, 'resumeHotkeys');
+    assert.match(body, /suspendAsked = false;/);
+    assert.match(body, /clearTimeout\(suspendTimer\);/);
+    // The first needs nothing from anywhere, so it cannot fail the way a read of the settings can.
+    assert.ok(body.indexOf('hotkeys.resume();') > 0, 'it does not take them again at once');
+    assert.ok(body.indexOf('hotkeys.resume();') < body.indexOf('return syncHotkeys();'));
+  });
+
+  it('are given back by themselves after a minute at most, whatever the page does', () => {
+    assert.match(main, /const SUSPEND_MAX_MS = 60_000;/);
+    const body = functionBody(main, 'suspendHotkeys');
+    assert.match(body, /clearTimeout\(suspendTimer\);/);
+    assert.match(body, /suspendTimer = setTimeout\(\(\) => \{[\s\S]*?resumeHotkeys\(\)\.catch\([\s\S]*?\}, SUSPEND_MAX_MS\);/);
+  });
+
+  it('are given back when the main window loses the focus, is hidden or closed, or its page is reloaded, moved or gone', () => {
+    const body = functionBody(main, 'createWindow');
+    assert.match(
+      body,
+      /const giveBackHotkeys = \(\) => \{\s*if \(!suspendAsked\) return;\s*resumeHotkeys\(\)\.catch\(/,
+    );
+    for (const event of ['blur', 'hide', 'close']) {
+      assert.match(body, new RegExp(`win\\.on\\('${event}', giveBackHotkeys\\);`), event);
+    }
+    // A move to another document, which a reload is; not one inside the page, which the page's own
+    // router makes and which does not end what the page is doing.
+    assert.match(
+      body,
+      /win\.webContents\.on\('did-start-navigation', \(details\) => \{\s*if \(details\.isMainFrame && !details\.isSameDocument\) giveBackHotkeys\(\);\s*\}\);/,
+    );
+    assert.match(body, /win\.webContents\.on\('render-process-gone', giveBackHotkeys\);/);
+  });
+
+  it('are given back only while they are let go of, so that the window losing the focus costs nothing the rest of the time', () => {
+    const body = functionBody(main, 'createWindow');
+    assert.match(body, /if \(!suspendAsked\) return;/);
+    assert.match(main, /^let suspendAsked = false;$/m);
+    // A failure to take them again is logged, and is not an unhandled rejection in the main process.
+    assert.doesNotMatch(body, /void resumeHotkeys\(\)/);
+  });
+
+  it('are let go of by the main window only: the quick-switch box is not a page that records a key', () => {
+    assert.doesNotMatch(palette, /suspendHotkeys|hotkeys:suspend/);
+  });
+
+  it('are registered again by the reload that applies the settings, which ends a suspension too', () => {
+    // main.mjs asks for nothing special: createHotkeys.apply takes them again first (shortcuts.test.mjs).
+    assert.match(functionBody(main, 'applyHotkeys'), /hotkeyStatuses = hotkeys\.apply\(settings\);/);
+  });
+});
+
+describe('the status each shortcut is given', () => {
+  it('says "unreadable" when the settings could not be read, so that nobody has to read the words to know nothing was tried', () => {
+    const body = functionBody(main, 'applyHotkeys');
+    assert.match(body, /\{ ok: false, accelerator, code: 'unreadable', error: unread \}/);
+  });
+
+  it('is kept as the tray reads it, from the last registration: a failed read of the settings is not one', () => {
+    const body = functionBody(main, 'applyHotkeys');
+    const unreadable = body.indexOf("code: 'unreadable'");
+    const kept = body.indexOf('hotkeyStatuses = hotkeys.apply(settings);');
+    assert.ok(unreadable > 0 && kept > unreadable, 'the unread answer comes first and returns');
+    assert.match(body.slice(0, kept), /if \(unread && settings\) \{\s*return /);
+    // The answer for the page is the same object the tray reads.
+    assert.match(body, /return hotkeyStatuses;/);
+    assert.match(main, /^let hotkeyStatuses = null;$/m);
+  });
+});
+
+describe('the tray when a shortcut is not working', () => {
+  const body = functionBody(main, 'renderMenu');
+
+  it('says so in an item under "Open FocusDesk" that opens Settings, and only when one is not', () => {
+    assert.match(body, /\.\.\.hotkeyMenuItems\(hotkeyStatuses, \(\) => showWindow\('\/settings'\)\),/);
+    const open = body.indexOf("label: 'Open FocusDesk'");
+    const item = body.indexOf('...hotkeyMenuItems(');
+    const next = body.indexOf("label: 'Launch at login'");
+    assert.ok(open > 0 && item > open && item < next, 'the item is not in the group of Open FocusDesk');
+  });
+
+  it('is in the signature of the menu, or a menu built without it would never be built with it', () => {
+    assert.match(body, /const hotkeyTrouble = hotkeysFailing\(hotkeyStatuses\);/);
+    const signature = body.match(/const signature = JSON\.stringify\(\[([\s\S]*?)\]\);/);
+    assert.ok(signature, 'the menu has no signature');
+    assert.match(signature[1], /\bhotkeyTrouble,/);
+    assert.match(signature[1], /\bshowHotkey,/, 'the key on Open FocusDesk is still in it');
+  });
+
+  it('is built again each time the shortcuts are applied, after what it reads has been set', () => {
+    const apply = functionBody(main, 'applyHotkeys');
+    assert.ok(apply.indexOf('hotkeyStatuses = hotkeys.apply(settings);') < apply.indexOf('renderMenu();'));
+  });
+
+  it('is told of by the real menu in the end-to-end tests, which can read and choose it', () => {
+    assert.match(main, /hotkeyStatuses: \(\) => \(hotkeyStatuses \? JSON\.parse\(JSON\.stringify\(hotkeyStatuses\)\) : null\),/);
+    assert.match(main, /hotkeysSuspended: \(\) => hotkeys\.suspended\(\),/);
   });
 });
 

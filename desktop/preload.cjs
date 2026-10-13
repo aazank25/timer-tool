@@ -21,11 +21,25 @@ contextBridge.exposeInMainWorld('focusdesk', {
   /**
    * Read the settings again and register the three shortcuts that work in any app (show the
    * window, pause or resume, quick switch) as they say. Resolves to
-   * { show, pause, quickSwitch }, each { ok, accelerator, error? }: the shortcut registered
+   * { show, pause, quickSwitch }, each { ok, accelerator, code?, error? }: the shortcut registered
    * afterwards, or null when there is none (it is off), and when a new one could not be
-   * registered, why. The one that was working still is.
+   * registered, why (`error`) and which kind of why (`code`: 'taken', 'invalid', or 'unreadable'
+   * when the settings could not be read and nothing was tried). The one that was working still is.
    */
   reloadHotkeys: () => ipcRenderer.invoke('hotkeys:reload'),
+
+  /**
+   * Let go of every shortcut that works in any app (true), or take them again as the settings say
+   * (false). A key FocusDesk holds goes to its action and never reaches the page, so a page that
+   * listens for a key to record has to ask for them to be let go of first, and give them back
+   * when it stops listening. Resolves when it is done.
+   *
+   * The app takes them back by itself if the window loses the focus, is hidden or closed, or the
+   * page is reloaded, moved to another address or crashes, and after a minute at most, so a page
+   * that never says so does not leave the person without them. Anything that is not exactly
+   * true takes them back: it is a request to let go of them only when it clearly is.
+   */
+  suspendHotkeys: (on) => ipcRenderer.invoke('hotkeys:suspend', on === true),
 
   /**
    * Show a sample notification now, whatever the notification settings say and whether or not

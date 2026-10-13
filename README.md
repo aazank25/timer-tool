@@ -213,7 +213,7 @@ For development, with hot reload on both halves:
 npm run dev        # api on :4317, UI on http://localhost:5173
 ```
 
-Other scripts: `npm test` (the server's suite, then the desktop app's), `npm run typecheck`.
+Other scripts: `npm test` (the server's suite, then the desktop app's, then the page's shortcut recorder), `npm run typecheck`.
 
 Requires Node 22+. `better-sqlite3` ships prebuilt Node-API binaries for every
 platform, and those are what it loads. `npm ci` still tries to compile it from
@@ -303,13 +303,14 @@ away while that was on its way, the refusal is what it opens on the next time.
 
 An app cannot be told that another app already owns a keyboard shortcut, so if
 pressing yours does nothing, pick another in Settings → *Keyboard shortcuts*. A
-shortcut is recorded from the key you press and not from what it types (on a Mac
-⌥K types ˚), and what is saved is checked, because Electron is not: a name it does
-not know is dropped without a word and the rest registered, so a typo would grab
-some other key. FocusDesk accepts a deliberate subset of what Electron does:
-letters, digits, F1–F24 and Space, Tab, Enter, Escape, Backspace, Delete, Insert,
-the arrows, Home, End, PageUp, PageDown and Plus. It refuses punctuation keys,
-the lock keys (Caps Lock, Num Lock, Scroll Lock), the numeric keypad, media and
+shortcut is recorded from the key you press and not from what it types with a
+modifier held (on a Mac ⌥K types ˚), and what is saved is checked, because Electron
+is not: a name it does not know is dropped without a word and the rest registered,
+so a typo would grab some other key. FocusDesk accepts a deliberate subset of what
+Electron does: letters, digits, F1–F24 and Space, Tab, Enter, Escape, Backspace,
+Delete, Insert, the arrows, Home, End, PageUp, PageDown and Plus (which can be typed
+into the settings, but not recorded: see below). It refuses punctuation keys, the
+lock keys (Caps Lock, Num Lock, Scroll Lock), the numeric keypad, media and
 volume keys, PrintScreen and AltGr. It also wants at least one of Command,
 Control, CommandOrControl or Super in the shortcut, because Shift or Alt (Option)
 on their own would take ordinary typing from every app: ⇧A is a capital A, and on
@@ -321,15 +322,47 @@ one of these: it only works there, and takes nothing from any other app. The
 defaults are ⌘⇧F to show the window, ⌘⇧Space to pause or resume, and ⌘⌥K for quick
 switch, not ⌘⇧K, which is Browse DMs in Slack and Delete Line in VS Code.
 
+For the same reason a combination that every app or the system already has is
+refused, by the recorder as it is pressed and by the server if it is sent: the
+command key alone with A, C, F, H, M, N, O, P, Q, R, S, T, V, W, X, Z or Tab (⌘C,
+Ctrl+Q), redo (⇧⌘Z), Alt+F4, Alt+Tab, and ⌘Space, which is Spotlight. The message
+says what it is and to pick one with Shift or Alt as well (⌘⇧C and ⌘⌥C are fine;
+Ctrl+Shift or Ctrl+Alt on Windows). Two more keys are not recorded: the = key,
+because Electron's one name for it is Plus, which means Shift and = together, so
+what was registered would not be the key that was pressed; and, off a Mac, a key
+that types anything but a letter or a digit on your keyboard layout (é, ç). Off a
+Mac a shortcut is registered by what the key types and not by where it is, so the
+recorder asks the browser for the layout (Chromium has it) and on a French keyboard
+the key in Q's place is recorded as A. A Mac registers by the key's place, and
+records that.
+
+While a row is listening for a key the app lets go of all three shortcuts, since a
+key it holds would run its action and never reach the page (Ctrl+Shift+Space would
+pause the block, and the quick-switch key would open the box over the recorder).
+They are taken again when listening ends, however it ends, and by the app itself if
+the window loses the focus, is hidden or closed, or its page is reloaded or
+crashes, and after a minute at most. A key that another app holds goes to that app
+and cannot be recorded here; the row says so while it listens.
+
 No two of the three can be the same shortcut. The server refuses the second, saves
 nothing, and says which action has it already (*Command+Shift+F is already the
 shortcut to show FocusDesk*), however it is spelled: case, Cmd for Command and the
 order of the modifiers make no difference, and neither does CommandOrControl
 against Command (on a Mac) or Control (elsewhere). Turning one off frees its keys,
 and two swapped in one change are fine. The card shows, for each, that the app has
-it registered or why it could not. A shortcut the app could not register stays
-saved, with the reason on its row, and is tried again each time the card is opened
-or one is saved, and when the app starts, as another app may let go of it.
+it registered or why it could not. When the app cannot register the one you have just
+recorded (another app has the key) it goes on with the one it had, and the setting is
+written back to that one, so that what is saved is what works and the next start does
+not try the refused key and end up with none: the row says which it kept. A shortcut
+that was off stays off. If the app had none registered but the setting was not off
+(its old key was taken when the app started), nothing is written back, which would
+turn off a shortcut you never turned off: the new one stays saved, the row says it
+could not be registered, and it is tried again each time the card is opened and when
+the app starts, as another app may let go of it. When the app cannot read the
+settings it tries nothing and writes nothing. A shortcut that is set and is not
+working is named outside Settings too: the menu bar (the system tray on Windows and
+Linux) has an item, *A shortcut isn't working — open Settings*, that opens the window
+on Settings.
 
 **Tasks** are the weekly priorities list that replaces a spreadsheet: a row for
 each thing that needs doing, with its project (or none), priority, status,

@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { api, ApiError, reason } from '../../api';
+import { api, ApiError, reason, type Settings } from '../../api';
 import { keys, useSettings } from '../../hooks';
 import { isMac } from '../../lib/platform';
-import { formatShortcut, recordKeyPress, sameShortcut } from '../../lib/shortcut';
+import { formatShortcut, recordKeyPress, sameShortcut, type KeyLayout } from '../../lib/shortcut';
 import { errorText } from '../../lib/tone';
 import { Button, Card } from '../ui';
 
@@ -43,20 +43,60 @@ const ROWS: {
   },
 ];
 
+/** What the desktop app says of the three shortcuts after registering them. */
+type HotkeyReply = Awaited<ReturnType<FocusdeskBridge['reloadHotkeys']>>;
+
 /**
  * What a row says under its buttons: how it stands, or why a change was not made. A note that
  * `fades` has said its piece and goes after a few seconds; how a shortcut stands stays.
  */
-/** What the desktop app says of the three shortcuts after registering them. */
-type HotkeyReply = Awaited<ReturnType<FocusdeskBridge['reloadHotkeys']>>;
-
 type Note = { tone: 'good' | 'bad' | 'plain'; text: string; fades?: boolean };
 type Notes = Partial<Record<Key, Note>>;
 
 /** How long "Saved." stays up. */
 const SAVED_MS = 4_000;
 
-const PROMPT = 'Press the new shortcut — Esc to cancel';
+/** What a row says while it waits for a key, and, after it, what cannot be done. */
+const PROMPT = 'Press the new shortcut — Esc to cancel.';
+const PROMPT_NOTE = "A key that another app is using can't be recorded here.";
+
+/**
+ * The longest a row waits for a key. The desktop app gives its shortcuts back by itself after a
+ * minute (see suspendHotkeys), and from then on a key it holds would run its action and not be
+ * recorded, so the row stops listening before that and does not go on saying that it hears.
+ */
+const LISTEN_MS = 50_000;
+
+/** The part of the Keyboard API that the recorder asks for. Chromium has it; other browsers do not. */
+type NavigatorWithKeyboard = Navigator & {
+  keyboard?: { getLayoutMap?: () => Promise<KeyLayout> };
+};
+
+/**
+ * Ask the desktop app to let go of the shortcuts that work in any app (true) or to take them again
+ * (false). Never rejects and does nothing in a browser, which has no such app: the recorder works
+ * without it, only a key the app holds is then not heard.
+ */
+async function letGoOfShortcuts(on: boolean): Promise<void> {
+  try {
+    await window.focusdesk?.suspendHotkeys?.(on);
+  } catch {
+    // The app takes them back by itself (see suspendHotkeys). There is nothing to do about it here.
+  }
+}
+
+/**
+ * What this keyboard types, key by key, or null when the browser cannot say (only Chromium has the
+ * Keyboard API, and only in a secure context, which http://127.0.0.1 is) or will not. Never
+ * rejects, and never throws.
+ */
+async function readKeyLayout(): Promise<KeyLayout | null> {
+  try {
+    return (await (navigator as NavigatorWithKeyboard).keyboard?.getLayoutMap?.()) ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /** How the desktop app says one shortcut stands, in the words of the card. */
 function standing(status: HotkeyStatus | undefined): Note | undefined {
@@ -170,6 +210,10 @@ export function ShortcutSettings() {
 
   /** Save one shortcut ('' is off), then, in the desktop app, see whether it took. */
   async function save(key: Key, value: string) {
+    // What it was a moment ago, as the cache has it now and not as this render did: the key
+    // handler that calls this was made when listening began, and the settings may have been read
+    // again since.
+    const before = (qc.getQueryData<Settings>(keys.settings) ?? settings)?.[key] ?? '';
     setListening(null);
     setHint(null);
     setBusy(true);
@@ -185,33 +229,100 @@ export function ShortcutSettings() {
       setBusy(false);
       return;
     }
-    if (inApp) await keepWhatWorks(key, saved, await reload());
+    if (inApp) await keepWhatWorks(key, before, saved, await reload());
     else setNotes((now) => ({ ...now, [key]: { tone: 'plain', text: 'Saved.', fades: true } }));
     setBusy(false);
   }
 
   /**
-   * A shortcut another app holds cannot be had, and the desktop app goes on with the one it had
-   * (or none). The setting is put back to that, so that what is saved is what works, and the next
-   * start of the app does not try the one that was refused and end up with none. A refusal that
-   * was never a try (the desktop app could not read the settings) leaves the setting as saved.
+   * What is saved once the desktop app has said it could not register what was just saved. It goes
+   * on with the shortcut it had (or none), and the setting is put back to that, so that what is
+   * saved is what works and the next start of the app does not try the key that was refused and
+   * end up with none. Three things leave it as it was saved:
+   *
+   *   - The desktop app could not read the settings (code 'unreadable'): it tried nothing, and
+   *     what it says of the shortcut is not about this key.
+   *   - It has the shortcut that was saved: there is nothing to put back.
+   *   - It has no shortcut, and the one saved before was not off. "None" then does not mean that
+   *     the shortcut was off: its key may merely not have been had when the app started (another
+   *     app held it), and writing off back would turn a shortcut off that the person never did.
+   *     The new one stays saved, and the note says that it could not be registered.
+   *
+   * Only a shortcut that was off stays off.
    */
-  async function keepWhatWorks(key: Key, saved: string, result: HotkeyReply | null) {
+  async function keepWhatWorks(key: Key, before: string, saved: string, result: HotkeyReply | null) {
     const row = ROWS.find((r) => r.key === key);
     const status = row && result?.[row.status];
-    if (!status || status.ok || status.error?.startsWith('Could not read the settings')) return;
+    if (!status || status.ok || status.code === 'unreadable') return;
     const working = status.accelerator ?? '';
     if (working !== '' && saved !== '' && sameShortcut(working, saved, mac)) return;
+    if (working === '' && before !== '') {
+      const said = status.error ?? 'It could not be registered.';
+      const text = `${said} It stays saved, and FocusDesk tries it again when the app starts.`;
+      setNotes((now) => ({ ...now, [key]: { tone: 'bad', text } }));
+      return;
+    }
     try {
       qc.setQueryData(keys.settings, await api.updateSettings({ [key]: working }));
     } catch {
       // The note already says it could not be registered; the setting stays as it was saved.
       return;
     }
+    // The app is told what is saved now: it still goes by the one that was refused, and so does the
+    // menu bar, which says when a shortcut is not working. The note is put up after, since
+    // reading them again puts up each row's own.
+    await reload();
     const kept = working ? `Kept ${formatShortcut(working)}.` : 'It stays off.';
     const text = `${status.error ?? ''} ${kept}`.trim();
     setNotes((now) => ({ ...now, [key]: { tone: 'bad', text } }));
   }
+
+  // Whether any row is waiting for a key. What has to be so for as long as one is (the shortcuts
+  // let go of, the layout known, a limit on the wait) is per recording and not per row: moving
+  // from one row to another is the same recording.
+  const recording = listening !== null;
+
+  // The desktop app holds the three shortcuts for every app, and a key it holds never reaches this
+  // page: its action runs, and the recorder hears nothing (Ctrl+Shift+Space would pause the block
+  // on the clock, and the quick-switch key would open the box over the card). So the app is asked
+  // to let go of them for as long as a row listens, and to take them again when it stops, whichever
+  // way that comes about: a key recorded, Esc, a click elsewhere, the window losing the focus, the
+  // card going away. The app also takes them back by itself if this page cannot say so (the page
+  // crashes, is reloaded, or the window is left), and after a minute at most.
+  useEffect(() => {
+    if (!recording) return;
+    void letGoOfShortcuts(true);
+    return () => void letGoOfShortcuts(false);
+  }, [recording]);
+
+  // Off a Mac a shortcut is registered by what the key types on this keyboard and not by where the
+  // key is (on a French keyboard A is where Q is), so the recorder is told the layout, asked for
+  // when a row starts listening. Chromium has it; a browser that does not simply records keys by
+  // their position, and so does a Mac, which registers by position.
+  const layout = useRef<KeyLayout | null>(null);
+  useEffect(() => {
+    layout.current = null;
+    if (!recording || mac) return;
+    let wanted = true;
+    void readKeyLayout().then((map) => {
+      if (wanted) layout.current = map;
+    });
+    return () => {
+      wanted = false;
+      layout.current = null;
+    };
+  }, [recording, mac]);
+
+  // A row does not wait for ever: the app gives its shortcuts back after a minute, so the row stops
+  // before that and does not go on saying that it hears.
+  useEffect(() => {
+    if (!recording) return;
+    const timer = setTimeout(() => {
+      setListening(null);
+      setHint(null);
+    }, LISTEN_MS);
+    return () => clearTimeout(timer);
+  }, [recording]);
 
   // While a row is listening every key press is the recorder's: none of them reaches the page.
   // It stops by itself on a click elsewhere or when the window loses the focus, so it cannot be
@@ -230,7 +341,7 @@ export function ShortcutSettings() {
       e.preventDefault();
       e.stopPropagation();
       if (e.repeat) return;
-      const heard = recordKeyPress(e, mac);
+      const heard = recordKeyPress(e, mac, layout.current);
       switch (heard.kind) {
         case 'waiting':
           break;
@@ -238,14 +349,9 @@ export function ShortcutSettings() {
           stop();
           break;
         case 'unusable':
-          setHint(
-            'That key cannot be part of a shortcut. Try a letter, a number, an F key, Space or an arrow',
-          );
-          break;
         case 'too-loose':
-          setHint(
-            `Hold ${mac ? '⌘ or ⌃' : 'Ctrl'} as well, or the shortcut would take that key away from every app (F1–F24 can go with Shift or Alt alone)`,
-          );
+        case 'reserved':
+          setHint(heard.hint);
           break;
         case 'shortcut':
           swallowKeyUp(e.code);
@@ -355,8 +461,8 @@ export function ShortcutSettings() {
               >
                 {isListening ? (
                   <>
-                    <span className="font-medium text-ink">{PROMPT}</span>
-                    {hint && `. ${hint}.`}
+                    <span className="font-medium text-ink">{PROMPT}</span> {PROMPT_NOTE}
+                    {hint && ` ${hint}`}
                   </>
                 ) : (
                   said

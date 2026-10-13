@@ -456,7 +456,17 @@ describe('the npm scripts that build the app', () => {
 
   it('run the desktop tests from the root with the pattern that node 22 reads, not a folder it would not', () => {
     // `node --test desktop/test/` is a folder, which node 22 tries to run as a file.
-    assert.equal(root.test, 'npm run test -w server && node --test "desktop/test/*.test.mjs"');
+    assert.equal(
+      root.test,
+      'npm run test -w server && node --test "desktop/test/*.test.mjs" && node --import tsx --test "web/test/*.test.ts"',
+    );
+  });
+
+  it('run the web tests after the desktop ones, with the pattern in double quotes so that node and not the shell reads it', () => {
+    // Windows does not expand a glob in the shell, and its quotes are double ones: node reads the
+    // pattern itself (and the Windows job of the build runs npm test).
+    assert.match(root.test, /&& node --test "desktop\/test\/\*\.test\.mjs" && node --import tsx --test "web\/test\/\*\.test\.ts"$/);
+    assert.doesNotMatch(root.test, /'/);
   });
 });
 

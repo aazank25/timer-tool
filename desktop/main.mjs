@@ -40,7 +40,13 @@ import {
 } from './menu-bar.mjs';
 import { createPalette, isLocal } from './palette.mjs';
 import { rereadAfter } from './requests.mjs';
-import { createHotkeys, describeHotkeys, opensQuickSwitch } from './shortcuts.mjs';
+import {
+  createHotkeys,
+  describeHotkeys,
+  hotkeyMenuItems,
+  hotkeysFailing,
+  opensQuickSwitch,
+} from './shortcuts.mjs';
 import { navigationScript, windowPlan } from './window-route.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -114,6 +120,23 @@ function createWindow() {
     event.preventDefault();
     openQuickSwitch();
   });
+
+  // Settings lets go of the shortcuts while it listens for a key to record (see suspendHotkeys),
+  // and gives them back when it stops. If it never does (the page crashed, was reloaded or moved
+  // on, or the window was put away or left) the shortcuts are given back here, so that nothing
+  // that happens to the page can leave the person without them. A move inside the page (its
+  // own router) is the page's business and is not one of these.
+  const giveBackHotkeys = () => {
+    if (!suspendAsked) return;
+    resumeHotkeys().catch((err) => console.error('[focusdesk] could not take the shortcuts again', err));
+  };
+  win.on('blur', giveBackHotkeys);
+  win.on('hide', giveBackHotkeys);
+  win.on('close', giveBackHotkeys);
+  win.webContents.on('did-start-navigation', (details) => {
+    if (details.isMainFrame && !details.isSameDocument) giveBackHotkeys();
+  });
+  win.webContents.on('render-process-gone', giveBackHotkeys);
 
   // Anything not served by the local app opens in the real browser.
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -350,6 +373,9 @@ function renderMenu() {
   // The shortcut that shows the window, as it is registered right now: none when it is off, or
   // when it could not be had.
   const showHotkey = hotkeys.active().show;
+  // Whether a shortcut is set that could not be registered: the menu says so, since a shortcut
+  // that does nothing says nothing.
+  const hotkeyTrouble = hotkeysFailing(hotkeyStatuses);
   // Everything the menu's shape depends on, and nothing that ticks.
   const signature = JSON.stringify([
     s?.id ?? null,
@@ -361,6 +387,7 @@ function renderMenu() {
     attention?.signature() ?? null,
     interruptionReasons.length,
     showHotkey,
+    hotkeyTrouble,
   ]);
   if (signature === menuSignature) return;
   menuSignature = signature;
@@ -393,6 +420,8 @@ function renderMenu() {
       ...(showHotkey ? { accelerator: forElectron(showHotkey) } : {}),
       click: showWindow,
     },
+    // A shortcut that is set and could not be had: Settings says which, and why, on its row.
+    ...hotkeyMenuItems(hotkeyStatuses, () => showWindow('/settings')),
     { type: 'separator' },
     {
       label: 'Launch at login',
@@ -503,17 +532,27 @@ const hotkeys = createHotkeys({
 });
 
 /**
+ * How each of the three shortcuts stood the last time they were registered, as applyHotkeys
+ * answered: { show, pause, quickSwitch }, each { ok, accelerator, code?, error? }. Null until
+ * then. The tray's menu says "A shortcut isn't working" by it. A read of the settings that
+ * failed is not a registration that did, and does not replace it.
+ */
+let hotkeyStatuses = null;
+
+/**
  * Read the settings and make the three shortcuts what they say. Answers { show, pause,
- * quickSwitch }, each { ok, accelerator, error? }: the shortcut that is registered afterwards,
- * null for none, and when the setting asked for one that could not be had, why. A shortcut that
- * could not be had never costs the one that was working.
+ * quickSwitch }, each { ok, accelerator, code?, error? }: the shortcut that is registered
+ * afterwards, null for none, and when the setting asked for one that could not be had, why
+ * (`error`) and which kind of why (`code`: 'taken' or 'invalid'). A shortcut that could not be
+ * had never costs the one that was working.
  *
- * Settings that cannot be read leave every shortcut as it is, and say so. The exception is the
- * start, before anything has been read or registered: a setting that is not there is its default,
- * and one failed read is not a reason to be left without the keys.
+ * Settings that cannot be read leave every shortcut as it is, and say so, with the code
+ * 'unreadable' on each so that nobody has to read the words to know that nothing was tried. The
+ * exception is the start, before anything has been read or registered: a setting that is not
+ * there is its default, and one failed read is not a reason to be left without the keys.
  *
- * The tray's "Open FocusDesk" names the shortcut that shows the window, so the menu is built
- * again with whatever that is now.
+ * The tray's "Open FocusDesk" names the shortcut that shows the window, and the tray says when a
+ * shortcut is not working, so the menu is built again with whatever that is now.
  */
 async function applyHotkeys() {
   let unread = null;
@@ -527,26 +566,71 @@ async function applyHotkeys() {
     return Object.fromEntries(
       Object.entries(hotkeys.active()).map(([action, accelerator]) => [
         action,
-        { ok: false, accelerator, error: unread },
+        { ok: false, accelerator, code: 'unreadable', error: unread },
       ]),
     );
   }
-  const statuses = hotkeys.apply(settings);
+  hotkeyStatuses = hotkeys.apply(settings);
   try {
     renderMenu();
   } catch (err) {
     // The shortcuts are registered; a menu that could not be rebuilt is no reason to say they are not.
     console.error('[focusdesk] could not update the menu', err);
   }
-  return statuses;
+  return hotkeyStatuses;
 }
 
-// One at a time, so that two reloads cannot leave the shortcuts at whichever answered last.
+// One at a time, so that two reloads cannot leave the shortcuts at whichever answered last, and
+// so that what is asked in one order (let go of, take again, let go of) is done in it.
 let hotkeyQueue = Promise.resolve();
-function syncHotkeys() {
-  const run = hotkeyQueue.then(applyHotkeys);
+function inHotkeyOrder(task) {
+  const run = hotkeyQueue.then(task);
   hotkeyQueue = run.catch(() => {});
   return run;
+}
+
+function syncHotkeys() {
+  return inHotkeyOrder(applyHotkeys);
+}
+
+// The shortcuts are let go of while Settings listens for a key to record, since a key that
+// FocusDesk holds never reaches the page: its action runs, and the page hears nothing.
+
+/** The longest the shortcuts stay let go of: what a page that never says so is held to. */
+const SUSPEND_MAX_MS = 60_000;
+
+/**
+ * Whether the page has asked for the shortcuts to be let go of, and not yet for them back. It is
+ * set at once, where the shortcuts themselves follow in their turn (see inHotkeyOrder).
+ */
+let suspendAsked = false;
+let suspendTimer = null;
+
+/**
+ * Let go of every shortcut until resumeHotkeys, whichever way that comes about: the page says so,
+ * the window or the page goes away from under it (see createWindow), or SUSPEND_MAX_MS is up.
+ */
+function suspendHotkeys() {
+  suspendAsked = true;
+  clearTimeout(suspendTimer);
+  suspendTimer = setTimeout(() => {
+    console.error('[focusdesk] the shortcuts were let go of for too long: taking them again');
+    resumeHotkeys().catch((err) => console.error('[focusdesk] could not take them again', err));
+  }, SUSPEND_MAX_MS);
+  return inHotkeyOrder(() => hotkeys.suspend());
+}
+
+/**
+ * Take the shortcuts again: at once, as they were, which needs nothing from anywhere, and then
+ * from the settings as they are now, which is what registers a change made while they were let go
+ * of. Always done in the end, whatever the page says or does not.
+ */
+function resumeHotkeys() {
+  suspendAsked = false;
+  clearTimeout(suspendTimer);
+  suspendTimer = null;
+  hotkeys.resume();
+  return syncHotkeys();
 }
 
 /* ------------------------------------------------ away, and needs attention */
@@ -833,8 +917,15 @@ app.whenReady().then(async () => {
   }
 
   // The windows call these, so they are in place before either page loads. Settings asks for the
-  // shortcuts to be read again after it saves one, and for a sample notification on request.
+  // shortcuts to be read again after it saves one, to be let go of while it listens for a key to
+  // record (and given back after), and for a sample notification on request.
   ipcMain.handle('hotkeys:reload', () => syncHotkeys());
+  ipcMain.handle('hotkeys:suspend', async (event, on) => {
+    // Only the main window records a shortcut, and only its events give the shortcuts back
+    // (see createWindow): a page that is not that window is not let to take them away.
+    if (event.sender !== win?.webContents) return;
+    await (on === true ? suspendHotkeys() : resumeHotkeys());
+  });
   ipcMain.handle('notification:test', () => showTestNotification({ Notification }));
   palette = createPalette({
     serverUrl: server.url,
@@ -862,6 +953,10 @@ app.whenReady().then(async () => {
       get activeHotkey() {
         return hotkeys.active().quickSwitch;
       },
+      /** Whether the shortcuts are let go of for now, while Settings listens for a key. */
+      hotkeysSuspended: () => hotkeys.suspended(),
+      /** How each shortcut stood when last registered, as the tray reads it: null before that. */
+      hotkeyStatuses: () => (hotkeyStatuses ? JSON.parse(JSON.stringify(hotkeyStatuses)) : null),
     };
   }
 
