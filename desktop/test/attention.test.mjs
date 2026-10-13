@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import { describe, it } from 'node:test';
 import {
+  APP_USER_MODEL_ID,
   createAttention,
   interruptedItem,
   MENU_LABEL_MAX,
@@ -942,5 +944,35 @@ describe('Got interrupted', () => {
     const item = interruptedItem({ id: 4, kind: 'focus' }, reasons, async () => 'logged');
 
     assert.equal(await item.submenu[0].click(), 'logged');
+  });
+});
+
+describe('the name Windows files the notifications under', () => {
+  const desktop = new URL('..', import.meta.url);
+  const packageJson = JSON.parse(fs.readFileSync(new URL('package.json', desktop), 'utf8'));
+  const main = fs.readFileSync(new URL('main.mjs', desktop), 'utf8');
+
+  it('is the app id of the installer, which gives its Start Menu shortcut that same id', () => {
+    assert.equal(APP_USER_MODEL_ID, packageJson.build.appId);
+    assert.equal(APP_USER_MODEL_ID, 'com.focusdesk.app');
+  });
+
+  it('is written as Windows reads one: no spaces, dots between the parts, at most 128 characters', () => {
+    assert.match(APP_USER_MODEL_ID, /^[A-Za-z0-9]+(\.[A-Za-z0-9-]+)+$/);
+    assert.ok(APP_USER_MODEL_ID.length <= 128);
+  });
+
+  it('is set by the main process on Windows, before the app is ready and anything can notify', () => {
+    const set = main.indexOf('app.setAppUserModelId(APP_USER_MODEL_ID)');
+    assert.ok(set > 0, 'main.mjs does not set it');
+    // On Windows, and only there.
+    assert.match(
+      main.slice(main.lastIndexOf('\n', set), set),
+      /if \(process\.platform === 'win32'\) $/,
+    );
+    // Not from inside anything that runs later: ahead of the app being ready, and of the first
+    // place a Notification is made.
+    assert.ok(set < main.indexOf('app.whenReady()'), 'it is set after the app is ready');
+    assert.ok(set < main.indexOf('createAttention({'), 'it is set after the notifications');
   });
 });
