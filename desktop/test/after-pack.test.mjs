@@ -36,6 +36,8 @@ function fakes({ failOn = [], said = '' } = {}) {
       if (failOn.includes(calls.length)) throw new Error(`codesign said no, call ${calls.length}`);
       return said;
     },
+    // Nothing to clear: no app is there, and xattr is the Mac's.
+    clear: () => {},
     log: (line) => lines.push(line),
   };
 }
@@ -111,6 +113,25 @@ describe('the afterPack hook', () => {
     assert.deepEqual(f.calls, [
       ['--force', '--deep', '--sign', '-', app],
       ['--verify', '--deep', '--strict', '--verbose=2', app],
+    ]);
+  });
+
+  it("clears the app's extended attributes first, so that --strict has no detritus to refuse", async () => {
+    const steps = [];
+    await afterPack(packed(), {
+      env: {},
+      log: () => {},
+      clear: (target) => steps.push(['clear', target]),
+      run: (args) => {
+        steps.push(['codesign', args[0]]);
+        return '';
+      },
+    });
+
+    assert.deepEqual(steps, [
+      ['clear', app],
+      ['codesign', '--force'],
+      ['codesign', '--verify'],
     ]);
   });
 

@@ -7,6 +7,7 @@ import { after, describe, it } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   builderArguments,
+  builderRuns,
   chipToBuild,
   hostChip,
   installCommand,
@@ -35,19 +36,15 @@ describe('the arguments for packaging a Mac app', () => {
     assert.deepEqual(builderArguments({ chip: 'x64' }), ['--mac', 'dmg', '--x64']);
   });
 
-  it('make both when both are asked for, whatever the chip', () => {
-    assert.deepEqual(builderArguments({ chip: 'arm64', both: true }), [
-      '--mac',
-      'dmg',
-      '--arm64',
-      '--x64',
-    ]);
-    assert.deepEqual(builderArguments({ chip: 'ia32', both: true }), [
-      '--mac',
-      'dmg',
-      '--arm64',
-      '--x64',
-    ]);
+  it('make both when both are asked for, whatever the chip, one image after the other', () => {
+    // Made side by side, the two images both open as /Volumes/FocusDesk and unmount each other.
+    const oneAfterTheOther = [
+      ['--mac', 'dmg', '--arm64'],
+      ['--mac', 'dmg', '--x64'],
+    ];
+    assert.deepEqual(builderRuns({ chip: 'arm64', both: true }), oneAfterTheOther);
+    assert.deepEqual(builderRuns({ chip: 'ia32', both: true }), oneAfterTheOther);
+    assert.deepEqual(builderRuns({ chip: 'x64' }), [['--mac', 'dmg', '--x64']]);
   });
 
   it('refuse a chip a Mac app is not built for, and say what to do', () => {
@@ -168,11 +165,14 @@ describe('the command line', () => {
     assert.equal(run.out, 'electron-builder --mac dmg --x64');
   });
 
-  it('prints both chips for the build that is for sharing', () => {
+  it('prints both chips for the build that is for sharing, one run each', () => {
     const run = dryRun('--all');
 
     assert.equal(run.status, 0);
-    assert.equal(run.out, 'electron-builder --mac dmg --arm64 --x64');
+    assert.equal(
+      run.out,
+      'electron-builder --mac dmg --arm64\nelectron-builder --mac dmg --x64',
+    );
   });
 
   it('picks the chip of the Mac it runs on when none is named, and off a Mac asks for one', () => {
@@ -258,11 +258,24 @@ describe('running electron-builder', () => {
     assert.match(done.stdout, /> electron-builder --mac dmg --arm64/);
   });
 
-  it('runs it for both chips when asked for both', () => {
+  it('runs it for both chips when asked for both, one after the other', () => {
     const done = run(inAFolder(), '--all');
 
-    const said = JSON.parse(done.stdout.split('\n').find((line) => line.startsWith('{')));
-    assert.deepEqual(said.args, ['--mac', 'dmg', '--arm64', '--x64']);
+    const said = done.stdout
+      .split('\n')
+      .filter((line) => line.startsWith('{'))
+      .map((line) => JSON.parse(line).args);
+    assert.deepEqual(said, [
+      ['--mac', 'dmg', '--arm64'],
+      ['--mac', 'dmg', '--x64'],
+    ]);
+  });
+
+  it('stops at the first image that fails, with its exit code', () => {
+    const done = run(inAFolder({ exitCode: 5 }), '--all');
+
+    assert.equal(done.status, 5);
+    assert.equal(done.stdout.split('\n').filter((line) => line.startsWith('{')).length, 1);
   });
 
   it('exits with the code electron-builder exits with, so a failed build fails the npm script', () => {
@@ -363,16 +376,17 @@ describe('where the script is run from', () => {
       installCommand({ cwd: '/repo/desktop/scripts', desktop: '/repo/desktop' }),
       'npm --prefix .. ci',
     );
+    // In the separator of the system it is run on, which is the one its shell takes.
     assert.equal(
       installCommand({ cwd: '/elsewhere', desktop: '/repo/desktop' }),
-      'npm --prefix ../repo/desktop ci',
+      `npm --prefix ${path.join('..', 'repo', 'desktop')} ci`,
     );
   });
 
   it('quotes a way that has a space in it', () => {
     assert.equal(
       installCommand({ cwd: '/Users/me/My Apps', desktop: '/Users/me/My Apps/focus desk/desktop' }),
-      'npm --prefix "focus desk/desktop" ci',
+      `npm --prefix "${path.join('focus desk', 'desktop')}" ci`,
     );
   });
 

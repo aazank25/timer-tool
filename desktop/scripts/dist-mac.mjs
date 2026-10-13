@@ -30,15 +30,24 @@ export function hostChip({ arch = process.arch, translated = false } = {}) {
   return arch === 'x64' && translated ? 'arm64' : arch;
 }
 
-/** What electron-builder is given to make the image for `chip`, or for both with `both`. */
-export function builderArguments({ chip, both = false }) {
-  if (both) return ['--mac', 'dmg', ...CHIPS.map((c) => `--${c}`)];
+/** What electron-builder is given to make the image for `chip`. */
+export function builderArguments({ chip }) {
   if (!CHIPS.includes(chip)) {
     throw new Error(
       `A Mac app is built for arm64 or x64, and this is ${chip}. Say which with --arch arm64 or --arch x64.`,
     );
   }
   return ['--mac', 'dmg', `--${chip}`];
+}
+
+/**
+ * The electron-builder runs that make the image for `chip`, or for both with `both`: one run per
+ * image, one after the other. Given both chips at once, electron-builder makes the two images side
+ * by side, and both open as /Volumes/FocusDesk while they are made, where each takes the other
+ * for one left over from before and unmounts it, and the build fails on a busy disk.
+ */
+export function builderRuns({ chip, both = false }) {
+  return both ? CHIPS.map((c) => builderArguments({ chip: c })) : [builderArguments({ chip })];
 }
 
 /**
@@ -173,15 +182,15 @@ export function isMain(entry = process.argv[1], url = import.meta.url) {
 function main() {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const desktop = path.resolve(here, '..');
-  let args;
+  let runs;
   try {
     const options = parseOptions(process.argv.slice(2));
-    args = builderArguments({
+    runs = builderRuns({
       chip: chipToBuild({ options, host: () => hostChip({ translated: runsUnderRosetta() }) }),
       both: options.both,
     });
     if (options.dryRun) {
-      console.log(`electron-builder ${args.join(' ')}`);
+      for (const args of runs) console.log(`electron-builder ${args.join(' ')}`);
       return;
     }
   } catch (err) {
@@ -198,13 +207,15 @@ function main() {
     process.exit(1);
   }
   if (process.platform === 'darwin') ejectOpenImages();
-  console.log(`\n> electron-builder ${args.join(' ')}`);
-  const run = spawnSync(process.execPath, [cli, ...args], { cwd: desktop, stdio: 'inherit' });
-  if (run.error) {
-    console.error(run.error.message);
-    process.exit(1);
+  for (const args of runs) {
+    console.log(`\n> electron-builder ${args.join(' ')}`);
+    const run = spawnSync(process.execPath, [cli, ...args], { cwd: desktop, stdio: 'inherit' });
+    if (run.error) {
+      console.error(run.error.message);
+      process.exit(1);
+    }
+    if (run.status !== 0) process.exit(run.status ?? 1);
   }
-  process.exit(run.status ?? 1);
 }
 
 // Run as a script, and not when a test imports it for the functions above.

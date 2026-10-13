@@ -168,8 +168,8 @@ Microsoft certificate. Everything stays on their computer.
    ```
 
 That is all. The tag starts `.github/workflows/desktop.yml`, which builds the Mac
-and Windows installers, opens each packaged app to check that it starts, and puts
-them on a new release with a note on which file to pick. It takes a while; watch
+and Windows installers, opens the Apple silicon and Windows apps to check that they
+start (the Intel one has its signature checked), and puts them on a new release with a note on which file to pick. It takes a while; watch
 it under the repo's Actions tab. The tag has to be `v` plus the version
 (`v0.1.1` for `0.1.1`), or the build stops at once and says so. Run it again for
 a version that is already released and the files on that release are replaced.

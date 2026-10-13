@@ -45,7 +45,7 @@
       "package.json",
       "!node_modules/better-sqlite3/deps/**",
       "!node_modules/better-sqlite3/src/**",
-      "!node_modules/better-sqlite3/build/Release/obj.target/**"
+      "!node_modules/better-sqlite3/build/**"
     ],
     "asarUnpack": [
       "**/node_modules/better-sqlite3/**"
@@ -92,7 +92,8 @@
       "category": "Utility",
       "executableName": "focusdesk"
     },
-    "npmRebuild": false
+    "npmRebuild": false,
+    "publish": null
   },
   "author": "FocusDesk",
   "repository": "https://github.com/aazank25/timer-tool"

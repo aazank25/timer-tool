@@ -92,6 +92,16 @@ function decideAdHocSigning({ platform, env = {}, identity }) {
 /** An argument as it would be typed: quoted when it has a space in it. */
 const typed = (arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg);
 
+/**
+ * Clear the app's extended attributes before it is signed: `codesign --strict` refuses a bundle in
+ * which any file carries Finder information or a resource fork ("detritus not allowed"), which a
+ * file copied about on a Mac can. Best effort, and quiet: if xattr cannot run, the check after
+ * signing says what is wrong.
+ */
+function clearDetritus(app) {
+  spawnSync('xattr', ['-cr', app], { stdio: 'ignore' });
+}
+
 /** Run codesign and return what it said. When it does not succeed, throw, saying what it said. */
 function codesign(args) {
   const done = spawnSync('codesign', args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
@@ -116,7 +126,10 @@ function codesign(args) {
  * argument is for the tests, which cannot run codesign and must not read the environment of
  * whoever runs them.
  */
-async function afterPack(context, { env = process.env, run = codesign, log = console.log } = {}) {
+async function afterPack(
+  context,
+  { env = process.env, run = codesign, clear = clearDetritus, log = console.log } = {},
+) {
   const { sign, reason } = decideAdHocSigning({
     platform: context.electronPlatformName,
     env,
@@ -130,6 +143,7 @@ async function afterPack(context, { env = process.env, run = codesign, log = con
   // The app is where electron-builder's own signing step looks for it, too.
   const app = path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`);
   log(`  • ad-hoc signing  ${app}: ${reason}`);
+  clear(app);
   run(['--force', '--deep', '--sign', '-', app]);
   const verdict = run(['--verify', '--deep', '--strict', '--verbose=2', app]);
   log(`  • ad-hoc signed and verified  ${app}`);

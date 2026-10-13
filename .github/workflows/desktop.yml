@@ -225,7 +225,14 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           if gh release view "$TAG" > /dev/null 2>&1; then
-            echo "$TAG is already a release: adding the installers to it, replacing any of the same name."
+            # Only the commit the tag names may refill its release: the button, run on a later
+            # commit with the version not bumped, would otherwise put new code under an old tag.
+            tagged=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)
+            if [ "$tagged" != "$GITHUB_SHA" ]; then
+              echo "::error::$TAG is already a release, of commit ${tagged:0:7}, not this one (${GITHUB_SHA:0:7}). Bump \"version\" in desktop/package.json for a new release."
+              exit 1
+            fi
+            echo "$TAG is already a release of this commit: adding the installers to it, replacing any of the same name."
             gh release upload "$TAG" installers/* --clobber
           else
             # A version with a dash (v0.2.0-beta.1) is a pre-release, which the "latest" link skips.
