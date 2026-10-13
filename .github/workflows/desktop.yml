@@ -1,0 +1,228 @@
+name: Desktop app
+
+# Builds FocusDesk on a real Mac and a real Windows machine, opens each packaged app to check that
+# it starts, and, for a version tag (v0.1.1) or the Run workflow button with "publish" ticked,
+# puts the installers on a GitHub Release: that page is what you send people. See "Share it" in
+# the README.
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+    # A push to a branch that only changes docs builds nothing. Path filters are not evaluated for
+    # tags, so a v* tag always runs, whatever its commit changed.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a release for the version in desktop/package.json (v<version>)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push to a branch replaces that branch's unfinished run. A tag or the button is never cut short.
+  group: desktop-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' && github.ref_type == 'branch' }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Mac
+            os: macos-latest
+            script: desktop:mac:all
+            # What the smoke test opens: the Apple silicon app, which is what macos-latest runs.
+            app: desktop/release/mac-arm64/FocusDesk.app
+            installers: desktop/release/*.dmg
+            artifact: FocusDesk-Mac
+          - name: Windows
+            os: windows-latest
+            script: desktop:win
+            app: desktop/release/win-unpacked/FocusDesk.exe
+            installers: desktop/release/*-setup.exe
+            artifact: FocusDesk-Windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      # Fails in seconds, before a build that would make FocusDesk-0.1.0-* files for a v0.1.1 release.
+      - name: Check the tag matches the version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          version=$(node -p "require('./desktop/package.json').version")
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::The tag is $GITHUB_REF_NAME, but desktop/package.json says version $version. Bump \"version\" there, commit, and tag that commit."
+            exit 1
+          fi
+
+      - run: npm ci
+
+      # The build signs the app itself (ad hoc). There is no certificate to find, so do not look in the keychain.
+      - name: No keychain lookup (Mac)
+        if: runner.os == 'macOS'
+        run: echo "CSC_IDENTITY_AUTO_DISCOVERY=false" >> "$GITHUB_ENV"
+
+      - name: Build the installers
+        run: npm run ${{ matrix.script }}
+
+      - name: Check the Mac apps are signed
+        if: runner.os == 'macOS'
+        run: |
+          for app in desktop/release/mac-arm64/FocusDesk.app desktop/release/mac/FocusDesk.app; do
+            echo "::group::$app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            details=$(codesign -dv "$app" 2>&1)
+            echo "$details"
+            echo "::endgroup::"
+            case "$details" in
+              *Signature=adhoc*) ;;
+              *) echo "::error::$app is not signed ad hoc (no Signature=adhoc above)"; exit 1 ;;
+            esac
+          done
+
+      # Playwright is only for the smoke test, so it goes in a temp folder and the lockfiles stay as they are.
+      - name: Install Playwright
+        run: npm install --no-save --no-package-lock --no-audit --no-fund --ignore-scripts --prefix "${{ runner.temp }}/playwright" playwright@1.64.0
+
+      - name: Smoke test the packaged app
+        timeout-minutes: 5
+        run: node desktop/scripts/smoke.mjs "${{ matrix.app }}"
+        env:
+          NODE_PATH: ${{ runner.temp }}/playwright/node_modules
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.installers }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0 # an installer is compressed already
+
+  # Apart from build, so that the installers are still made if a unit test fails on Windows.
+  test-windows:
+    name: Unit tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # The tests need the root install only: the desktop ones run no Electron and make their own stand-ins.
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  release:
+    name: Publish release
+    needs: build
+    # A pushed v* tag publishes. The button publishes only when "publish" is ticked, whatever it is run on.
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: FocusDesk-*
+          merge-multiple: true
+          path: installers
+
+      # A tag names its own release. The button, run on a branch, makes the tag from the version.
+      - name: Work out the tag
+        id: tag
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag=$GITHUB_REF_NAME
+          else
+            tag="v$(jq -r .version desktop/package.json)"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing $tag"
+
+      - name: Write the release notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          shopt -s nullglob
+          arm64=(installers/*-mac-arm64.dmg)
+          x64=(installers/*-mac-x64.dmg)
+          win=(installers/*-windows-x64-setup.exe)
+          if [ ${#arm64[@]} -ne 1 ] || [ ${#x64[@]} -ne 1 ] || [ ${#win[@]} -ne 1 ]; then
+            echo "::error::Expected one Mac arm64 DMG, one Mac x64 DMG and one Windows setup in installers/, and found:"
+            ls -l installers
+            exit 1
+          fi
+          mac_arm64=${arm64[0]##*/}
+          mac_x64=${x64[0]##*/}
+          windows=${win[0]##*/}
+          base="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG"
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          ## Which file do I download?
+
+          | You have | Download |
+          | --- | --- |
+          | A Mac with Apple silicon (M1 or later) | [$mac_arm64]($base/$mac_arm64) |
+          | An Intel Mac | [$mac_x64]($base/$mac_x64) |
+          | Windows | [$windows]($base/$windows) |
+
+          Not sure which Mac you have? Apple menu → About This Mac. "Chip: Apple M1" (or M2, M3, and so on) is Apple silicon; "Processor: Intel" is an Intel Mac.
+
+          ## The first time you open it
+
+          **Mac:** open the DMG, drag FocusDesk to Applications, then open it. If macOS says it can't verify the app: System Settings → Privacy & Security → **Open Anyway** (once).
+
+          **Windows:** run the setup. If "Windows protected your PC" appears: **More info** → **Run anyway**.
+
+          macOS and Windows ask because the app isn't signed with a paid Apple or Microsoft certificate.
+
+          Everything stays on your computer.
+
+          Built by GitHub from commit ${GITHUB_SHA:0:7}: [the build]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID).
+          EOF
+          cat "$RUNNER_TEMP/release-notes.md"
+
+      - name: Create the release, or add the files to it
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "$TAG is already a release: adding the installers to it, replacing any of the same name."
+            gh release upload "$TAG" installers/* --clobber
+          else
+            # A version with a dash (v0.2.0-beta.1) is a pre-release, which the "latest" link skips.
+            flags=()
+            case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+            gh release create "$TAG" installers/* --title "FocusDesk $TAG" --notes-file "$RUNNER_TEMP/release-notes.md" --target "$GITHUB_SHA" "${flags[@]}"
+          fi
+          echo "Download page: $(gh release view "$TAG" --json url --jq .url)" >> "$GITHUB_STEP_SUMMARY"
