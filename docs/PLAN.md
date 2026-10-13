@@ -933,6 +933,15 @@ assets sit in git.
   written for a day that has not come yet.
 - Keyboard focus falls back to the page when *Show fewer* goes because the banners
   were answered elsewhere, and when the "Nothing else needs your attention" line goes.
+- Windows is built and smoke-tested by the GitHub workflow on a Windows machine, but
+  no person has used it there yet. Unseen so far: the tray icon (tray.ico) at real scale factors, whether the
+  quick-switch box takes the keyboard the first time it opens, and toast
+  notifications from the installed app. With no menu, Windows has no reload, zoom or
+  devtools shortcuts. Ctrl+Shift+F and Ctrl+Shift+Space are taken system-wide and
+  cannot be changed.
+- The installers are not signed with a certificate: the Mac app is signed ad hoc
+  (Open Anyway, once), and the Windows setup meets SmartScreen. A company-managed
+  PC or Smart App Control may refuse an unsigned installer outright.
 - Dependencies: React Router 7 and node-ical 0.27 fix moderate advisories but are
   breaking upgrades. Electron 38 is out of support; Electron 42 and later move
   notifications to UNUserNotificationCenter, which needs a signed app.

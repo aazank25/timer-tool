@@ -10,7 +10,9 @@ priorities list — can be what a block is for, so each shows the time really
 logged against its estimate.
 
 Everything lives in one SQLite file on your machine. The server binds to
-loopback only. Nothing leaves the laptop unless you connect a calendar feed.
+loopback only, and answers only the app itself: a request addressed by any
+other name, or a change sent by another website or another program's page, is
+refused. Nothing leaves the laptop unless you connect a calendar feed.
 
 ## Install it as a real app
 
@@ -109,6 +111,18 @@ certificate in its keychain uses that instead.
 `CSC_IDENTITY_AUTO_DISCOVERY=false npm run desktop:mac` leaves the keychain alone
 and keeps the ad-hoc signature, which is what the GitHub build does.
 
+### On Windows
+
+The clock lives in the tray icon's tooltip (Windows shows no text beside a tray
+icon): hover it. Windows 11 puts a new tray icon under the **^** overflow, so
+drag it onto the taskbar to keep it in sight. The close button asks the same
+question as on a Mac, with "system tray" for "menu bar". Spell-check is off
+there, which is what keeps the app from downloading a dictionary.
+
+The installer is not signed, so the first time it runs Windows may say it
+protected your PC: **More info → Run anyway**. A company-managed PC may not
+allow unsigned apps at all; signing the installer is the way past that.
+
 **Notifications.** The first time FocusDesk has something to say, macOS may ask
 whether it may; if you said no, or never saw the question, switch it on in System
 Settings → Notifications → FocusDesk. A notification has no buttons of its own,
@@ -185,7 +199,11 @@ npm run dev        # api on :4317, UI on http://localhost:5173
 Other scripts: `npm test` (the server's suite, then the desktop app's), `npm run typecheck`.
 
 Requires Node 22+. `better-sqlite3` ships prebuilt Node-API binaries for every
-platform, so there is nothing to compile and no toolchain to install.
+platform, and those are what it loads. `npm ci` still tries to compile it from
+source (npm reads the package's `gypfile: false` only from its package.json, not
+from the lockfile), which needs Python and a C++ compiler; where those are
+missing, `npm ci --ignore-scripts && npm rebuild esbuild` installs without
+compiling. The desktop app's install already skips it.
 
 ## Where your data lives
 
