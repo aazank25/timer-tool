@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
+import { config } from './config.js';
 import { HttpError } from './http.js';
 
 /**
@@ -12,7 +13,10 @@ import { HttpError } from './http.js';
  * - Cross-site writes. Any page can make the browser send a POST here. It cannot read the answer,
  *   but it does not need to for a route like pause or complete, which take no body and so have
  *   nothing to be refused for. What gives it away is the Origin header, or Sec-Fetch-Site, which
- *   the browser adds and a page cannot change.
+ *   the browser adds and a page cannot change. That goes for a page another program serves on
+ *   this computer too: on another port it is another site, loopback or not.
+ * - Framing. A page that cannot send a write itself can show the app in a frame and get the
+ *   person to click in it. Every answer says it is not to be framed.
  *
  * Mounted before everything else, the client bundle included, so that none of it is reached by a
  * request that did not come from the app. The app's own requests all pass: the web client is
@@ -24,9 +28,9 @@ import { HttpError } from './http.js';
  */
 
 /**
- * What a Host header, or an Origin after its `http://`, may say: one of the three loopback
- * names, in any case, with a port or without. It is spelled out rather than worked out, so that
- * nothing gets in by accident. Left out on purpose:
+ * What a Host header may say: one of the three loopback names, in any case, with a port or
+ * without. It is spelled out rather than worked out, so that nothing gets in by accident. Left out
+ * on purpose:
  *
  *   localhost.          the trailing dot. It is the same name to a resolver, but nobody opens
  *                       the app that way, and every extra spelling is one more to get right.
@@ -45,11 +49,19 @@ function isLoopback(authority: string): boolean {
 }
 
 /**
- * An Origin the app's own pages can have: plain http and a loopback host, as a browser writes
- * it. Not `null`, not https, and not a look-alike such as 127.0.0.1.evil.com.
+ * Whether an Origin is the app's own: the page was served by this server, at the very name and
+ * port the request is addressed to (the Host, already checked to be a loopback one), as a browser
+ * writes it. Another program's page on another port of this computer is not the app, and neither
+ * is `null`, https, or a look-alike such as 127.0.0.1.evil.com.
+ *
+ * While developing, the page comes from the Vite dev server instead (config.devOrigins), which
+ * proxies /api with the browser's Origin and this server's Host. That is trusted only outside
+ * production, and the desktop app and `npm start` run in production.
  */
-function isLoopbackOrigin(origin: string): boolean {
-  return /^http:\/\//i.test(origin) && isLoopback(origin.slice('http://'.length));
+function isOwnOrigin(origin: string, host: string): boolean {
+  const lower = origin.toLowerCase();
+  if (lower === `http://${host.toLowerCase()}`) return true;
+  return !config.isProd && config.devOrigins.includes(lower);
 }
 
 /**
@@ -79,28 +91,32 @@ function isForThisServer(req: Request): boolean {
 const READS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /**
- * Whether this is a request that changes something, sent by a page of another site. A browser
- * puts an Origin on every such request, and says Sec-Fetch-Site: cross-site on one that crossed
- * sites, so the app's own pages (an Origin of a loopback http address) pass, and so does a client
- * that is not a browser and sends neither.
+ * Whether this is a request that changes something, sent by a page that is not the app's own. A
+ * browser puts an Origin on every such request, and says on one that came from another site or
+ * another port (Sec-Fetch-Site: cross-site, or same-site for another port of the same name). The
+ * app's own pages are same-origin, so they pass, and so does a client that is not a browser and
+ * sends neither.
  */
-function isCrossSiteWrite(req: Request): boolean {
+function isForeignWrite(req: Request): boolean {
   if (READS.has(req.method)) return false;
   const { origin } = req.headers;
-  if (origin !== undefined && !isLoopbackOrigin(origin)) return true;
-  return String(req.headers['sec-fetch-site'] ?? '').toLowerCase().includes('cross-site');
+  if (origin !== undefined && !isOwnOrigin(origin, req.headers.host ?? '')) return true;
+  return /cross-site|same-site/.test(String(req.headers['sec-fetch-site'] ?? '').toLowerCase());
 }
 
 /**
  * Refuse a request that does not come from the app itself: a 403 in the same shape as every
  * other error, with no route run and nothing written. Mount it first.
  */
-export function localOnly(req: Request, _res: Response, next: NextFunction): void {
+export function localOnly(req: Request, res: Response, next: NextFunction): void {
+  // The app never frames itself, so nothing else may: the old header and the CSP one.
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
   if (!isForThisServer(req)) {
     next(new HttpError(403, 'FocusDesk only answers requests for localhost, 127.0.0.1 or [::1]'));
     return;
   }
-  if (isCrossSiteWrite(req)) {
+  if (isForeignWrite(req)) {
     next(new HttpError(403, 'FocusDesk does not take changes from other websites'));
     return;
   }

@@ -318,6 +318,29 @@ describe('the Host a request is addressed to', () => {
   });
 });
 
+describe('framing', () => {
+  let api: Api;
+
+  before(async () => {
+    await freshDb();
+    api = await serve();
+  });
+
+  after(() => api.close());
+
+  it('is refused on every answer: the shell, the API and a refusal alike', async () => {
+    for (const sent of [
+      { path: '/' },
+      { path: '/api/settings' },
+      { path: '/api/settings', headers: { host: 'evil.com' } },
+    ]) {
+      const res = await api.send(sent);
+      assert.equal(res.headers['x-frame-options'], 'DENY', JSON.stringify(sent));
+      assert.equal(res.headers['content-security-policy'], "frame-ancestors 'none'");
+    }
+  });
+});
+
 describe('the client bundle', () => {
   let api: Api;
 
@@ -433,23 +456,44 @@ describe('writes from other sites', () => {
     assert.deepEqual(await projectNames(), []);
   });
 
-  it('takes a write whose Origin is a loopback http address, on any port', async () => {
-    const origins = [
-      `http://127.0.0.1:${api.port}`,
+  it('takes a write from a page this server served, at the address it is sent to', async () => {
+    // Origin and Host as a browser sends them from a page opened at that address.
+    const pages = [
+      { host: `127.0.0.1:${api.port}`, origin: `http://127.0.0.1:${api.port}` },
+      { host: `localhost:${api.port}`, origin: `http://localhost:${api.port}` },
+      { host: `[::1]:${api.port}`, origin: `http://[::1]:${api.port}` },
+      { host: `localhost:${api.port}`, origin: `http://LOCALHOST:${api.port}` },
+    ];
+    for (const [i, headers] of pages.entries()) {
+      const res = await create(`Project ${i}`, headers);
+      assert.equal(res.status, 201, JSON.stringify(headers));
+    }
+    assert.deepEqual(await projectNames(), pages.map((_, i) => `Project ${i}`).sort());
+  });
+
+  it("refuses a write from another program's page on this computer, loopback or not", async () => {
+    for (const origin of [
+      'http://localhost:3000',
+      'http://127.0.0.1:8080',
+      'http://localhost',
+      `http://localhost:${api.port + 1}`,
+      // The right port by another name: a page at localhost, sending to 127.0.0.1.
       `http://localhost:${api.port}`,
       `http://[::1]:${api.port}`,
-      // The Vite dev server, opened by either name (config.devOrigins), and any other port.
-      'http://localhost:5173',
-      'http://127.0.0.1:5173',
-      'http://localhost:3000',
-      'http://localhost',
-      'http://LOCALHOST:5173',
-    ];
-    for (const [i, origin] of origins.entries()) {
-      const res = await create(`Project ${i}`, { origin });
-      assert.equal(res.status, 201, origin);
+    ]) {
+      assertRefused(await create('Taken over', { origin }), origin);
     }
-    assert.deepEqual(await projectNames(), origins.map((_, i) => `Project ${i}`).sort());
+    assert.deepEqual(await projectNames(), []);
+  });
+
+  it('takes a write from the Vite dev server only while developing', async () => {
+    const { config } = await import('../src/lib/config.js');
+    for (const [i, origin] of config.devOrigins.entries()) {
+      const res = await create(`Dev ${i}`, { origin });
+      if (config.isProd) assertRefused(res, origin);
+      else assert.equal(res.status, 201, origin);
+    }
+    assert.equal((await projectNames()).length, config.isProd ? 0 : config.devOrigins.length);
   });
 
   it('takes a write with no Origin at all, as Node clients send it', async () => {
@@ -471,12 +515,18 @@ describe('writes from other sites', () => {
     }
     assert.deepEqual(await projectNames(), []);
 
-    // A page on another port of this machine is same-site, and the app's own is same-origin.
-    for (const [i, value] of ['same-origin', 'same-site', 'none'].entries()) {
+    // A page on another port of this machine is same-site: another program's, not the app's.
+    for (const value of ['same-site', 'Same-Site', 'same-origin, same-site']) {
+      assertRefused(await create('Taken over', { 'sec-fetch-site': value }), value);
+    }
+    assert.deepEqual(await projectNames(), []);
+
+    // The app's own pages are same-origin; none is what a browser says for a typed address.
+    for (const [i, value] of ['same-origin', 'none'].entries()) {
       const res = await create(`Project ${i}`, { 'sec-fetch-site': value });
       assert.equal(res.status, 201, value);
     }
-    assert.equal((await projectNames()).length, 3);
+    assert.equal((await projectNames()).length, 2);
   });
 
   it('refuses a write that has no body to refuse, and leaves the block as it was', async () => {
@@ -597,7 +647,10 @@ describe("the app's own requests", () => {
     assert.equal((await api.send({ path: '/api/projects', headers })).status, 200);
   });
 
-  it('are answered through the Vite dev server, which proxies /api', async () => {
+  it(
+    'are answered through the Vite dev server, which proxies /api',
+    { skip: process.env.NODE_ENV === 'production' && 'the dev server is trusted in development' },
+    async () => {
     // web/vite.config.ts proxies /api with changeOrigin, which rewrites the Host to the API's own
     // address. The Origin and Sec-Fetch-Site that the browser sent to the dev page go through as
     // they were, and to the browser that page is the same origin.
@@ -611,7 +664,8 @@ describe("the app's own requests", () => {
     const created = await api.send({ method: 'POST', path: '/api/projects', headers, body });
     assert.equal(created.status, 201);
     assert.equal((await api.send({ path: '/api/projects', headers })).status, 200);
-  });
+    },
+  );
 
   it(
     'are answered when the dev origin asks CORS first',

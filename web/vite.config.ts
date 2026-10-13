@@ -8,6 +8,9 @@ export default defineConfig({
   plugins: [react(), tailwind()],
   server: {
     port: 5173,
+    // The API trusts writes from this exact origin while developing (config.devOrigins), so the
+    // dev server never wanders to another port.
+    strictPort: true,
     // Talk to the local API without CORS or absolute URLs in the client.
     proxy: { '/api': { target: `http://127.0.0.1:${API_PORT}`, changeOrigin: true } },
   },
