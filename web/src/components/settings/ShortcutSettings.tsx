@@ -47,6 +47,9 @@ const ROWS: {
  * What a row says under its buttons: how it stands, or why a change was not made. A note that
  * `fades` has said its piece and goes after a few seconds; how a shortcut stands stays.
  */
+/** What the desktop app says of the three shortcuts after registering them. */
+type HotkeyReply = Awaited<ReturnType<FocusdeskBridge['reloadHotkeys']>>;
+
 type Note = { tone: 'good' | 'bad' | 'plain'; text: string; fades?: boolean };
 type Notes = Partial<Record<Key, Note>>;
 
@@ -119,9 +122,12 @@ export function ShortcutSettings() {
   const [appError, setAppError] = useState<string | null>(null);
   const loading = settings === undefined;
 
-  /** Ask the desktop app to read the three settings again, and say how each one stands. */
+  /**
+   * Ask the desktop app to read the three settings again, and say how each one stands. Resolves
+   * to what it said, or null when there is no desktop app or it did not answer.
+   */
   async function reload() {
-    if (typeof window.focusdesk?.reloadHotkeys !== 'function') return;
+    if (typeof window.focusdesk?.reloadHotkeys !== 'function') return null;
     try {
       const result = await window.focusdesk.reloadHotkeys();
       setAppError(null);
@@ -131,10 +137,12 @@ export function ShortcutSettings() {
         if (note) next[row.key] = note;
       }
       setNotes(next);
+      return result;
     } catch (err) {
       setAppError(
         `The desktop app did not say which shortcuts are active (${reason(err, 'no answer')}).`,
       );
+      return null;
     }
   }
 
@@ -166,17 +174,43 @@ export function ShortcutSettings() {
     setHint(null);
     setBusy(true);
     setNotes((now) => ({ ...now, [key]: undefined }));
+    let saved: string;
     try {
-      qc.setQueryData(keys.settings, await api.updateSettings({ [key]: value }));
+      const updated = await api.updateSettings({ [key]: value });
+      qc.setQueryData(keys.settings, updated);
+      saved = String(updated[key] ?? value);
     } catch (err) {
       // Nothing was saved, so the row goes on showing the shortcut it had.
       setNotes((now) => ({ ...now, [key]: { tone: 'bad', text: refusal(err, key) } }));
       setBusy(false);
       return;
     }
-    if (inApp) await reload();
+    if (inApp) await keepWhatWorks(key, saved, await reload());
     else setNotes((now) => ({ ...now, [key]: { tone: 'plain', text: 'Saved.', fades: true } }));
     setBusy(false);
+  }
+
+  /**
+   * A shortcut another app holds cannot be had, and the desktop app goes on with the one it had
+   * (or none). The setting is put back to that, so that what is saved is what works, and the next
+   * start of the app does not try the one that was refused and end up with none. A refusal that
+   * was never a try (the desktop app could not read the settings) leaves the setting as saved.
+   */
+  async function keepWhatWorks(key: Key, saved: string, result: HotkeyReply | null) {
+    const row = ROWS.find((r) => r.key === key);
+    const status = row && result?.[row.status];
+    if (!status || status.ok || status.error?.startsWith('Could not read the settings')) return;
+    const working = status.accelerator ?? '';
+    if (working !== '' && saved !== '' && sameShortcut(working, saved, mac)) return;
+    try {
+      qc.setQueryData(keys.settings, await api.updateSettings({ [key]: working }));
+    } catch {
+      // The note already says it could not be registered; the setting stays as it was saved.
+      return;
+    }
+    const kept = working ? `Kept ${formatShortcut(working)}.` : 'It stays off.';
+    const text = `${status.error ?? ''} ${kept}`.trim();
+    setNotes((now) => ({ ...now, [key]: { tone: 'bad', text } }));
   }
 
   // While a row is listening every key press is the recorder's: none of them reaches the page.
