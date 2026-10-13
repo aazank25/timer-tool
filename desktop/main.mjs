@@ -14,10 +14,23 @@ import {
   powerMonitor,
   session as electronSession,
 } from 'electron';
-import { createAttention, interruptedItem, trimLabel } from './attention.mjs';
+import { APP_USER_MODEL_ID, createAttention, interruptedItem, trimLabel } from './attention.mjs';
 import { createAwayTracker } from './away.mjs';
-import { afterAsking, ASK_BUTTONS, CANCEL, onClose } from './close-window.mjs';
-import { elapsedSeconds, menuBarText } from './menu-bar.mjs';
+import {
+  afterAsking,
+  askButtons,
+  askDetail,
+  askMessage,
+  CANCEL,
+  onClose,
+} from './close-window.mjs';
+import {
+  elapsedSeconds,
+  menuBarText,
+  nativeAccelerator,
+  trayIconFiles,
+  trayMenuWording,
+} from './menu-bar.mjs';
 import { createPalette, isLocal } from './palette.mjs';
 import { rereadAfter } from './requests.mjs';
 import { navigationScript, windowPlan } from './window-route.mjs';
@@ -27,6 +40,10 @@ const isMac = process.platform === 'darwin';
 /** What both windows show until their page has painted. */
 const BACKGROUND = '#f9f9f7';
 
+// Windows shows a notification only for an app it can name, so the name is in place before the
+// first Notification can be made (see APP_USER_MODEL_ID). Only Windows has the idea.
+if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID);
+
 /** Two copies would fight over the same database file. */
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
@@ -34,6 +51,7 @@ if (!gotLock) app.quit();
 /**
  * Data lives beside the app, not beside the source checkout, so it survives
  * updates and reinstalls:  ~/Library/Application Support/FocusDesk/data
+ * (%APPDATA%\FocusDesk\data on Windows)
  */
 process.env.FOCUSDESK_DATA_DIR ??= path.join(app.getPath('userData'), 'data');
 process.env.FOCUSDESK_WEB_DIST ??= path.join(here, 'web');
@@ -71,8 +89,9 @@ function createWindow() {
   win.loadURL(`${server.url}/?desktop=1`);
   win.once('ready-to-show', () => win.show());
 
-  // The close button keeps the app running in the menu bar, quits it, or asks which, as the
-  // setting says (see closeWindow). Quitting closes the window too, and that is let through.
+  // The close button keeps the app running in the menu bar (the system tray, off a Mac), quits
+  // it, or asks which, as the setting says (see closeWindow). Quitting closes the window too, and
+  // that is let through.
   win.on('close', (event) => {
     if (isQuitting) return;
     event.preventDefault();
@@ -92,7 +111,10 @@ function createWindow() {
   });
 }
 
-/** Hide the window and the Dock icon: the app goes on in the menu bar, and the clock with it. */
+/**
+ * Hide the window and the Dock icon: the app goes on in the menu bar (the system tray, off a
+ * Mac, where there is no Dock icon to hide), and the clock with it.
+ */
 function parkInMenuBar() {
   win?.hide();
   if (isMac) app.dock?.hide();
@@ -104,7 +126,8 @@ let askingAboutClose = false;
 /**
  * The close button was pressed. The setting says whether that keeps the app in the menu bar or
  * quits it; until it has been told, the app asks, and "Don't ask again" makes the answer the
- * setting (Settings can change it back). Asked, Cancel leaves the window as it was.
+ * setting (Settings can change it back). Asked, Cancel leaves the window as it was. The question
+ * is worded for the system it is on (see close-window.mjs): a menu bar and ⌘Q are a Mac's.
  */
 async function closeWindow() {
   const what = onClose(settings?.close_behavior);
@@ -117,11 +140,11 @@ async function closeWindow() {
   try {
     const answer = await dialog.showMessageBox(win, {
       type: 'question',
-      buttons: ASK_BUTTONS,
+      buttons: askButtons(process.platform),
       defaultId: 0,
       cancelId: CANCEL,
-      message: 'Keep FocusDesk running in the menu bar?',
-      detail: `In the menu bar it keeps the clock, away detection and the reminders going while the window is closed. Quit it any time from its menu-bar icon${isMac ? ', or with ⌘Q' : ''}.`,
+      message: askMessage(process.platform),
+      detail: askDetail(process.platform),
       checkboxLabel: "Don't ask again",
     });
     const { action, remember } = afterAsking(answer);
@@ -280,6 +303,9 @@ let menuSignature = null;
 /** What the menu-bar item says, as last set: the tests read it, since only a Mac has a title to see. */
 let trayText = { title: '', toolTip: '' };
 
+// The tooltip is set again every second, changed or not, and that is kept on purpose: Windows can
+// lose it when Explorer restarts (the icon is put back, and not its tip), and the next second's
+// call puts it back.
 function setTrayText(title, toolTip) {
   trayText = { title, toolTip };
   if (isMac) tray.setTitle(title);
@@ -292,6 +318,8 @@ function renderTitle() {
     session: live.session,
     elapsed: elapsedSeconds(live, Date.now()),
     waiting: attention?.pending() ?? 0,
+    // Off a Mac the tooltip is all there is of the clock, and is worded to fit (see menu-bar.mjs).
+    platform: process.platform,
   });
   setTrayText(title, toolTip);
 }
@@ -315,6 +343,7 @@ function renderMenu() {
   ]);
   if (signature === menuSignature) return;
   menuSignature = signature;
+  const wording = trayMenuWording(process.platform);
 
   builtMenu = [
     // What is waiting for an answer goes first: it is why the menu-bar item has a dot.
@@ -349,11 +378,16 @@ function renderMenu() {
       },
     },
     {
-      label: 'Reveal data folder',
+      label: wording.dataFolder,
       click: () => void shell.openPath(process.env.FOCUSDESK_DATA_DIR),
     },
     { type: 'separator' },
-    { label: 'Quit FocusDesk', accelerator: 'CommandOrControl+Q', click: () => app.quit() },
+    {
+      label: 'Quit FocusDesk',
+      // A Mac's ⌘Q, and not named where there is no such key (see trayMenuWording).
+      ...(wording.quitAccelerator ? { accelerator: wording.quitAccelerator } : {}),
+      click: () => app.quit(),
+    },
   ];
   tray.setContextMenu(Menu.buildFromTemplate(builtMenu));
 }
@@ -374,11 +408,24 @@ async function act(pathname, body) {
   void attention?.refresh();
 }
 
+/**
+ * The tray icon: the first of this platform's files (see trayIconFiles) that can be read. A Mac's
+ * is a template image, which macOS recolours for light and dark menu bars; the others' are in the
+ * app's own colours, since nothing recolours an icon on a Windows taskbar or a Linux panel.
+ */
+function trayIcon() {
+  for (const file of trayIconFiles(process.platform)) {
+    const icon = nativeImage.createFromPath(path.join(here, 'assets', file));
+    if (icon.isEmpty()) continue;
+    if (isMac) icon.setTemplateImage(true);
+    return icon;
+  }
+  console.error('[focusdesk] no tray icon could be read');
+  return nativeImage.createEmpty();
+}
+
 function createTray() {
-  const icon = nativeImage.createFromPath(path.join(here, 'assets', 'trayTemplate.png'));
-  // A template image is recoloured by macOS for light and dark menu bars.
-  icon.setTemplateImage(true);
-  tray = new Tray(icon);
+  tray = new Tray(trayIcon());
   tray.on('click', showWindow);
   renderTitle();
   renderMenu();
@@ -394,6 +441,13 @@ let activeHotkey = null;
 
 const messageOf = (err) => (err instanceof Error ? err.message : String(err));
 
+/**
+ * A shortcut of the setting as Electron is to be handed it on this system (see nativeAccelerator:
+ * off a Mac, Command is written as Super). The setting and what is told about it, here and in
+ * Settings, stay in the spelling it was saved in; only the calls into globalShortcut use this.
+ */
+const forElectron = (accelerator) => nativeAccelerator(accelerator, process.platform);
+
 /** Null when `accelerator` is now registered, otherwise why it is not. */
 function tryRegister(accelerator) {
   try {
@@ -404,9 +458,9 @@ function tryRegister(accelerator) {
         console.error('[focusdesk] quick switch', err);
       }
     };
-    if (globalShortcut.register(accelerator, open)) return null;
+    if (globalShortcut.register(forElectron(accelerator), open)) return null;
     // Refused, yet registered by this app: the combination is one of FocusDesk's own.
-    return globalShortcut.isRegistered(accelerator)
+    return globalShortcut.isRegistered(forElectron(accelerator))
       ? `${accelerator} is already used by another FocusDesk shortcut.`
       : `${accelerator} could not be registered. Another app may be using it.`;
   } catch (err) {
@@ -423,6 +477,8 @@ function tryRegister(accelerator) {
  * left, and on a Mac it can answer true for a combination another app owns. The first is stopped
  * by reading the setting through the same rule the server saved it by; the second cannot be
  * detected from here, which is why Settings shows what is active, and not just what was typed.
+ * Off a Mac there is no Command key to hold, so a saved Command is registered as Super, the
+ * Windows key (see forElectron), and is never registered as the keys that are left without it.
  */
 async function applyHotkey() {
   let wanted;
@@ -437,7 +493,7 @@ async function applyHotkey() {
   }
 
   if (wanted === '') {
-    if (activeHotkey) globalShortcut.unregister(activeHotkey);
+    if (activeHotkey) globalShortcut.unregister(forElectron(activeHotkey));
     activeHotkey = null;
     return { ok: true, accelerator: null };
   }
@@ -450,14 +506,14 @@ async function applyHotkey() {
       error: `"${wanted}" is not a shortcut FocusDesk can register.`,
     };
   }
-  if (accelerator === activeHotkey && globalShortcut.isRegistered(accelerator)) {
+  if (accelerator === activeHotkey && globalShortcut.isRegistered(forElectron(accelerator))) {
     return { ok: true, accelerator };
   }
 
   // The old one goes first, so the same keys under another spelling can be taken again, and
   // comes back if the new one cannot be had.
   const previous = activeHotkey;
-  if (previous) globalShortcut.unregister(previous);
+  if (previous) globalShortcut.unregister(forElectron(previous));
   const failure = tryRegister(accelerator);
   if (!failure) {
     activeHotkey = accelerator;
@@ -691,12 +747,51 @@ async function startAttention() {
   }
 }
 
+/* ------------------------------------------------- what a Mac does not need */
+
+/**
+ * Spell checking that sends nothing anywhere. A Mac checks with its own spell checker and fetches
+ * nothing. On Windows and Linux Electron checks with Hunspell dictionaries, and downloads the one
+ * for the language that is set from Google (redirector.gvt1.com) as the first window loads: a
+ * connection to the outside, which the app promises never to make. Switching the checker off does
+ * not stop it, since the download is for the language and not for the checking, so the languages
+ * are emptied as well. With both done the app was measured making no connection but to its own
+ * server, and looking up no name. It has to be done before the first window exists, and on the
+ * default session, which both windows use (the main window and the quick-switch box name no
+ * session of their own: a window with a partition of its own would need the same). The price is
+ * that nothing typed in the app is underlined there.
+ */
+function keepSpellCheckerOffline() {
+  if (isMac) return;
+  electronSession.defaultSession.setSpellCheckerEnabled(false);
+  electronSession.defaultSession.setSpellCheckerLanguages([]);
+}
+
+/**
+ * Electron makes a File, Edit, View, Window and Help bar for an app that does not make a menu of
+ * its own, and on Windows and Linux it shows at the top of every window. The app has no use for
+ * it there, so it is taken away. A Mac keeps its menu as it is: that is where ⌘Q, copy and paste
+ * come from, and it is not a bar in the window.
+ *
+ * Nothing in the app relies on a menu accelerator off a Mac. The tray menu's accelerators are
+ * labels (the keys themselves are registered with globalShortcut, below), and what the pages do
+ * with the keyboard they do themselves. What goes with the bar is Electron's own set of keys:
+ * Ctrl+R and Ctrl+Shift+R to reload, Ctrl+Shift+I for the developer tools, Ctrl+W to close the
+ * window, Ctrl+Q on Linux, zoom, and F11 for full screen.
+ */
+function dropApplicationMenu() {
+  if (!isMac) Menu.setApplicationMenu(null);
+}
+
 /* ----------------------------------------------------------------- boot */
 
 app.whenReady().then(async () => {
   // The copy that lost the lock is already quitting; starting a server here
   // would open the same database the running copy has.
   if (!gotLock) return;
+  // Before there is a window to have either.
+  keepSpellCheckerOffline();
+  dropApplicationMenu();
   try {
     // Imported only now, so the env vars above are already in place when the
     // database file is opened at module load.

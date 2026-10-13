@@ -1,9 +1,9 @@
 /**
  * What needs your attention, as the desktop app shows it: a notification the first time
- * something is asked, and a section at the top of the menu-bar menu for as long as it is
- * still being asked. The questions themselves, and what answering one does, are the server's
- * (server/src/lib/prompts.ts); this only reads the list, puts it where you will see it, and
- * sends the answer back.
+ * something is asked, and a section at the top of the menu-bar menu (the tray menu, on Windows
+ * and Linux) for as long as it is still being asked. The questions themselves, and what
+ * answering one does, are the server's (server/src/lib/prompts.ts); this only reads the list,
+ * puts it where you will see it, and sends the answer back.
  *
  * Nothing here imports Electron. What it needs of it is handed in (the Notification class,
  * the windows to show) so the rules can be tested without a screen: who is told when, what
@@ -13,6 +13,15 @@
  * still waiting is told once more. That is the price of keeping nothing on disk for it, and it
  * is a fair one: a question that is still open after a restart is worth hearing again.
  */
+
+/**
+ * The name Windows files this app's notifications under (its App User Model ID). Windows shows a
+ * notification only for an app it can name, and it names an installed one by this id: the
+ * installer gives its Start Menu shortcut `build.appId` from package.json, so the two have to be
+ * the same text, and a test holds them to it. main.mjs sets it before any Notification is made.
+ * No other system reads it.
+ */
+export const APP_USER_MODEL_ID = 'com.focusdesk.app';
 
 /** Someone who has touched the machine this recently is at it; anyone who has not is not. */
 export const PRESENT_WITHIN_SECONDS = 120;
