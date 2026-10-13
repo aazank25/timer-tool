@@ -73,7 +73,11 @@ jobs:
             exit 1
           fi
 
-      - run: npm ci
+      # better-sqlite3 carries prebuilt binaries for every platform, but npm ci would compile it
+      # from source anyway, which needs build tools these machines lack (see
+      # desktop/scripts/ensure-deps.mjs). No install scripts, then the one the root needs.
+      - run: npm ci --ignore-scripts
+      - run: npm rebuild esbuild
 
       # The build signs the app itself (ad hoc). There is no certificate to find, so do not look in the keychain.
       - name: No keychain lookup (Mac)
@@ -131,7 +135,11 @@ jobs:
           cache-dependency-path: package-lock.json
 
       # The tests need the root install only: the desktop ones run no Electron and make their own stand-ins.
-      - run: npm ci
+      # better-sqlite3 carries prebuilt binaries for every platform, but npm ci would compile it
+      # from source anyway, which needs build tools these machines lack (see
+      # desktop/scripts/ensure-deps.mjs). No install scripts, then the one the root needs.
+      - run: npm ci --ignore-scripts
+      - run: npm rebuild esbuild
       - run: npm run typecheck
       - run: npm test
 

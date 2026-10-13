@@ -54,10 +54,22 @@ export function whyInstall(desktop, wanted = wantedNote(desktop)) {
   return null;
 }
 
-/** `npm ci` in `desktop`, with its output shown. Resolves to its exit status. */
-function npmCi(desktop) {
+/**
+ * The packages whose install scripts the app needs: Electron's downloads Electron itself, and
+ * esbuild's checks its binary for this platform. Every other install script is skipped, and the
+ * one that matters is better-sqlite3's. It carries a prebuilt binary for every platform, which is
+ * what it loads (its lib/<platform>-<arch>.js), but it also ships a binding.gyp, and for that npm
+ * ci compiles it from source: npm honours the package's `gypfile: false` only when it reads the
+ * package.json, and ci goes by the lockfile. Compiling needs Python and a C++ compiler (Xcode's
+ * tools, Visual Studio) and fails where they are missing or too new, as on GitHub's Windows
+ * machines, all for a build that nothing loads.
+ */
+export const INSTALL_SCRIPTS_NEEDED = ['electron', 'esbuild'];
+
+/** npm in `desktop`, with its output shown. Resolves to its exit status. */
+function npm(desktop, args) {
   const windows = process.platform === 'win32';
-  const run = spawnSync(windows ? 'npm.cmd' : 'npm', ['ci'], {
+  const run = spawnSync(windows ? 'npm.cmd' : 'npm', args, {
     cwd: desktop,
     stdio: 'inherit',
     // npm is a .cmd file on Windows, which Node will only start through a shell.
@@ -68,6 +80,12 @@ function npmCi(desktop) {
     return 1;
   }
   return run.status ?? 1;
+}
+
+/** `npm ci` in `desktop` with no install scripts, then the ones it needs. Its exit status. */
+function npmCi(desktop) {
+  const status = npm(desktop, ['ci', '--ignore-scripts']);
+  return status === 0 ? npm(desktop, ['rebuild', ...INSTALL_SCRIPTS_NEEDED]) : status;
 }
 
 /**

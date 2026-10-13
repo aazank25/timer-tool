@@ -182,7 +182,7 @@ describe('the script, run from the command line', () => {
    * only writes down how it was run and does what `npm ci` does to node_modules, so that nothing
    * is installed: what the script asks of npm (its arguments, and where) can be seen.
    */
-  function withStubNpm(exitCode = 0) {
+  function withStubNpm(exitCode = 0, rebuildExitCode = exitCode) {
     const folder = desktopFolder();
     fs.mkdirSync(path.join(folder, 'scripts'));
     fs.copyFileSync(script, path.join(folder, 'scripts', 'ensure-deps.mjs'));
@@ -192,7 +192,8 @@ describe('the script, run from the command line', () => {
     const npm = path.join(bin, 'npm');
     fs.writeFileSync(
       npm,
-      `#!/bin/sh\necho "$*|$PWD" >> "${log}"\nrm -rf node_modules\nmkdir node_modules\nexit ${exitCode}\n`,
+      `#!/bin/sh\necho "$*|$PWD" >> "${log}"\nif [ "$1" = rebuild ]; then exit ${rebuildExitCode}; fi\n` +
+        `rm -rf node_modules\nmkdir node_modules\nexit ${exitCode}\n`,
     );
     fs.chmodSync(npm, 0o755);
     const run = (...args) =>
@@ -207,7 +208,7 @@ describe('the script, run from the command line', () => {
     return { folder, run, calls };
   }
 
-  it('runs npm ci, and nothing but npm ci, in its own folder, from wherever it is run', { skip: windows }, () => {
+  it('runs npm ci with no install scripts, then only the ones needed, in its own folder', { skip: windows }, () => {
     const { folder, run, calls } = withStubNpm();
 
     const done = run();
@@ -215,10 +216,22 @@ describe('the script, run from the command line', () => {
     assert.equal(done.status, 0, done.stderr);
     assert.deepEqual(
       calls().map((line) => line.split('|')[0]),
-      ['ci'],
+      ['ci --ignore-scripts', 'rebuild electron esbuild'],
     );
-    assert.equal(fs.realpathSync(calls()[0].split('|')[1]), fs.realpathSync(folder));
+    for (const line of calls()) {
+      assert.equal(fs.realpathSync(line.split('|')[1]), fs.realpathSync(folder));
+    }
     assert.equal(fs.readFileSync(noteIn(folder), 'utf8'), wantedNote(folder));
+  });
+
+  it('exits with the status of the rebuild when that fails, and notes nothing', { skip: windows }, () => {
+    const { folder, run, calls } = withStubNpm(0, 4);
+
+    const done = run();
+
+    assert.equal(done.status, 4);
+    assert.equal(calls().length, 2);
+    assert.equal(fs.existsSync(noteIn(folder)), false);
   });
 
   it('does not run npm at all the second time', { skip: windows }, () => {
@@ -229,7 +242,7 @@ describe('the script, run from the command line', () => {
 
     assert.equal(again.status, 0, again.stderr);
     assert.match(again.stdout, /already installed/);
-    assert.equal(calls().length, 1);
+    assert.equal(calls().length, 2);
   });
 
   it('exits with the status of npm when it fails, and notes nothing', { skip: windows }, () => {
