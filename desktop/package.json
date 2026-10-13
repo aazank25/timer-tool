@@ -37,6 +37,7 @@
       "attention.mjs",
       "menu-bar.mjs",
       "requests.mjs",
+      "shortcuts.mjs",
       "window-route.mjs",
       "preload.cjs",
       "dist/**/*",
