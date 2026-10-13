@@ -33,9 +33,12 @@ second time starts at once instead of installing Electron again.
 
 The installer lands in `desktop/release/`. On macOS `desktop:mac` makes **one**
 disk image, for the chip of the Mac you build it on: on Apple silicon (M1 and
-later) that is `FocusDesk-<version>-arm64.dmg`, on an Intel Mac the plain
-`FocusDesk-<version>.dmg`. Open it, drag FocusDesk to Applications, done. To
-make both, for someone else's Mac, run `npm run desktop:mac:all`.
+later) that is `FocusDesk-<version>-mac-arm64.dmg`, on an Intel Mac
+`FocusDesk-<version>-mac-x64.dmg`. Open it, drag FocusDesk to Applications,
+done. To make both, for someone else's Mac, run `npm run desktop:mac:all`. On
+Windows, `desktop:win` makes `FocusDesk-<version>-windows-x64-setup.exe` (always
+64-bit). Short of a Mac or a Windows PC? GitHub builds both: see
+[Share it](#share-it).
 
 To run it without packaging, for a quick look: `npm run desktop`.
 
@@ -91,19 +94,20 @@ To run it without packaging, for a quick look: `npm run desktop`.
 
 ### First launch on macOS
 
-An app you build yourself opens normally. If you move the `.dmg` between
-machines, macOS quarantines it and shows "FocusDesk cannot be opened" — then
-**right-click the app → Open** once, and it is trusted from then on. If it
-still refuses (which happens to unsigned Apple Silicon builds), re-sign it
-locally:
+An app you build yourself opens normally. A copy that came from somewhere else
+(a download, an AirDrop) is quarantined by macOS, which says, the first time,
+that it could not verify FocusDesk is free of malware. That is expected, and you
+get past it once: open **System Settings → Privacy & Security**, scroll down to
+the line about FocusDesk and click **Open Anyway**. After that it opens like any
+other app.
 
-```bash
-codesign --force --deep --sign - /Applications/FocusDesk.app
-```
-
-Building with an Apple Developer certificate in your keychain signs it
-properly and skips all of that. To force an unsigned build:
-`CSC_IDENTITY_AUTO_DISCOVERY=false npm run desktop:mac`.
+It asks because the app is signed ad hoc, not with an Apple Developer
+certificate. The build does that by itself (`desktop/scripts/after-pack.cjs`), so
+there is nothing to sign by hand. Unsigned, a downloaded copy would be called
+"damaged", with no Open Anyway. A build on a Mac that has an Apple Developer
+certificate in its keychain uses that instead.
+`CSC_IDENTITY_AUTO_DISCOVERY=false npm run desktop:mac` leaves the keychain alone
+and keeps the ad-hoc signature, which is what the GitHub build does.
 
 **Notifications.** The first time FocusDesk has something to say, macOS may ask
 whether it may; if you said no, or never saw the question, switch it on in System
@@ -111,6 +115,58 @@ Settings → Notifications → FocusDesk. A notification has no buttons of its o
 whether the build is signed or not: it says that something is waiting, and
 clicking it opens the app, where the answers are. It is the same list as the
 menu bar's *Needs attention* section.
+
+## Share it
+
+Send people to the download page, which shows the newest version once there is
+one: **https://github.com/aazank25/timer-tool/releases/latest**
+
+GitHub builds the installers on real Mac and Windows machines, so you need
+neither to make them. Which file to pick:
+
+| They have | They pick |
+|---|---|
+| A Mac with Apple silicon (M1 or later) | `FocusDesk-<version>-mac-arm64.dmg` |
+| An Intel Mac | `FocusDesk-<version>-mac-x64.dmg` |
+| Windows | `FocusDesk-<version>-windows-x64-setup.exe` |
+
+Not sure which Mac it is? Apple menu → About This Mac: "Chip: Apple M…" is Apple
+silicon, "Processor: Intel" is Intel.
+
+**The first time they open it**
+
+- **Mac:** open the DMG, drag FocusDesk to Applications, open it. If macOS says
+  it can't verify the app: System Settings → Privacy & Security → **Open
+  Anyway** (once). [Why it asks](#first-launch-on-macos).
+- **Windows:** run the setup. If "Windows protected your PC" appears: **More
+  info** → **Run anyway**.
+
+Both warnings are there because the app isn't signed with a paid Apple or
+Microsoft certificate. Everything stays on their computer.
+
+### Publish a new version
+
+1. Bump `"version"` in `desktop/package.json` and commit.
+2. Tag that commit and push the tag:
+
+   ```bash
+   git tag v0.1.1 && git push origin v0.1.1
+   ```
+
+That is all. The tag starts `.github/workflows/desktop.yml`, which builds the Mac
+and Windows installers, opens each packaged app to check that it starts, and puts
+them on a new release with a note on which file to pick. It takes a while; watch
+it under the repo's Actions tab. The tag has to be `v` plus the version
+(`v0.1.1` for `0.1.1`), or the build stops at once and says so. Run it again for
+a version that is already released and the files on that release are replaced.
+
+No terminal? Actions → Desktop app → **Run workflow**, tick **Publish a
+release**. It publishes `v` plus the version in `desktop/package.json`, from the
+branch you pick.
+
+Every push builds and checks the installers too, and publishes nothing: they are
+under that run's Artifacts for two weeks. Pushes that only change docs are
+skipped.
 
 ## Run it in a browser instead
 
@@ -420,10 +476,15 @@ desktop/  Electron shell: menu-bar clock, hotkeys, packaging
   preload.cjs   the three calls a page may make of the shell (CommonJS on purpose)
   scripts/      icon generator, payload bundler, the Mac packager (builds the chip
                 of the machine it runs on; no binaries in the repo) and ensure-deps,
-                which runs npm ci only when node_modules is not what the lockfile says
+                which runs npm ci only when node_modules is not what the lockfile says;
+                after-pack.cjs, which signs the Mac apps ad hoc; smoke.mjs, which opens
+                a packaged app and checks that it starts (CI only)
   test/         node:test, no Electron: away, attention, window-route, menu-bar,
                 requests, the packaging arguments, ensure-deps
 docs/     PLAN.md — the model, what's built, and what's next
+.github/workflows/desktop.yml
+          builds the installers on a Mac and a Windows machine, checks them, runs the
+          unit tests on Windows, and publishes a release for a version tag
 ```
 
 ## What's next
