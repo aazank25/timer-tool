@@ -71,7 +71,12 @@ To run it without packaging, for a quick look: `npm run desktop`.
   the page they are about (the wrap-up, last week's review), and the nudge to
   start a block opens quick switch instead. A notification is taken down when its
   question goes away. What the app has told you is kept only while it runs, so
-  after a restart whatever is still waiting is told once more.
+  after a restart whatever is still waiting is told once more. Settings →
+  *Notifications* decides which ones pop up: a master switch, and a box for each
+  of time away, a block running long, meetings, the end-of-day wrap-up, last
+  week's review and nothing on the clock. These only decide about pop-ups. The
+  banners in the window and the *Needs attention* section of the menu still show
+  everything.
 - **Needs attention, in the menu bar.** While anything is waiting, the menu
   starts with a *Needs attention* section, a submenu for each question with the
   same answers as the banners, and a dot comes before the clock. An answer that
@@ -86,10 +91,15 @@ To run it without packaging, for a quick look: `npm run desktop`.
   on the clock is finished and the new one starts, and the box is gone and you
   are back where you were. If a focus block was running it asks how it went
   first (1–5, or Enter to skip); a break is just stopped. Escape backs out. It
-  works whenever FocusDesk is running, with its window open or not. Change the
-  shortcut, or turn it off, in Settings → Quick switch.
-- **Global hotkeys.** ⌘⇧F shows the window; ⌘⇧Space pauses or resumes the
-  running block from anywhere.
+  works whenever FocusDesk is running, with its window open or not.
+- **Keyboard shortcuts.** Three work from any app: ⌘⇧F shows the window, ⌘⇧Space
+  pauses or resumes the running block, and ⌘⌥K opens quick switch. All three can
+  be changed or turned off in Settings → *Keyboard shortcuts*. *Change* waits for
+  the new one to be pressed (Esc cancels), it is saved the moment it is pressed,
+  and the row says whether the app could register it. *Turn off* and *Turn on*
+  switch it, and *Reset* brings back the one that shipped. No two can be the same.
+  Inside the FocusDesk window, ⌘K (Ctrl+K on Windows) also opens quick switch;
+  that key is fixed, and only works in the window.
 - **Launch at login**, off by default — the menu-bar item has the toggle.
 - **Offline.** The whole thing runs inside the app; nothing needs a network
   except a calendar sync you set up yourself.
@@ -129,6 +139,13 @@ Settings → Notifications → FocusDesk. A notification has no buttons of its o
 whether the build is signed or not: it says that something is waiting, and
 clicking it opens the app, where the answers are. It is the same list as the
 menu bar's *Needs attention* section.
+
+Settings → *Notifications* has the master switch and a box for each kind of
+pop-up, and **Send a test notification**, which shows a sample whatever the
+switches say. It is the quickest way to see whether the system lets FocusDesk show
+them. If the sample does not appear, look in System Settings → Notifications →
+FocusDesk → Allow notifications on a Mac, and in Settings → System → Notifications
+→ FocusDesk on Windows.
 
 ## Share it
 
@@ -285,23 +302,34 @@ the meantime) leaves the block you were on running, as it was. If the box was pu
 away while that was on its way, the refusal is what it opens on the next time.
 
 An app cannot be told that another app already owns a keyboard shortcut, so if
-pressing yours does nothing, pick another in Settings. What you type there is
-checked, because Electron is not: a name it does not know is dropped without a
-word and the rest registered, so a typo would grab some other key. FocusDesk
-accepts a deliberate subset of what Electron does: letters, digits, F1–F24 and
-Space, Tab, Enter, Escape, Backspace, Delete, Insert, the arrows, Home, End,
-PageUp, PageDown and Plus. It refuses punctuation keys, the lock keys (Caps
-Lock, Num Lock, Scroll Lock), the numeric keypad, media and volume keys,
-PrintScreen and AltGr. It also wants at least one of Command, Control,
-CommandOrControl or Super in the shortcut, because Shift or Alt (Option) on
-their own would take ordinary typing from every app: ⇧A is a capital A, and on a
-Mac ⌥A is å. The function keys type nothing, so F1–F24 may use any modifier
-(Shift+F5 is fine; Shift+A is not). ⌘⇧F and ⌘⇧Space are FocusDesk's own
-shortcuts, and are refused here too. The default is ⌘⌥K, not ⌘⇧K, which is Browse
-DMs in Slack and Delete Line in VS Code. The card shows the shortcut that is
-really registered, or why a new one could not be, and when the app cannot
-register what you saved it puts the setting back to the one that works, so a
-restart never finds a shortcut it cannot have.
+pressing yours does nothing, pick another in Settings → *Keyboard shortcuts*. A
+shortcut is recorded from the key you press and not from what it types (on a Mac
+⌥K types ˚), and what is saved is checked, because Electron is not: a name it does
+not know is dropped without a word and the rest registered, so a typo would grab
+some other key. FocusDesk accepts a deliberate subset of what Electron does:
+letters, digits, F1–F24 and Space, Tab, Enter, Escape, Backspace, Delete, Insert,
+the arrows, Home, End, PageUp, PageDown and Plus. It refuses punctuation keys,
+the lock keys (Caps Lock, Num Lock, Scroll Lock), the numeric keypad, media and
+volume keys, PrintScreen and AltGr. It also wants at least one of Command,
+Control, CommandOrControl or Super in the shortcut, because Shift or Alt (Option)
+on their own would take ordinary typing from every app: ⇧A is a capital A, and on
+a Mac ⌥A is å. The function keys type nothing, so F1–F24 may use any modifier
+(Shift+F5 is fine; Shift+A is not). Whatever is chosen is taken from every app
+while FocusDesk is running, so making ⌘K a shortcut would stop ⌘K working in Slack
+or the browser. The ⌘K that opens quick switch inside the FocusDesk window is not
+one of these: it only works there, and takes nothing from any other app. The
+defaults are ⌘⇧F to show the window, ⌘⇧Space to pause or resume, and ⌘⌥K for quick
+switch, not ⌘⇧K, which is Browse DMs in Slack and Delete Line in VS Code.
+
+No two of the three can be the same shortcut. The server refuses the second, saves
+nothing, and says which action has it already (*Command+Shift+F is already the
+shortcut to show FocusDesk*), however it is spelled: case, Cmd for Command and the
+order of the modifiers make no difference, and neither does CommandOrControl
+against Command (on a Mac) or Control (elsewhere). Turning one off frees its keys,
+and two swapped in one change are fine. The card shows, for each, that the app has
+it registered or why it could not. A shortcut the app could not register stays
+saved, with the reason on its row, and is tried again each time the card is opened
+or one is saved, and when the app starts, as another app may let go of it.
 
 **Tasks** are the weekly priorities list that replaces a spreadsheet: a row for
 each thing that needs doing, with its project (or none), priority, status,
@@ -408,7 +436,12 @@ calendar day's).
 Settings → **Prompts & nudges** holds the thresholds, the meeting switch, and the
 work days and hours the nudge and the reminders keep to; the wrap-up time is set
 under *End-of-day wrap-up*. Away detection and notifications need the desktop app;
-everything else shows as banners in a browser too.
+everything else shows as banners in a browser too. Which of these also pop up as a
+notification is up to Settings → **Notifications** (`notifications` for the lot, and
+`notify_away`, `notify_long_block`, `notify_meetings`, `notify_wrapup`,
+`notify_week_review` and `notify_idle` for the kinds above; `notify_block_done` is
+for the one the Focus page shows when a Pomodoro's time is up). Switching one off
+never takes the banner away.
 
 ## Connect a calendar (optional)
 
@@ -453,7 +486,8 @@ server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
   src/app.ts    boots the API and client on a port; embedded by the desktop app
   src/lib/      sessions (timer, and quick switch's stop-and-start), tasks, stats
                 (rollups), wrapup (day and week reviews), calendar (ICS), time,
-                settings, accelerator (the shortcut rule); prompts (the "needs your
+                settings, accelerator (the shortcut rule, and that no two of the
+                three shortcuts are one); prompts (the "needs your
                 attention" list and its providers: away, long-block, meetings,
                 and reminders, the three that are due at a time of day),
                 local-time (a time of day in a timezone as an instant),
@@ -468,9 +502,11 @@ server/   Express + SQLite. Owns the clock, the rollups and integration secrets.
                 week, carrying unfinished tasks forward, migration 6); wrap-up
                 (live totals, notes, done stamps, the weekly sort, the summary
                 text, the setting, migration 7); switch (quick switch, the
-                shortcut rule); away time (reports, merging, dropping from
-                running, paused and finished blocks), the prompt engine,
-                long-block and meeting prompts, the new settings, migration 8;
+                shortcut rule); shortcuts (the three shortcut settings, no two
+                the same, and the notification switches); away time (reports,
+                merging, dropping from running, paused and finished blocks),
+                the prompt engine, long-block and meeting prompts, the new
+                settings, migration 8;
                 reminders (the wrap-up, last-week and nothing-on-the-clock
                 prompts, across timezones and clock changes); calendar sync
                 (hand attribution, inheritance, feeds that are not calendars,
@@ -491,7 +527,7 @@ desktop/  Electron shell: menu-bar clock, hotkeys, packaging
                 to load it or to move the page that is loaded
   menu-bar.mjs  what the menu-bar item says: the clock, the dot, the tooltip
   requests.mjs  which finished requests mean the menu bar must read again
-  preload.cjs   the three calls a page may make of the shell (CommonJS on purpose)
+  preload.cjs   the calls a page may make of the shell (CommonJS on purpose)
   scripts/      icon generator, payload bundler, the Mac packager (builds the chip
                 of the machine it runs on; no binaries in the repo) and ensure-deps,
                 which runs npm ci only when node_modules is not what the lockfile says;

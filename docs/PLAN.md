@@ -417,12 +417,15 @@ cancels. It works whenever FocusDesk is running, with its window open or not.
   with it, so the block that was on the clock is left exactly as it was, plan item
   and all. Two calls from the client could not promise that: a refused second one
   would leave you with nothing running.
-- **The shortcut is a setting.** `quick_switch_hotkey`, `CommandOrControl+Alt+K`
-  by default and empty for off. (Not `Shift+K`: ⌘⇧K is Browse DMs in Slack and Delete
-  Line in VS Code, and a global shortcut takes the key from every app.) It is
-  validated strictly, because Electron is not: it drops a key name it does not know
-  and registers what is left (`Foo+A` becomes plain A, a key taken from every app),
-  and it cannot say that another app already owns a combination.
+- **The shortcuts are settings.** There are three, all read by the one rule below:
+  `show_hotkey` (`CommandOrControl+Shift+F`), `pause_hotkey`
+  (`CommandOrControl+Shift+Space`) and `quick_switch_hotkey`
+  (`CommandOrControl+Alt+K`), each empty for off. (Not `Shift+K` for quick switch: ⌘⇧K
+  is Browse DMs in Slack and Delete Line in VS Code, and a global shortcut takes the
+  key from every app.) A shortcut is validated strictly, because Electron is not: it
+  drops a key name it does not know and registers what is left (`Foo+A` becomes plain
+  A, a key taken from every app), and it cannot say that another app already owns a
+  combination.
   `normalizeAccelerator` (`server/src/lib/accelerator.ts`) accepts a deliberate
   subset of what Electron accepts, not everything it documents: A–Z, 0–9, F1–F24 and
   Space, Tab, Enter, Escape, Backspace, Delete, Insert, the arrows, Home, End, PageUp,
@@ -439,15 +442,44 @@ cancels. It works whenever FocusDesk is running, with its window open or not.
   the one spelling that is saved. The desktop app imports the very same function
   through the server bundle, so what the setting accepts and what the app will
   register cannot drift apart.
-- **FocusDesk's own two shortcuts are refused.** ⌘⇧F (show the window) and ⌘⇧Space
-  (pause or resume) are registered first, and Electron answers false to a second
-  registration of the same keys. If the setting were saved first and refused after,
-  the next start would find a shortcut it cannot register and leave none. So the
-  settings route refuses them with a 400 that says what the shortcut is already for.
-  `usedByApp` compares the keys pressed, not the text, as Electron does:
-  `Shift+CommandOrControl+F` is the same shortcut, and so is `Control+Shift+F`
-  wherever `CommandOrControl` means Control (`Command+Shift+F` on a Mac). The list,
-  `APP_SHORTCUTS`, is checked by a test against what `desktop/main.mjs` registers.
+- **No two of the three shortcuts are the same.** A combination can be registered
+  once, and Electron answers false to a second registration of the same keys. If the
+  settings were saved first and refused after, the next start would find a shortcut it
+  cannot register and leave none. So the settings route reads all three as they will
+  be, the ones in the request and, for the rest, what is stored, and a patch that would
+  leave two the same is a 400 that writes nothing, not even the other settings in it.
+  The message says which action has the shortcut already (`Command+Shift+F is already
+  the shortcut to show FocusDesk`), naming the one being set when only one is, and the
+  later of the two in the list when both are. An empty one is off, and nobody's. Two
+  swapped in one patch are fine, and so is turning one off and giving its keys to
+  another in the same patch. The check is `hotkeyClash` (`server/src/lib/accelerator.ts`),
+  a pure function of the three values, which of them are being written, and the
+  platform. It compares the keys pressed, not the text, as Electron does:
+  `Shift+CommandOrControl+F` is the same shortcut, and so is `Control+Shift+F` wherever
+  `CommandOrControl` means Control (`Command+Shift+F` on a Mac). It replaces
+  `APP_SHORTCUTS` and `usedByApp`, which refused quick switch the two shortcuts the app
+  registered, a list written out again in `desktop/main.mjs` and kept the same by a
+  test that read that file. The app registers what the settings say, so there is
+  nothing left to keep the same. The test that is left says the three defaults are
+  valid shortcuts and are not one another.
+- **A shortcut is recorded, not typed.** *Change* makes the row listen. Every key press
+  then goes to the recorder, with its default cancelled and kept from the rest of the
+  page, until one makes a shortcut, Escape is pressed on its own, the window loses
+  the focus or something else is clicked. The key is read from `KeyboardEvent.code`,
+  the physical key, and never from `key`, which is what it types (on a Mac Option+K
+  types ˚). `recordKeyPress` (`web/src/lib/shortcut.ts`) is pure and takes whether
+  this is a Mac: `KeyA`–`KeyZ`, `Digit0`–`Digit9` and `F1`–`F24` are A–Z, 0–9 and
+  F1–F24; `Space`, `Tab`, `Enter`, `Escape`, `Backspace`, `Delete`, `Insert`, `Home`,
+  `End`, `PageUp` and `PageDown` keep their names; the arrows are Up, Down, Left and
+  Right; and `Equal`, the key that types = and +, is Plus. That is every name the
+  server's rule takes, and nothing it refuses: any other key is said to be unusable
+  and the row goes on listening. A modifier on its own waits for the key. Modifiers
+  come in one order: on a Mac Command (the meta key), Control, Alt, Shift; elsewhere
+  Control, Super (the Windows key), Alt, Shift. A key with no modifier, or with only
+  Shift or Alt, is said to be too loose, as the server would refuse it (a function key
+  may go with Shift or Alt alone, but not with nothing). Whatever is accepted is sent,
+  and the server has the last word. The key that was recorded is kept from coming up
+  on the button as a click.
 - **The box is a page.** `/palette` renders the palette and nothing else: no rail,
   no clock bar. It lists open tasks and saved timers together, filtered on title and
   project without regard to case, a title that starts with what was typed first,
@@ -481,31 +513,45 @@ cancels. It works whenever FocusDesk is running, with its window open or not.
   begins with the app's address and is another host, and the bridge would go along
   with the window if it were followed. (Anything else is refused in the box, and
   handed to the real browser from the main window.)
-- **Three calls cross the bridge.** `desktop/preload.cjs` puts
-  `window.focusdesk = { closePalette(), onPaletteShow(callback), reloadHotkey() }`
-  on the main window and the palette, and nothing else of Electron or Node. The
-  window is hidden, not closed, so the page starts itself over each time it is shown.
-  `onPaletteShow` ignores anything that is not a function. `reloadHotkey()` reads the
-  setting again and answers `{ ok, accelerator, error? }`: the shortcut registered
-  afterwards, and when a new one could not be had, why. The one that was working is
-  kept, and it is kept across restarts too: when Settings saves a shortcut and
-  `reloadHotkey()` says no, the card puts the setting back to `accelerator` (or to
-  empty, when nothing was registered) and says so, so what is saved is always a
-  shortcut that was registered and a restart never finds one it cannot have.
-  Merely opening the card while another app holds the shortcut does not rewrite
-  what is saved: the other app may let go of it.
-- **Off remembers.** Turning the shortcut off and saving keeps the last one in the
-  card's draft and in `localStorage`, and turning it on again starts from that, not
-  from the default.
+- **Four calls cross the bridge.** `desktop/preload.cjs` puts
+  `window.focusdesk = { closePalette(), onPaletteShow(callback), reloadHotkeys(),
+  testNotification() }` on the main window and the palette, and nothing else of
+  Electron or Node. A plain browser has no `window.focusdesk` at all. The window is
+  hidden, not closed, so the page starts itself over each time it is shown.
+  `onPaletteShow` ignores anything that is not a function. `reloadHotkeys()` reads the
+  three settings again, registers them, and answers `{ show, pause, quickSwitch }`,
+  each `{ ok, accelerator, error? }`: the shortcut registered, null when that one is
+  off, and when it could not be had, why. `testNotification()` shows a sample
+  notification from the system, whatever the notification settings say, and answers
+  `{ ok, error? }`.
+- **The card says how each shortcut stands.** Settings → *Keyboard shortcuts* saves a
+  shortcut the moment it is pressed (`PATCH /api/settings` with that one key), asks
+  the app to `reloadHotkeys()`, and shows *Active*, *Off* or the error on the row. It asks
+  when it opens, too, so a shortcut that never took is not a silent failure. A
+  refusal from the server (not a shortcut, or one another action has) is shown on the
+  row it was for, and nothing changes. What is saved stays saved when the app cannot
+  register it, with the reason on its row: it is the person's choice, and the other
+  app may let go of it, so nothing is written back. (Quick switch used to put the
+  setting back to the shortcut that did work. With three shortcuts and one call that
+  answers for all of them, that would be a guess at what each `accelerator` means,
+  and a wrong one would turn a shortcut off.) In a browser the card still edits and
+  saves, and says that shortcuts work in the desktop app.
+- **Off, and back.** *Turn off* saves empty. *Turn on* saves the default, and so does
+  *Reset*, which is shown only for a shortcut that differs from it, judged by the keys
+  pressed on this system (`sameShortcut`): ⌘⌥K recorded on a Mac is
+  `Command+Alt+K`, which is the default, and is not offered a Reset. If another action
+  has the default by then, the server's refusal is shown on that row.
+- **⌘K in the window is not a setting.** In the desktop window ⌘K (Ctrl+K elsewhere)
+  opens quick switch. The window handles that key itself, so nothing is taken from any
+  other app, and the card says so under the rows, with why a shortcut set there is
+  different: it is taken from every app while FocusDesk is running, and ⌘K would stop
+  ⌘K working in Slack or the browser.
 
 > **Known limit:** macOS lets an app register a combination another app owns
-> without saying so. FocusDesk cannot detect it, which is why Settings shows the
-> shortcut that is registered, not just the one that was typed, and why a refusal
-> names the reason. If pressing it does nothing, pick another. As with a pause from
+> without saying so. FocusDesk cannot detect it, which is why Settings shows what the
+> app says is registered, not just what was pressed, and why a refusal names the
+> reason. If pressing it does nothing, pick another. As with a pause from
 > the menu bar, a main window that is open reads the new block on its next poll.
-> `localStorage` belongs to one origin and the desktop app serves on a different port
-> at every launch, so what Off remembers is kept for as long as the app runs, and a
-> restart falls back to the default (as the theme choice does).
 
 **Prompts — "needs your attention".** Done: the server, the web app (banners under
 the clock) and the desktop app (away detection, notifications, the menu-bar menu).
@@ -651,9 +697,11 @@ three are in the same list as the others, oldest first by `createdAt`.
 
 Settings: `away_minutes` (10), `long_block_minutes` (120), `meeting_prompts`
 (true), `work_days` (1,2,3,4,5), `work_start` (09:00), `work_end` (18:00),
-`nudge_minutes` (15), `wrapup_time` (17:30); the minutes take 0 for off. The
-desktop app reads the away threshold; the server reads the rest (the nudge too, so it
-shows as a banner in a browser as well). The web client polls the list every 15
+`nudge_minutes` (15), `wrapup_time` (17:30); the minutes take 0 for off. Which of the
+prompts also pop up as a notification is a setting of its own (see *Notifications*
+under the desktop app's half). The desktop app reads the away threshold; the server
+reads the rest (the nudge too, so it shows as a banner in a browser as well). The
+web client polls the list every 15
 seconds and on window focus, and reads it again right after a *Prompts & nudges* save.
 An answer cancels the reads that are in flight and stores the list it brings back, so a
 late read cannot put the banner back. The banners show the kinds that are about now
@@ -720,7 +768,26 @@ Electron wiring, which no unit test reaches: it is checked by driving the real a
   `idle` prompt, the main window at the route of the prompt's *primary* answer when that
   opens a page (so for the end-of-day and last-week prompts, not for the others), and the
   main window as it is for anything else. A notification never has action buttons, signed
-  app or not: the code does not add any.
+  app or not: the code does not add any. Which kinds pop up is a setting. `notifications`
+  is the master switch, and each prompt has one of its own: `away` is `notify_away`,
+  `long-block` is `notify_long_block`, `meeting-start` and `meeting-end` are
+  `notify_meetings`, `wrapup` is `notify_wrapup`, `week-review` is `notify_week_review` and
+  `idle` is `notify_idle`. All are 'true' to begin with, and the web client reads one as
+  on unless it says 'false'. They decide about pop-ups and nothing else: the list, the
+  banners in the window and the menu's *Needs attention* section show everything either
+  way.
+  `notify_block_done` is the web client's own: the HTML5 "Block complete" notification
+  that the Focus page shows when a Pomodoro's time is up (`useBlockEndAlert`), in the
+  window or a browser tab. It waits for the settings before it decides, so a block that
+  ended while the page was loading cannot notify somebody who has turned it off, and the
+  permission to show notifications is not asked for at the start of a Pomodoro while it is
+  off. Settings → *Notifications* has the master switch, a box for each kind, and
+  *Send a test notification*: in the app it calls `testNotification()`, which shows a
+  sample whatever the switches say, and in a browser it asks for the permission, if it
+  has not been asked, and shows one. Afterwards it says where the system keeps the
+  switch for it, for a pop-up that did not appear (System Settings → Notifications →
+  FocusDesk → Allow notifications on a Mac, Settings → System → Notifications →
+  FocusDesk on Windows).
 - **The menu bar.** With prompts pending, the menu starts with *Needs attention*, a
   submenu per prompt (its title, cut to 60 characters) with an item for each action: one
   the server carries out is posted to `/api/prompts/act` and the list read again, and
@@ -882,8 +949,10 @@ loopback port and points a window at it.
   reminders with it) or to quit, with *Don't ask again*; the answer is the setting
   `close_behavior` (`ask`, `menu-bar`, `quit`), which Settings → *Closing the window*
   changes. Escape is Cancel and leaves the window open. ⌘Q always quits.
-- **Global hotkeys:** Cmd+Shift+F to show, Cmd+Shift+Space to pause/resume, and
-  Cmd+Option+K for quick switch (see section 2).
+- **Global hotkeys**, all three settings: `show_hotkey` (Cmd+Shift+F), `pause_hotkey`
+  (Cmd+Shift+Space) and `quick_switch_hotkey` (Cmd+Option+K, see section 2), registered from
+  the settings and changed in Settings → *Keyboard shortcuts*. Inside the window, Cmd+K
+  (Ctrl+K elsewhere) also opens quick switch; that one is fixed.
 - **Launch at login**, off by default, toggled from the menu bar.
 - **Data in `~/Library/Application Support/FocusDesk/data`**, so reinstalling
   or rebuilding never touches your history.
@@ -937,8 +1006,8 @@ assets sit in git.
   no person has used it there yet. Unseen so far: the tray icon (tray.ico) at real scale factors, whether the
   quick-switch box takes the keyboard the first time it opens, and toast
   notifications from the installed app. With no menu, Windows has no reload, zoom or
-  devtools shortcuts. Ctrl+Shift+F and Ctrl+Shift+Space are taken system-wide and
-  cannot be changed.
+  devtools shortcuts. Ctrl+Shift+F and Ctrl+Shift+Space are taken system-wide to
+  begin with; they can be changed, or turned off, in Settings → *Keyboard shortcuts*.
 - The installers are not signed with a certificate: the Mac app is signed ad hoc
   (Open Anyway, once), and the Windows setup meets SmartScreen. A company-managed
   PC or Smart App Control may refuse an unsigned installer outright.
@@ -1052,6 +1121,13 @@ settings          key, value
                   · wrapup_time: HH:MM (24-hour) or '' for off, default 17:30
                   · includes away_minutes, long_block_minutes, meeting_prompts,
                     work_days, work_start, work_end, nudge_minutes
+                  · show_hotkey, pause_hotkey, quick_switch_hotkey: Electron
+                    accelerators in the spelling normalizeAccelerator gives
+                    them, '' for off, never two the same
+                  · notifications (master), notify_away, notify_long_block,
+                    notify_meetings, notify_wrapup, notify_week_review,
+                    notify_idle, notify_block_done: 'true' or 'false', all
+                    'true' to begin with
 ```
 
 Migrations are append-only in `server/src/db.ts` — never edit a shipped one.

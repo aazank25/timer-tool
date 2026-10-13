@@ -333,6 +333,14 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   /** What a new block is when the caller does not say: 'stopwatch' or 'pomodoro'. */
   default_timer_mode: 'stopwatch',
   /**
+   * The shortcut, in any app, that brings the FocusDesk window forward. An Electron accelerator
+   * in the spelling lib/accelerator.ts stores it in; '' turns it off. No two of the three
+   * shortcuts may be the same.
+   */
+  show_hotkey: 'CommandOrControl+Shift+F',
+  /** The shortcut, in any app, that pauses the block on the clock, or resumes it. '' turns it off. */
+  pause_hotkey: 'CommandOrControl+Shift+Space',
+  /**
    * The shortcut, in any app, that opens the quick-switch box. An Electron accelerator in
    * the spelling lib/accelerator.ts stores it in; '' turns it off. Not Command+Shift+K:
    * that is Browse DMs in Slack and Delete Line in VS Code, and a global shortcut takes
@@ -359,6 +367,26 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
    * out, so it is on in a browser too. 0 = off.
    */
   nudge_minutes: '15',
+  /**
+   * Whether FocusDesk pops up a notification from the operating system when something needs
+   * your attention. The master switch for the seven below. It only decides about pop-ups: the
+   * banners in the window and the menu bar's Needs attention list show everything either way.
+   */
+  notifications: 'true',
+  /** A pop-up for time you were away. */
+  notify_away: 'true',
+  /** A pop-up for a block that has been running a long time. */
+  notify_long_block: 'true',
+  /** A pop-up when a meeting starts or ends. */
+  notify_meetings: 'true',
+  /** A pop-up for the end-of-day wrap-up. */
+  notify_wrapup: 'true',
+  /** A pop-up for the review of last week. */
+  notify_week_review: 'true',
+  /** A pop-up when nothing has been on the clock for a while in work hours. */
+  notify_idle: 'true',
+  /** The "Block complete" notification the web client shows when a pomodoro ends. */
+  notify_block_done: 'true',
   /**
    * What the desktop app's close button does: 'ask' (the first time, with "Don't ask again"),
    * 'menu-bar' (hide the window and keep running there) or 'quit'.

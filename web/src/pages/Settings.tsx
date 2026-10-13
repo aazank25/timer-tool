@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ModePicker } from '../components/pickers';
-import { QuickSwitchSettings } from '../components/settings/QuickSwitchSettings';
+import { NotificationSettings } from '../components/settings/NotificationSettings';
+import { ShortcutSettings } from '../components/settings/ShortcutSettings';
 import { WrapUpSettings } from '../components/settings/WrapUpSettings';
 import { PromptSettings } from '../components/settings/PromptSettings';
 import { WindowSettings } from '../components/settings/WindowSettings';
@@ -149,9 +150,10 @@ export function SettingsPage() {
         </Field>
       </Card>
 
-      <QuickSwitchSettings />
+      <ShortcutSettings />
       <WindowSettings />
       <PromptSettings />
+      <NotificationSettings />
 
       <CalendarSettings />
     </div>
