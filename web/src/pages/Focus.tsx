@@ -27,6 +27,7 @@ import {
 import { TimerRing } from '../components/TimerRing';
 import { Button, Card, Empty, Field, inputClass, Modal, Swatch } from '../components/ui';
 import {
+  blockDoneNotificationOn,
   keys,
   requestNotificationPermission,
   useBlockEndAlert,
@@ -326,6 +327,7 @@ function StartBlock({
   }) => void;
 }) {
   const { data: openTasks = [] } = useTasks({ view: 'open' });
+  const { data: settings } = useSettings();
   // The task this block is the work on. One that was finished elsewhere drops
   // out of the open list, and with it out of the form.
   const [taskPick, setTaskPick] = useState<number | null>(null);
@@ -398,8 +400,9 @@ function StartBlock({
 
   // One path for Enter and the button, so they can never send different things.
   function start() {
-    // Only a pomodoro ever notifies, so a stopwatch has no reason to ask.
-    if (!stopwatch) requestNotificationPermission();
+    // Only a pomodoro ever notifies, so a stopwatch has no reason to ask. Nor has anyone who has
+    // turned that pop-up off in Settings.
+    if (!stopwatch && blockDoneNotificationOn(settings)) requestNotificationPermission();
     onStart({
       projectId,
       taskId: task?.id ?? null,

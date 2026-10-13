@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { normalizeAccelerator, usedByApp } from '../lib/accelerator.js';
+import { HOTKEY_SETTINGS, hotkeyClash, normalizeAccelerator } from '../lib/accelerator.js';
 import { badRequest, handler, parse } from '../lib/http.js';
 import { allSettings, getSetting, setSettings } from '../lib/settings.js';
 
@@ -10,9 +10,8 @@ export const settingsRouter = Router();
  * '' turns the shortcut off. Anything else has to be a combination Electron will read as it
  * was typed, and is kept in the one spelling normalizeAccelerator gives it. Refused here, not
  * left to the app that registers it: Electron drops a name it does not know and registers
- * what is left, so a typo would go on to grab some other key in every app. FocusDesk's own
- * shortcuts are refused here too. The app would turn them down at registration, but by then
- * the setting is saved, and the next start would find a shortcut it cannot register.
+ * what is left, so a typo would go on to grab some other key in every app. Whether it is also
+ * one of the other two shortcuts is judged by the PATCH below, where all three are known.
  */
 const hotkey = z
   .string()
@@ -27,14 +26,6 @@ const hotkey = z
         code: z.ZodIssueCode.custom,
         message:
           'Use one key with at least one of Command, Control, CommandOrControl or Super, joined with +, like CommandOrControl+Alt+K (F1–F24 may use Shift or Alt alone), or leave it empty to turn the shortcut off',
-      });
-      return z.NEVER;
-    }
-    const purpose = usedByApp(accelerator);
-    if (purpose !== null) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `${accelerator} is already the shortcut FocusDesk uses to ${purpose}. Pick a different one`,
       });
       return z.NEVER;
     }
@@ -57,6 +48,12 @@ const workDays = z.string().refine((list) => {
 
 const clockTime = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use HH:MM, on a 24-hour clock');
 
+/**
+ * A switch. It may be sent as a boolean or as 'true' or 'false', and is stored, and read back,
+ * as that text.
+ */
+const flag = z.union([z.boolean(), z.enum(['true', 'false'])]);
+
 /** Values are stored as strings; keys not listed here are rejected. */
 const schema = z
   .object({
@@ -66,20 +63,32 @@ const schema = z
     long_break_minutes: z.coerce.number().int().min(1).max(240),
     blocks_before_long_break: z.coerce.number().int().min(1).max(12),
     daily_target_minutes: z.coerce.number().int().min(0).max(1440),
-    autostart_breaks: z.union([z.boolean(), z.enum(['true', 'false'])]),
+    autostart_breaks: flag,
     default_timer_mode: z.enum(['stopwatch', 'pomodoro']),
+    show_hotkey: hotkey,
+    pause_hotkey: hotkey,
     quick_switch_hotkey: hotkey,
     day_start_hour: z.coerce.number().int().min(0).max(12),
     // A 24-hour HH:MM with both parts two digits, or '' for "no reminder".
     wrapup_time: z.union([z.literal(''), z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/)]),
     away_minutes: offOrMinutes(240),
     long_block_minutes: offOrMinutes(720),
-    meeting_prompts: z.union([z.boolean(), z.enum(['true', 'false'])]),
+    meeting_prompts: flag,
     work_days: workDays,
     work_start: clockTime,
     work_end: clockTime,
     nudge_minutes: offOrMinutes(240),
     close_behavior: z.enum(['ask', 'menu-bar', 'quit']),
+    // Pop-up notifications from the desktop app and the web client: the master switch, and one
+    // for each kind of thing it can pop up about.
+    notifications: flag,
+    notify_away: flag,
+    notify_long_block: flag,
+    notify_meetings: flag,
+    notify_wrapup: flag,
+    notify_week_review: flag,
+    notify_idle: flag,
+    notify_block_done: flag,
   })
   .partial();
 
@@ -111,6 +120,21 @@ settingsRouter.patch(
       const start = body.work_start ?? getSetting('work_start') ?? '';
       const end = body.work_end ?? getSetting('work_end') ?? '';
       if (end <= start) throw badRequest('Work hours must end after they start');
+    }
+    // No two of the three shortcuts may be the same. Each is fine alone and wrong beside another,
+    // and a patch may name only some of them, so the rest are read from what is stored. Refused
+    // before anything is written, so the app never starts to find two actions on one key.
+    const written = HOTKEY_SETTINGS.filter((key) => body[key] !== undefined);
+    if (written.length > 0) {
+      const clash = hotkeyClash(
+        {
+          show_hotkey: body.show_hotkey ?? getSetting('show_hotkey') ?? '',
+          pause_hotkey: body.pause_hotkey ?? getSetting('pause_hotkey') ?? '',
+          quick_switch_hotkey: body.quick_switch_hotkey ?? getSetting('quick_switch_hotkey') ?? '',
+        },
+        written,
+      );
+      if (clash !== null) throw badRequest(clash);
     }
     setSettings(body as Record<string, string | number | boolean>);
     const all = allSettings();

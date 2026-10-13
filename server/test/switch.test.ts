@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { existsSync, readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { after, afterEach, before, beforeEach, describe, it, mock } from 'node:test';
 import type { SessionRow, StartInput } from '../src/lib/sessions.js';
@@ -645,83 +644,33 @@ describe('normalizeAccelerator', () => {
   });
 });
 
-describe("FocusDesk's own shortcuts", () => {
-  /** Normalised first, as the settings route does: usedByApp reads a canonical spelling. */
-  async function used(input: string, platform: string) {
-    const { normalizeAccelerator, usedByApp } = await acceleratorMod();
-    const accelerator = normalizeAccelerator(input);
-    assert.ok(accelerator, `${input} is a shortcut`);
-    return usedByApp(accelerator, platform);
-  }
-
-  it('are known by the keys they press, in any spelling and any order, on every platform', async () => {
-    const cases: [string, string][] = [
-      ['CommandOrControl+Shift+F', 'show its window'],
-      ['cmdorctrl+shift+f', 'show its window'],
-      ['CmdOrCtrl + Shift + F', 'show its window'],
-      ['Shift+CommandOrControl+F', 'show its window'],
-      ['COMMANDORCONTROL+SHIFT+F', 'show its window'],
-      ['CommandOrControl+Shift+Space', 'pause or resume the block on the clock'],
-      ['cmdorctrl+shift+space', 'pause or resume the block on the clock'],
-      ['Shift+CmdOrCtrl+SPACE', 'pause or resume the block on the clock'],
-    ];
+describe("FocusDesk's three shortcuts", () => {
+  // The desktop app registers whatever the settings say, so the defaults are the shortcuts that
+  // ship. Each has to be one the rule accepts as it stands, and no two may be the same: if they
+  // were, the app would start with an action that cannot be had.
+  it('ship as three valid shortcuts, each spelled as the rule spells it, and no two the same', async () => {
+    const { DEFAULT_SETTINGS } = await dbMod();
+    const { normalizeAccelerator, hotkeyClash } = await acceleratorMod();
+    const shipped = {
+      show_hotkey: DEFAULT_SETTINGS.show_hotkey ?? '',
+      pause_hotkey: DEFAULT_SETTINGS.pause_hotkey ?? '',
+      quick_switch_hotkey: DEFAULT_SETTINGS.quick_switch_hotkey ?? '',
+    };
+    for (const [setting, accelerator] of Object.entries(shipped)) {
+      assert.ok(accelerator, `${setting} is on by default`);
+      assert.equal(normalizeAccelerator(accelerator), accelerator, setting);
+    }
+    assert.equal(new Set(Object.values(shipped)).size, 3);
     for (const platform of ['darwin', 'linux', 'win32']) {
-      for (const [input, purpose] of cases) {
-        assert.equal(await used(input, platform), purpose, `${input} on ${platform}`);
-      }
+      assert.equal(hotkeyClash(shipped, undefined, platform), null, platform);
     }
+    // They are the three the app has always had: show, pause or resume, quick switch.
+    assert.deepEqual(shipped, {
+      show_hotkey: 'CommandOrControl+Shift+F',
+      pause_hotkey: 'CommandOrControl+Shift+Space',
+      quick_switch_hotkey: 'CommandOrControl+Alt+K',
+    });
   });
-
-  it('are the Command key on a Mac, where CommandOrControl is Command, and not Control', async () => {
-    assert.equal(await used('Command+Shift+F', 'darwin'), 'show its window');
-    assert.equal(await used('Cmd+Shift+Space', 'darwin'), 'pause or resume the block on the clock');
-    assert.equal(await used('Super+Shift+F', 'darwin'), 'show its window');
-    assert.equal(await used('Control+Shift+F', 'darwin'), null);
-    assert.equal(await used('Ctrl+Shift+Space', 'darwin'), null);
-  });
-
-  it('are the Control key everywhere else, where CommandOrControl is Control, and not Command', async () => {
-    for (const platform of ['linux', 'win32']) {
-      assert.equal(await used('Control+Shift+F', platform), 'show its window', platform);
-      assert.equal(await used('Ctrl+Shift+Space', platform), 'pause or resume the block on the clock');
-      assert.equal(await used('Shift+Control+F', platform), 'show its window', platform);
-      // Command is the Windows key there, which is another key.
-      assert.equal(await used('Command+Shift+F', platform), null, platform);
-      assert.equal(await used('Super+Shift+Space', platform), null, platform);
-    }
-  });
-
-  it('are not claimed for a combination that differs by a key or a modifier', async () => {
-    for (const platform of ['darwin', 'linux', 'win32']) {
-      for (const input of [
-        'CommandOrControl+Alt+K',
-        'CommandOrControl+Shift+K',
-        'CommandOrControl+Alt+F',
-        'CommandOrControl+F',
-        'CommandOrControl+Shift+Alt+F',
-        'CommandOrControl+Shift+Enter',
-        'CommandOrControl+Alt+Space',
-        'Control+Alt+Shift+F',
-        'Shift+F5',
-      ]) {
-        assert.equal(await used(input, platform), null, `${input} on ${platform}`);
-      }
-    }
-  });
-
-  // The two lists are written apart, one in the app and one in the rule that refuses them, so this
-  // is what keeps them the same. Skipped only where the tests run without the app beside them.
-  const mainFile = new URL('../../desktop/main.mjs', import.meta.url);
-  it(
-    'are exactly the shortcuts desktop/main.mjs registers for itself',
-    { skip: !existsSync(mainFile) && 'desktop/main.mjs is not beside server/' },
-    async () => {
-      const { APP_SHORTCUTS } = await acceleratorMod();
-      const main = readFileSync(mainFile, 'utf8');
-      const registered = [...main.matchAll(/globalShortcut\.register\(\s*'([^']+)'/g)].map((m) => m[1]);
-      assert.deepEqual([...registered].sort(), Object.keys(APP_SHORTCUTS).sort());
-    },
-  );
 });
 
 describe('the quick_switch_hotkey setting', () => {
@@ -746,14 +695,13 @@ describe('the quick_switch_hotkey setting', () => {
     assert.equal(res.body.quick_switch_hotkey, 'CommandOrControl+Alt+K');
   });
 
-  it('has a default that is itself a shortcut the rule accepts and the app does not use', async () => {
+  it('has a default that is itself a shortcut the rule accepts', async () => {
     // Command+Shift+K is Browse DMs in Slack and Delete Line in VS Code, which is why it is not
     // the default: a global shortcut takes the key from every app.
     const { DEFAULT_SETTINGS } = await dbMod();
-    const { normalizeAccelerator, usedByApp } = await acceleratorMod();
+    const { normalizeAccelerator } = await acceleratorMod();
     const shipped = DEFAULT_SETTINGS.quick_switch_hotkey;
     assert.equal(normalizeAccelerator(shipped ?? ''), shipped);
-    assert.equal(usedByApp(shipped ?? ''), null);
     assert.notEqual(shipped, 'CommandOrControl+Shift+K');
   });
 
@@ -829,47 +777,6 @@ describe('the quick_switch_hotkey setting', () => {
       const res = await api.call('PATCH', '/settings', { quick_switch_hotkey: typed });
       assert.equal(res.status, 200, typed);
       assert.equal(res.body.quick_switch_hotkey, stored);
-    }
-  });
-
-  it("refuses FocusDesk's own two shortcuts in every spelling, and keeps the one it had", async () => {
-    const { usedByApp, normalizeAccelerator } = await acceleratorMod();
-    await api.call('PATCH', '/settings', { quick_switch_hotkey: 'Control+Alt+J' });
-
-    const spellings: [string, string][] = [
-      ['CommandOrControl+Shift+F', 'show its window'],
-      ['cmdorctrl+shift+f', 'show its window'],
-      ['CmdOrCtrl + Shift + F', 'show its window'],
-      ['Shift+CommandOrControl+F', 'show its window'],
-      ['CommandOrControl+Shift+Space', 'pause or resume the block on the clock'],
-      ['COMMANDORCONTROL+SHIFT+SPACE', 'pause or resume the block on the clock'],
-      ['Shift+CmdOrCtrl+space', 'pause or resume the block on the clock'],
-      // The same keys under the names of this platform: Command on a Mac, Control elsewhere.
-      process.platform === 'darwin'
-        ? ['Cmd+Shift+F', 'show its window']
-        : ['Ctrl+Shift+F', 'show its window'],
-      process.platform === 'darwin'
-        ? ['Command+Shift+Space', 'pause or resume the block on the clock']
-        : ['Shift+Control+Space', 'pause or resume the block on the clock'],
-    ];
-    for (const [typed, purpose] of spellings) {
-      const canonical = normalizeAccelerator(typed);
-      assert.ok(canonical && usedByApp(canonical) === purpose, `${typed} is one of the app's own`);
-      const res = await api.call('PATCH', '/settings', { quick_switch_hotkey: typed });
-      assert.equal(res.status, 400, typed);
-      assert.equal(res.body.error, 'Invalid request');
-      assert.equal(
-        res.body.details.fieldErrors.quick_switch_hotkey[0],
-        `${canonical} is already the shortcut FocusDesk uses to ${purpose}. Pick a different one`,
-        typed,
-      );
-      // Nothing was saved, so there is nothing for the next start to fail to register.
-      assert.equal((await api.call('GET', '/settings')).body.quick_switch_hotkey, 'Control+Alt+J');
-    }
-
-    // Close neighbours are free: another key, or another modifier, is another shortcut.
-    for (const free of ['CommandOrControl+Alt+F', 'CommandOrControl+Shift+Enter', 'Control+Alt+Space']) {
-      assert.equal((await api.call('PATCH', '/settings', { quick_switch_hotkey: free })).status, 200, free);
     }
   });
 

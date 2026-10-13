@@ -5,17 +5,37 @@
  * An interface of its own, so what the desktop adds later can be declared beside the code that
  * uses it, with another `interface FocusdeskBridge { … }` that merges into this one.
  */
+
+/** Where one of the three shortcuts stands after the app has tried to register it. */
+interface HotkeyStatus {
+  /** False when the shortcut is set but could not be registered; `error` says why. */
+  ok: boolean;
+  /** The shortcut that is registered, in the spelling the setting stores. Null when it is off. */
+  accelerator: string | null;
+  error?: string;
+}
+
 interface FocusdeskBridge {
   /** Hide the quick-switch window. */
   closePalette(): void;
   /** Runs each time the quick-switch window is shown. Returns the call that stops listening. */
   onPaletteShow(callback: () => void): () => void;
   /**
-   * Read the shortcut setting again and register it. `accelerator` is the one registered
-   * afterwards, null when there is none; when `ok` is false the one that was there before
-   * still is, and `error` says why the new one could not be.
+   * Read the three shortcut settings again and register them: show the window, pause or resume,
+   * and quick switch. Says how each one stands, so a shortcut that another app holds is not a
+   * silent failure.
    */
-  reloadHotkey(): Promise<{ ok: boolean; accelerator: string | null; error?: string }>;
+  reloadHotkeys(): Promise<{
+    show: HotkeyStatus;
+    pause: HotkeyStatus;
+    quickSwitch: HotkeyStatus;
+  }>;
+  /**
+   * Show a sample notification from the operating system, whatever the notification settings
+   * say, so that what the system does with FocusDesk's notifications can be seen. `error` is why
+   * it could not be shown.
+   */
+  testNotification(): Promise<{ ok: boolean; error?: string }>;
 }
 
 interface Window {

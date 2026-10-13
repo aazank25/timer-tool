@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
-import { api, type Session, type TaskFilter, type TaskInput, type TaskMove } from './api';
+import {
+  api,
+  type Session,
+  type Settings,
+  type TaskFilter,
+  type TaskInput,
+  type TaskMove,
+} from './api';
 import { clock } from './lib/format';
 import type { InterruptionReason } from './lib/interruptions';
 
@@ -335,14 +342,24 @@ export function usePlanActions() {
 /* ------------------------------------------------------------ notification */
 
 /**
+ * Whether the "Block complete" notification may pop up: the master switch for pop-ups and this
+ * one's own are both on. Each is on unless it has been turned off, as the server ships them.
+ */
+export function blockDoneNotificationOn(settings: Settings | undefined): boolean {
+  return settings?.notifications !== 'false' && settings?.notify_block_done !== 'false';
+}
+
+/**
  * Keep the tab title showing the clock, and for a pomodoro tell the user once
- * when the planned time is up. The block keeps running — overrun is real work
- * and gets counted — this just stops it going unnoticed. A stopwatch has no
- * end to announce, so it only ever updates the title and never notifies.
+ * when the planned time is up, unless they have turned that pop-up off in
+ * Settings. The block keeps running — overrun is real work and gets counted —
+ * this just stops it going unnoticed. A stopwatch has no end to announce, so
+ * it only ever updates the title and never notifies.
  */
 export function useBlockEndAlert(live: LiveSession): void {
   const alerted = useRef<number | null>(null);
   const baseTitle = useRef(document.title);
+  const { data: settings } = useSettings();
 
   useEffect(() => {
     const { session, isRunning, elapsedSeconds, remainingSeconds, overrunSeconds } = live;
@@ -360,14 +377,21 @@ export function useBlockEndAlert(live: LiveSession): void {
         : `${Math.ceil(remainingSeconds / 60)}m · ${session.title}`;
 
     if (remainingSeconds > 0 || alerted.current === session.id) return;
+    // Not before the settings are in: a block that ended while the page was still loading would
+    // otherwise notify somebody who has turned this off.
+    if (!settings) return;
     alerted.current = session.id;
-    if ('Notification' in window && Notification.permission === 'granted') {
+    if (
+      blockDoneNotificationOn(settings) &&
+      'Notification' in window &&
+      Notification.permission === 'granted'
+    ) {
       new Notification('Block complete', {
         body: `${session.title} — ${session.plannedMinutes}m done. Rate it and take a break.`,
         tag: `focusdesk-${session.id}`,
       });
     }
-  }, [live]);
+  }, [live, settings]);
 
   useEffect(
     () => () => {

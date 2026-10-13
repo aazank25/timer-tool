@@ -132,14 +132,20 @@ export function normalizeAccelerator(input: string): string | null {
 }
 
 /**
- * The shortcuts FocusDesk registers for itself (desktop/main.mjs), each with what it does,
- * worded to follow "to". A combination can only be registered once, so quick switch cannot
- * have either of these.
+ * The three shortcuts FocusDesk can register for every app, by the setting that holds each, with
+ * what each does, worded to follow "the shortcut to". A combination can only be registered once,
+ * so no two of the three may be the same.
  */
-export const APP_SHORTCUTS: Readonly<Record<string, string>> = {
-  'CommandOrControl+Shift+F': 'show its window',
-  'CommandOrControl+Shift+Space': 'pause or resume the block on the clock',
-};
+export const HOTKEY_ACTIONS = {
+  show_hotkey: 'show FocusDesk',
+  pause_hotkey: 'pause or resume the block on the clock',
+  quick_switch_hotkey: 'open quick switch',
+} as const;
+
+export type HotkeySetting = keyof typeof HOTKEY_ACTIONS;
+
+/** The three settings, in the order the settings screen lists them. */
+export const HOTKEY_SETTINGS = Object.keys(HOTKEY_ACTIONS) as HotkeySetting[];
 
 /**
  * The keys a normalised shortcut presses, in one order, each modifier named as the key it is
@@ -169,16 +175,37 @@ function pressedKeys(accelerator: string, mac: boolean): string {
 }
 
 /**
- * What FocusDesk itself already uses this shortcut for, or null when it is free. Judged by the
- * keys pressed and not by the text, because Electron does the same when it refuses a second
- * registration: Shift+CommandOrControl+F is CommandOrControl+Shift+F, and Control+Shift+F is
- * too wherever CommandOrControl means Control. Takes a shortcut as normalizeAccelerator returns it.
+ * The first two of the three shortcuts that are the same one, as a sentence that says which
+ * action already has it, or null when each is its own. `hotkeys` is what all three settings will
+ * hold. An empty one is off and never clashes, and a value that is not a shortcut is for
+ * normalizeAccelerator to refuse, not for this. `written` is the settings this change sets: the
+ * one that gives way is one of those (the later of two, when both are), so the sentence names the
+ * action that had the shortcut before.
+ *
+ * Judged by the keys pressed and not by the text, because Electron does the same when it refuses
+ * a second registration: Shift+CommandOrControl+F is CommandOrControl+Shift+F, and Control+Shift+F
+ * is too wherever CommandOrControl means Control. The shortcut in the sentence is spelled as
+ * normalizeAccelerator spells it.
  */
-export function usedByApp(accelerator: string, platform: string = process.platform): string | null {
+export function hotkeyClash(
+  hotkeys: Readonly<Record<HotkeySetting, string>>,
+  written: readonly HotkeySetting[] = HOTKEY_SETTINGS,
+  platform: string = process.platform,
+): string | null {
   const mac = platform === 'darwin';
-  const wanted = pressedKeys(accelerator, mac);
-  for (const [own, purpose] of Object.entries(APP_SHORTCUTS)) {
-    if (pressedKeys(own, mac) === wanted) return purpose;
+  const held = HOTKEY_SETTINGS.flatMap((setting) => {
+    const accelerator = normalizeAccelerator(hotkeys[setting]);
+    return accelerator === null
+      ? []
+      : [{ setting, accelerator, pressed: pressedKeys(accelerator, mac) }];
+  });
+  for (const [i, first] of held.entries()) {
+    for (const second of held.slice(i + 1)) {
+      if (first.pressed !== second.pressed) continue;
+      const firstGivesWay = written.includes(first.setting) && !written.includes(second.setting);
+      const [giver, owner] = firstGivesWay ? [first, second] : [second, first];
+      return `${giver.accelerator} is already the shortcut to ${HOTKEY_ACTIONS[owner.setting]}`;
+    }
   }
   return null;
 }
