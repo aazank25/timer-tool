@@ -50,6 +50,7 @@
     "asarUnpack": [
       "**/node_modules/better-sqlite3/**"
     ],
+    "afterPack": "./scripts/after-pack.cjs",
     "mac": {
       "target": [
         {
@@ -66,13 +67,22 @@
       "notarize": false
     },
     "dmg": {
-      "title": "FocusDesk"
+      "title": "FocusDesk",
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
     },
     "win": {
       "target": [
-        "nsis"
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.png"
+    },
+    "nsis": {
+      "artifactName": "${productName}-${version}-windows-${arch}-setup.${ext}"
     },
     "linux": {
       "target": [
