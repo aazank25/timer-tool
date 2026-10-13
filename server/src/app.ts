@@ -6,6 +6,7 @@ import express from 'express';
 import { startCalendarSync } from './lib/calendar.js';
 import { config } from './lib/config.js';
 import { errorMiddleware } from './lib/http.js';
+import { localOnly } from './lib/local-only.js';
 import { initDb } from './db.js';
 import { apiRouter } from './routes/index.js';
 
@@ -37,6 +38,9 @@ export function calendarSyncMs(): number {
 export function createApp(): express.Express {
   const app = express();
   app.disable('x-powered-by');
+  // First of all, ahead of the body parser, CORS, the API and the client bundle: nothing below
+  // is reached by a request that did not come from the app itself.
+  app.use(localOnly);
   app.use(express.json({ limit: '2mb' }));
 
   // The Vite dev server runs on a different port; in production — and inside
