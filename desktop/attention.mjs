@@ -35,6 +35,52 @@ const REMEMBERED_IDS = 500;
 const HELD_NOTIFICATIONS = 50;
 
 /**
+ * The setting that turns the notifications of a kind of prompt off, by the kind. Both kinds of
+ * meeting prompt are one setting. A kind that is not here has no setting of its own, and is
+ * governed by the master switch alone. A Map, so that a kind named like something every object
+ * has ("constructor") is not mistaken for one.
+ */
+export const NOTIFICATION_SETTINGS = new Map([
+  ['away', 'notify_away'],
+  ['long-block', 'notify_long_block'],
+  ['meeting-start', 'notify_meetings'],
+  ['meeting-end', 'notify_meetings'],
+  ['wrapup', 'notify_wrapup'],
+  ['week-review', 'notify_week_review'],
+  ['idle', 'notify_idle'],
+]);
+
+/**
+ * Whether a prompt of this kind may be told to you as an operating-system notification. The
+ * master setting `notifications` turns every one off, and each kind has a setting of its own
+ * (see NOTIFICATION_SETTINGS). All of them are on until they say otherwise: only the text
+ * 'false' turns one off, and a setting that is not there, because the server is older than the
+ * setting or the settings have not been read yet, is on. This is about the notification and
+ * nothing else: the banners in the window and the menu's Needs attention list show the prompt
+ * either way.
+ *
+ * @param {string} kind The prompt's kind.
+ * @param {Record<string, unknown> | null | undefined} settings The settings as read, or nothing yet.
+ */
+export function notificationAllowed(kind, settings) {
+  if (settings?.notifications === 'false') return false;
+  const setting = NOTIFICATION_SETTINGS.get(kind);
+  return setting === undefined || settings?.[setting] !== 'false';
+}
+
+/** The notification that "Test notification" shows. */
+export const TEST_NOTIFICATION = Object.freeze({
+  title: 'FocusDesk',
+  body: 'Notifications are on. This is what they look like.',
+});
+
+/** How long a test notification waits to hear that it was shown, or that it could not be. */
+const TEST_NOTIFICATION_WAIT_MS = 1_000;
+
+/** The test notifications that are on screen, held on to for the same reason as the others (see `show`). */
+const heldTests = new Set();
+
+/**
  * Text as a menu label: one line, whole if it fits and else cut at the limit with an ellipsis,
  * and safe to hand to a menu.
  *
@@ -66,6 +112,13 @@ const messageOf = (err) => (err instanceof Error ? err.message : String(err));
  * @param {(route?: string) => void} deps.openWindow Show the main window, at a route of the app if one is given.
  * @param {() => void} deps.openPalette Show the quick-switch box.
  * @param {(message: string) => void} deps.showError Tell the person something went wrong.
+ * @param {(kind: string) => boolean} [deps.notifyAllowed] Whether a prompt of this kind may be
+ *   notified about (see notificationAllowed); always true if not given. It is asked of each
+ *   prompt that has not been told about yet, whenever the list is read. A prompt whose kind is
+ *   off at that moment is counted as told, and is never notified about afterwards, even if the
+ *   kind is turned on while it is still waiting, so that turning one on is not followed by a
+ *   burst of notifications about things that are old. Only the notification is held back: the
+ *   list and the menu are the same.
  * @param {() => void} [deps.onChange] Called whenever the list may have changed what is on screen.
  * @param {() => unknown} [deps.afterAction] Called once an answer from the menu has been sent.
  * @param {(...args: unknown[]) => void} [deps.log]
@@ -79,6 +132,7 @@ export function createAttention({
   openWindow,
   openPalette,
   showError,
+  notifyAllowed = () => true,
   onChange = () => {},
   afterAction = () => {},
   log = () => {},
@@ -180,7 +234,23 @@ export function createAttention({
     }
   }
 
-  /** Tell about what has not been told yet, if there is somebody there to be told. */
+  /** Whether this prompt's kind may be notified about. A gate that cannot answer is open: being told is the default. */
+  function allowed(prompt) {
+    try {
+      return notifyAllowed(prompt.kind) !== false;
+    } catch (err) {
+      log('[attention] could not tell if a notification is wanted', err);
+      return true;
+    }
+  }
+
+  /**
+   * Tell about what has not been told yet, if there is somebody there to be told. A prompt whose
+   * kind is turned off is not told, and is counted as told, whether or not there is anybody
+   * there and whether or not the system can show a notification: it is what it was when it
+   * arrived that decides, and not what the setting is by the time you are back or have changed
+   * your mind.
+   */
   function notifyNew() {
     let supported = false;
     try {
@@ -188,10 +258,15 @@ export function createAttention({
     } catch {
       // Not knowing is not being able to.
     }
-    if (!supported || !present()) return;
+    const tellable = supported && present();
     const listed = new Set(prompts.map((p) => p.id));
     for (const prompt of prompts) {
       if (notified.has(prompt.id)) continue;
+      if (!allowed(prompt)) {
+        remember(prompt.id, listed);
+        continue;
+      }
+      if (!tellable) continue;
       remember(prompt.id, listed);
       show(prompt);
     }
@@ -304,4 +379,60 @@ export function interruptedItem(session, reasons, interrupt) {
       { label: 'No reason', click: () => interrupt(session.id, null) },
     ],
   };
+}
+
+/**
+ * A sample notification, shown now: what Settings' "Test notification" asks for, so that you can
+ * see what they look like, and whether this system shows them at all. It is not a prompt and it is
+ * not asked of any setting: the switches in Settings and whether you are at the machine do not
+ * come into it, since being shown it is the point.
+ *
+ * Answers { ok: true } once the system says it has shown it, or when it has not said otherwise
+ * within a moment (a platform that never says is not one that failed), and { ok: false, error }
+ * when this system cannot show notifications, throws on trying, or says it failed. It never
+ * rejects. It holds on to the notification until it is clicked or closed, as `show` does.
+ *
+ * @param {object} deps
+ * @param {{ isSupported(): boolean, new (options: { title: string, body: string }): any }} deps.Notification
+ * @param {number} [deps.waitMs] How long to wait to hear that it was shown or failed.
+ * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
+ */
+export function showTestNotification({ Notification, waitMs = TEST_NOTIFICATION_WAIT_MS }) {
+  let supported = false;
+  try {
+    supported = Notification.isSupported();
+  } catch {
+    // Not knowing is not being able to.
+  }
+  if (!supported) {
+    return Promise.resolve({ ok: false, error: 'This system cannot show notifications.' });
+  }
+  return new Promise((resolve) => {
+    let notification;
+    let timer = null;
+    const done = (result) => {
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const release = () => {
+      heldTests.delete(notification);
+    };
+    try {
+      notification = new Notification({ title: TEST_NOTIFICATION.title, body: TEST_NOTIFICATION.body });
+      heldTests.add(notification);
+      if (heldTests.size > HELD_NOTIFICATIONS) heldTests.delete(heldTests.values().next().value);
+      notification.on('show', () => done({ ok: true }));
+      notification.on('click', release);
+      notification.on('close', release);
+      notification.on('failed', (_event, error) => {
+        release();
+        done({ ok: false, error: error ? String(error) : 'The system did not show it.' });
+      });
+      timer = setTimeout(() => done({ ok: true }), waitMs);
+      notification.show();
+    } catch (err) {
+      release();
+      done({ ok: false, error: messageOf(err) });
+    }
+  });
 }

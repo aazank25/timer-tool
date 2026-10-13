@@ -14,7 +14,14 @@ import {
   powerMonitor,
   session as electronSession,
 } from 'electron';
-import { APP_USER_MODEL_ID, createAttention, interruptedItem, trimLabel } from './attention.mjs';
+import {
+  APP_USER_MODEL_ID,
+  createAttention,
+  interruptedItem,
+  notificationAllowed,
+  showTestNotification,
+  trimLabel,
+} from './attention.mjs';
 import { createAwayTracker } from './away.mjs';
 import {
   afterAsking,
@@ -33,6 +40,7 @@ import {
 } from './menu-bar.mjs';
 import { createPalette, isLocal } from './palette.mjs';
 import { rereadAfter } from './requests.mjs';
+import { createHotkeys, describeHotkeys, opensQuickSwitch } from './shortcuts.mjs';
 import { navigationScript, windowPlan } from './window-route.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -96,6 +104,15 @@ function createWindow() {
     if (isQuitting) return;
     event.preventDefault();
     void closeWindow();
+  });
+
+  // ⌘K (Control+K off a Mac) in this window opens the quick-switch box, as the shortcut that works
+  // in any app does. It is not a setting and not global: only this window answers to it, while it
+  // has the keyboard, and the page is not given the key (see opensQuickSwitch).
+  win.webContents.on('before-input-event', (event, input) => {
+    if (!opensQuickSwitch(input, process.platform)) return;
+    event.preventDefault();
+    openQuickSwitch();
   });
 
   // Anything not served by the local app opens in the real browser.
@@ -330,6 +347,9 @@ let builtMenu = null;
 function renderMenu() {
   if (!tray) return;
   const s = live.session;
+  // The shortcut that shows the window, as it is registered right now: none when it is off, or
+  // when it could not be had.
+  const showHotkey = hotkeys.active().show;
   // Everything the menu's shape depends on, and nothing that ticks.
   const signature = JSON.stringify([
     s?.id ?? null,
@@ -340,6 +360,7 @@ function renderMenu() {
     app.getLoginItemSettings().openAtLogin,
     attention?.signature() ?? null,
     interruptionReasons.length,
+    showHotkey,
   ]);
   if (signature === menuSignature) return;
   menuSignature = signature;
@@ -366,7 +387,12 @@ function renderMenu() {
           { type: 'separator' },
         ]
       : [{ label: 'Nothing running', enabled: false }, { type: 'separator' }]),
-    { label: 'Open FocusDesk', accelerator: 'CommandOrControl+Shift+F', click: showWindow },
+    {
+      label: 'Open FocusDesk',
+      // The key as a label: it is registered with globalShortcut (see hotkeys), not by the menu.
+      ...(showHotkey ? { accelerator: forElectron(showHotkey) } : {}),
+      click: showWindow,
+    },
     { type: 'separator' },
     {
       label: 'Launch at login',
@@ -431,13 +457,7 @@ function createTray() {
   renderMenu();
 }
 
-/* ---------------------------------------------------------- quick switch */
-
-/**
- * The shortcut registered for the quick-switch box right now, or null. Kept so that a change can
- * let go of the old one, and so that a new one that cannot be taken leaves it as it was.
- */
-let activeHotkey = null;
+/* ------------------------------------------------------------- shortcuts */
 
 const messageOf = (err) => (err instanceof Error ? err.message : String(err));
 
@@ -448,85 +468,83 @@ const messageOf = (err) => (err instanceof Error ? err.message : String(err));
  */
 const forElectron = (accelerator) => nativeAccelerator(accelerator, process.platform);
 
-/** Null when `accelerator` is now registered, otherwise why it is not. */
-function tryRegister(accelerator) {
+/** What the pause shortcut does: pause the block on the clock or resume it, or with none, show the window. */
+function pauseOrResume() {
+  const s = live.session;
+  if (!s) {
+    showWindow();
+    return;
+  }
+  void act(`/sessions/${s.id}/${s.status === 'paused' ? 'resume' : 'pause'}`);
+}
+
+/** Show the quick-switch box, from its shortcut or from ⌘K in the window. Never throws into Electron. */
+function openQuickSwitch() {
   try {
-    const open = () => {
-      try {
-        palette.showPalette();
-      } catch (err) {
-        console.error('[focusdesk] quick switch', err);
-      }
-    };
-    if (globalShortcut.register(forElectron(accelerator), open)) return null;
-    // Refused, yet registered by this app: the combination is one of FocusDesk's own.
-    return globalShortcut.isRegistered(forElectron(accelerator))
-      ? `${accelerator} is already used by another FocusDesk shortcut.`
-      : `${accelerator} could not be registered. Another app may be using it.`;
+    palette.showPalette();
   } catch (err) {
-    return `${accelerator} could not be registered: ${messageOf(err)}`;
+    console.error('[focusdesk] quick switch', err);
   }
 }
 
 /**
- * Read the shortcut setting and make it the registered one. Answers { ok, accelerator, error }:
- * the shortcut that is registered afterwards, null for none, and when the setting asked for one
- * that could not be taken, why. That one never costs the shortcut that was working.
- *
- * Electron cannot be trusted to say no. It drops a name it does not know and registers what is
- * left, and on a Mac it can answer true for a combination another app owns. The first is stopped
- * by reading the setting through the same rule the server saved it by; the second cannot be
- * detected from here, which is why Settings shows what is active, and not just what was typed.
- * Off a Mac there is no Command key to hold, so a saved Command is registered as Super, the
- * Windows key (see forElectron), and is never registered as the keys that are left without it.
+ * The shortcuts that work in any app: show the window, pause or resume the block on the clock,
+ * and open the quick-switch box. Which keys each one is, is its setting (show_hotkey,
+ * pause_hotkey, quick_switch_hotkey), and none of them is written down here: see hotkeyPlan for
+ * what a setting that is missing means, and createHotkeys for what is done when one changes or
+ * cannot be had. Each is handed to Electron through forElectron.
  */
-async function applyHotkey() {
-  let wanted;
+const hotkeys = createHotkeys({
+  globalShortcut,
+  toSystem: forElectron,
+  normalize: (text) => normalizeAccelerator(text),
+  handlers: { show: () => showWindow(), pause: pauseOrResume, quickSwitch: openQuickSwitch },
+  log: (...args) => console.error('[focusdesk]', ...args),
+});
+
+/**
+ * Read the settings and make the three shortcuts what they say. Answers { show, pause,
+ * quickSwitch }, each { ok, accelerator, error? }: the shortcut that is registered afterwards,
+ * null for none, and when the setting asked for one that could not be had, why. A shortcut that
+ * could not be had never costs the one that was working.
+ *
+ * Settings that cannot be read leave every shortcut as it is, and say so. The exception is the
+ * start, before anything has been read or registered: a setting that is not there is its default,
+ * and one failed read is not a reason to be left without the keys.
+ *
+ * The tray's "Open FocusDesk" names the shortcut that shows the window, so the menu is built
+ * again with whatever that is now.
+ */
+async function applyHotkeys() {
+  let unread = null;
   try {
-    wanted = (await api('/settings')).quick_switch_hotkey ?? '';
+    settings = await api('/settings');
   } catch (err) {
-    return {
-      ok: false,
-      accelerator: activeHotkey,
-      error: `Could not read the setting: ${messageOf(err)}`,
-    };
+    console.error('[focusdesk] could not read the settings', err);
+    unread = `Could not read the settings: ${messageOf(err)}`;
   }
-
-  if (wanted === '') {
-    if (activeHotkey) globalShortcut.unregister(forElectron(activeHotkey));
-    activeHotkey = null;
-    return { ok: true, accelerator: null };
+  if (unread && settings) {
+    return Object.fromEntries(
+      Object.entries(hotkeys.active()).map(([action, accelerator]) => [
+        action,
+        { ok: false, accelerator, error: unread },
+      ]),
+    );
   }
-
-  const accelerator = normalizeAccelerator(wanted);
-  if (accelerator === null) {
-    return {
-      ok: false,
-      accelerator: activeHotkey,
-      error: `"${wanted}" is not a shortcut FocusDesk can register.`,
-    };
+  const statuses = hotkeys.apply(settings);
+  try {
+    renderMenu();
+  } catch (err) {
+    // The shortcuts are registered; a menu that could not be rebuilt is no reason to say they are not.
+    console.error('[focusdesk] could not update the menu', err);
   }
-  if (accelerator === activeHotkey && globalShortcut.isRegistered(forElectron(accelerator))) {
-    return { ok: true, accelerator };
-  }
-
-  // The old one goes first, so the same keys under another spelling can be taken again, and
-  // comes back if the new one cannot be had.
-  const previous = activeHotkey;
-  if (previous) globalShortcut.unregister(forElectron(previous));
-  const failure = tryRegister(accelerator);
-  if (!failure) {
-    activeHotkey = accelerator;
-    return { ok: true, accelerator };
-  }
-  activeHotkey = previous && !tryRegister(previous) ? previous : null;
-  return { ok: false, accelerator: activeHotkey, error: failure };
+  return statuses;
 }
 
-// One at a time, so that two reloads cannot leave the shortcut at whichever answered last.
+// One at a time, so that two reloads cannot leave the shortcuts at whichever answered last.
 let hotkeyQueue = Promise.resolve();
-function syncHotkey() {
-  const run = hotkeyQueue.then(applyHotkey);
+function syncHotkeys() {
+  const run = hotkeyQueue.then(applyHotkeys);
   hotkeyQueue = run.catch(() => {});
   return run;
 }
@@ -568,7 +586,10 @@ function systemIsLocked() {
   }
 }
 
-/** The settings as last read. Away detection goes by them, and is off until they have been. */
+/**
+ * The settings as last read. Away detection goes by them, and is off until they have been; the
+ * notifications go by them too (see notificationAllowed), and a setting that is not there is on.
+ */
 let settings = null;
 
 async function readSettings() {
@@ -613,6 +634,9 @@ async function startAttention() {
     },
     openWindow: showWindow,
     openPalette: () => palette.showPalette(),
+    // Whether a notification is wanted for a prompt of this kind: the master switch and the
+    // kind's own, as the settings were last read. Asked as the prompt is first listed.
+    notifyAllowed: (kind) => notificationAllowed(kind, settings),
     showError: (message) => {
       void dialog
         .showMessageBox({
@@ -808,8 +832,10 @@ app.whenReady().then(async () => {
     return;
   }
 
-  // The windows call these, so they are in place before either page loads.
-  ipcMain.handle('hotkey:reload', () => syncHotkey());
+  // The windows call these, so they are in place before either page loads. Settings asks for the
+  // shortcuts to be read again after it saves one, and for a sample notification on request.
+  ipcMain.handle('hotkeys:reload', () => syncHotkeys());
+  ipcMain.handle('notification:test', () => showTestNotification({ Notification }));
   palette = createPalette({
     serverUrl: server.url,
     backgroundColor: BACKGROUND,
@@ -826,8 +852,15 @@ app.whenReady().then(async () => {
       get paletteWindow() {
         return palette.window;
       },
+      /** Whether the quick-switch box is on screen. */
+      paletteVisible: () => !!palette.window?.isVisible(),
+      /** What is registered for each shortcut, as saved: { show, pause, quickSwitch }, null for none. */
+      get activeHotkeys() {
+        return hotkeys.active();
+      },
+      /** The quick-switch shortcut: what this was before there were three. */
       get activeHotkey() {
-        return activeHotkey;
+        return hotkeys.active().quickSwitch;
       },
     };
   }
@@ -839,20 +872,8 @@ app.whenReady().then(async () => {
   setInterval(() => void poll(), 5_000);
   setInterval(renderTitle, 1_000);
 
-  globalShortcut.register('CommandOrControl+Shift+F', showWindow);
-  globalShortcut.register('CommandOrControl+Shift+Space', () => {
-    const s = live.session;
-    if (!s) {
-      showWindow();
-      return;
-    }
-    void act(`/sessions/${s.id}/${s.status === 'paused' ? 'resume' : 'pause'}`);
-  });
-  // After those two, so a combination they already hold is reported as taken, not taken over.
-  const quickSwitch = await syncHotkey();
-  console.log(
-    `[focusdesk] quick switch: ${quickSwitch.ok ? (quickSwitch.accelerator ?? 'off') : quickSwitch.error}`,
-  );
+  // All three shortcuts, as the settings have them.
+  console.log(`[focusdesk] shortcuts: ${describeHotkeys(await syncHotkeys())}`);
 
   app.on('activate', showWindow);
 

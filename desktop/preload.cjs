@@ -19,9 +19,17 @@ contextBridge.exposeInMainWorld('focusdesk', {
   },
 
   /**
-   * Read the quick-switch shortcut from the settings again and register it. Resolves to
-   * { ok, accelerator, error? }: the shortcut registered afterwards, or null when there is
-   * none, and when a new one could not be registered, why. The one that was working still is.
+   * Read the settings again and register the three shortcuts that work in any app (show the
+   * window, pause or resume, quick switch) as they say. Resolves to
+   * { show, pause, quickSwitch }, each { ok, accelerator, error? }: the shortcut registered
+   * afterwards, or null when there is none (it is off), and when a new one could not be
+   * registered, why. The one that was working still is.
    */
-  reloadHotkey: () => ipcRenderer.invoke('hotkey:reload'),
+  reloadHotkeys: () => ipcRenderer.invoke('hotkeys:reload'),
+
+  /**
+   * Show a sample notification now, whatever the notification settings say and whether or not
+   * you are at the machine. Resolves to { ok, error? }: not ok when this system cannot show one.
+   */
+  testNotification: () => ipcRenderer.invoke('notification:test'),
 });

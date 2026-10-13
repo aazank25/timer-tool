@@ -7,7 +7,11 @@ import {
   createAttention,
   interruptedItem,
   MENU_LABEL_MAX,
+  NOTIFICATION_SETTINGS,
+  notificationAllowed,
   PRESENT_WITHIN_SECONDS,
+  showTestNotification,
+  TEST_NOTIFICATION,
   trimLabel,
 } from '../attention.mjs';
 
@@ -114,7 +118,13 @@ function notificationClass({ supported = true, failsToShow = false, failsToClose
 }
 
 /** What the person does with the machine, and what the app was asked to do about it. */
-function setup({ prompts = [], supported = true, failsToShow = false, failsToClose = false } = {}) {
+function setup({
+  prompts = [],
+  supported = true,
+  failsToShow = false,
+  failsToClose = false,
+  notifyAllowed,
+} = {}) {
   const world = { prompts, idle: 0, locked: false, listError: null, answerError: null, listed: 0 };
   const calls = {
     acted: [],
@@ -145,6 +155,8 @@ function setup({ prompts = [], supported = true, failsToShow = false, failsToClo
     openWindow: (route) => calls.windows.push(route),
     openPalette: () => calls.palettes++,
     showError: (message) => calls.errors.push(message),
+    // Not given, so what the app does when nothing says otherwise: everything is notified about.
+    ...(notifyAllowed ? { notifyAllowed } : {}),
     onChange: () => calls.changes++,
     afterAction: () => calls.afterActions++,
     log: (...args) => calls.logs.push(args),
@@ -974,5 +986,465 @@ describe('the name Windows files the notifications under', () => {
     // place a Notification is made.
     assert.ok(set < main.indexOf('app.whenReady()'), 'it is set after the app is ready');
     assert.ok(set < main.indexOf('createAttention({'), 'it is set after the notifications');
+  });
+});
+
+/* ------------------------------------------------- which notifications are wanted */
+
+describe('which kinds of prompt are notified about', () => {
+  const KINDS = ['away', 'long-block', 'meeting-start', 'meeting-end', 'wrapup', 'week-review', 'idle'];
+
+  it('is every kind, when the settings say nothing or have not been read', () => {
+    for (const kind of [...KINDS, 'something-new']) {
+      assert.equal(notificationAllowed(kind, null), true, `${kind}, not read`);
+      assert.equal(notificationAllowed(kind, undefined), true, `${kind}, not read`);
+      assert.equal(notificationAllowed(kind, {}), true, `${kind}, no settings`);
+      assert.equal(notificationAllowed(kind, { focus_minutes: '45' }), true, `${kind}, others`);
+    }
+  });
+
+  it('is every kind that is on, and the settings say so', () => {
+    const on = {
+      notifications: 'true',
+      notify_away: 'true',
+      notify_long_block: 'true',
+      notify_meetings: 'true',
+      notify_wrapup: 'true',
+      notify_week_review: 'true',
+      notify_idle: 'true',
+    };
+    for (const kind of KINDS) assert.equal(notificationAllowed(kind, on), true, kind);
+  });
+
+  it('is no kind at all when the master setting is off, however each of them is set', () => {
+    for (const kind of [...KINDS, 'something-new']) {
+      assert.equal(notificationAllowed(kind, { notifications: 'false' }), false, kind);
+      assert.equal(
+        notificationAllowed(kind, {
+          notifications: 'false',
+          notify_away: 'true',
+          notify_long_block: 'true',
+          notify_meetings: 'true',
+          notify_wrapup: 'true',
+          notify_week_review: 'true',
+          notify_idle: 'true',
+        }),
+        false,
+        `${kind}, with every other on`,
+      );
+    }
+  });
+
+  it('is each kind but the one that is off, for the setting of its own', () => {
+    const settingOf = {
+      away: 'notify_away',
+      'long-block': 'notify_long_block',
+      'meeting-start': 'notify_meetings',
+      'meeting-end': 'notify_meetings',
+      wrapup: 'notify_wrapup',
+      'week-review': 'notify_week_review',
+      idle: 'notify_idle',
+    };
+    assert.deepEqual(Object.fromEntries(NOTIFICATION_SETTINGS), settingOf);
+    for (const setting of new Set(Object.values(settingOf))) {
+      const settings = { [setting]: 'false' };
+      for (const kind of KINDS) {
+        // The kinds that share the setting go off with it, and nothing else does.
+        assert.equal(
+          notificationAllowed(kind, settings),
+          settingOf[kind] !== setting,
+          `${kind} with ${setting} off`,
+        );
+      }
+      assert.equal(notificationAllowed('something-new', settings), true, 'a kind with no setting');
+    }
+  });
+
+  it('turns both of the meeting prompts off with the one setting', () => {
+    const settings = { notify_meetings: 'false' };
+    assert.equal(notificationAllowed('meeting-start', settings), false);
+    assert.equal(notificationAllowed('meeting-end', settings), false);
+    assert.equal(notificationAllowed('wrapup', settings), true);
+  });
+
+  it('is governed by the master switch alone for a kind that has no setting of its own', () => {
+    assert.equal(notificationAllowed('something-new', { notify_idle: 'false' }), true);
+    assert.equal(notificationAllowed('something-new', { notifications: 'false' }), false);
+    // Not mistaken for something an object has.
+    for (const kind of ['constructor', 'toString', '__proto__', 'hasOwnProperty', '']) {
+      assert.equal(notificationAllowed(kind, {}), true, JSON.stringify(kind));
+      assert.equal(notificationAllowed(kind, { notifications: 'false' }), false, JSON.stringify(kind));
+    }
+  });
+
+  it('is turned off only by the text false: anything else leaves it on', () => {
+    for (const value of ['true', '', 'no', '0', 'off']) {
+      assert.equal(notificationAllowed('idle', { notify_idle: value }), true, JSON.stringify(value));
+      assert.equal(notificationAllowed('idle', { notifications: value }), true, JSON.stringify(value));
+    }
+    assert.equal(notificationAllowed('idle', { notify_idle: 'false' }), false);
+    assert.equal(notificationAllowed('idle', { notifications: 'false' }), false);
+  });
+
+  it('does not change the settings it is asked about', () => {
+    const settings = Object.freeze({ notifications: 'true', notify_idle: 'false' });
+    assert.equal(notificationAllowed('idle', settings), false);
+    assert.equal(notificationAllowed('away', settings), true);
+  });
+});
+
+describe('notifications that are turned off', () => {
+  /** An attention whose notifications go by `settings`, as the app has it, and may be changed as it goes. */
+  function withSettings(settings, options = {}) {
+    const asked = [];
+    const world = setup({
+      ...options,
+      notifyAllowed: (kind) => {
+        asked.push(kind);
+        return notificationAllowed(kind, settings);
+      },
+    });
+    return { ...world, asked };
+  }
+
+  it('does not notify about a prompt of a kind that is off, and lists it in the menu all the same', async () => {
+    const settings = { notify_idle: 'false' };
+    const { attention, Notification, asked } = withSettings(settings, { prompts: [idle, away] });
+
+    await attention.refresh();
+
+    assert.deepEqual(
+      Notification.created.map((n) => n.options.title),
+      [away.title],
+    );
+    assert.ok(asked.includes('idle') && asked.includes('away'), 'it was asked about each kind');
+    // The list, the dot and the menu are not the notification: they are what is waiting.
+    assert.equal(attention.pending(), 2);
+    assert.deepEqual(
+      attention.prompts().map((p) => p.id),
+      [idle.id, away.id],
+    );
+    assert.deepEqual(
+      section(attention).map((item) => item.label),
+      ['Needs attention', idle.title, away.title, undefined],
+    );
+  });
+
+  it('shows the same menu and the same dot as when nothing is turned off', async () => {
+    const quiet = withSettings({ notifications: 'false' }, { prompts: [away, wrapUp, idle] });
+    const loud = setup({ prompts: [away, wrapUp, idle] });
+
+    await quiet.attention.refresh();
+    await loud.attention.refresh();
+
+    assert.equal(quiet.attention.signature(), loud.attention.signature());
+    assert.equal(quiet.attention.pending(), loud.attention.pending());
+    assert.deepEqual(
+      quiet.attention.menuItems().map((item) => item.label),
+      loud.attention.menuItems().map((item) => item.label),
+    );
+    assert.equal(quiet.Notification.created.length, 0);
+    assert.equal(loud.Notification.created.length, 3);
+  });
+
+  it('counts it as told, so that turning the kind on while it waits does not tell about it later', async () => {
+    const settings = { notify_idle: 'false' };
+    const { attention, Notification } = withSettings(settings, { prompts: [idle] });
+
+    await attention.refresh();
+    assert.equal(Notification.created.length, 0);
+    assert.deepEqual(attention.notified(), [idle.id], 'counted as told');
+
+    settings.notify_idle = 'true';
+    await attention.refresh();
+    await attention.refresh();
+
+    assert.equal(Notification.created.length, 0, 'no stale notification now that it is on');
+    assert.equal(attention.pending(), 1, 'it is still waiting, and in the menu');
+  });
+
+  it('tells about the next prompt of that kind once it is turned on, and about each only once', async () => {
+    const settings = { notify_idle: 'false' };
+    const { world, attention, Notification } = withSettings(settings, { prompts: [idle] });
+    await attention.refresh();
+
+    settings.notify_idle = 'true';
+    const next = { ...idle, id: 'idle:2026-10-12T15:15:00.000Z', title: 'Nothing on the clock, again' };
+    world.prompts = [idle, next];
+    await attention.refresh();
+    await attention.refresh();
+
+    assert.deepEqual(
+      Notification.created.map((n) => n.options.title),
+      [next.title],
+    );
+  });
+
+  it('stops telling about a kind when it is turned off, and tells about the rest as before', async () => {
+    const settings = {};
+    const { world, attention, Notification } = withSettings(settings, { prompts: [away] });
+    await attention.refresh();
+    assert.equal(Notification.created.length, 1);
+
+    settings.notify_wrapup = 'false';
+    world.prompts = [away, wrapUp, review];
+    await attention.refresh();
+
+    assert.deepEqual(
+      Notification.created.map((n) => n.options.title),
+      [away.title, review.title],
+    );
+  });
+
+  it('does not tell about anything when the master switch is off, and not later when it is turned on', async () => {
+    const settings = { notifications: 'false' };
+    const { world, attention, Notification } = withSettings(settings, {
+      prompts: [away, longBlock, meetingStart, wrapUp, review, idle],
+    });
+
+    await attention.refresh();
+    assert.equal(Notification.created.length, 0);
+    assert.equal(attention.notified().length, 6, 'all six counted as told');
+
+    settings.notifications = 'true';
+    await attention.refresh();
+    assert.equal(Notification.created.length, 0, 'no burst');
+    assert.equal(attention.pending(), 6);
+
+    // What comes after is told about as it always was.
+    const fresh = { ...away, id: 'away:4', title: 'You were away 12 min' };
+    world.prompts = [...world.prompts, fresh];
+    await attention.refresh();
+    assert.deepEqual(
+      Notification.created.map((n) => n.options.title),
+      [fresh.title],
+    );
+  });
+
+  it('holds back a kind that no setting names when the master switch is off, and not otherwise', async () => {
+    const unnamed = { ...away, id: 'something:1', kind: 'something-new', title: 'Something new' };
+    const settings = { notify_away: 'false', notify_idle: 'false' };
+    const { attention, Notification } = withSettings(settings, { prompts: [unnamed] });
+
+    await attention.refresh();
+    assert.equal(Notification.created.length, 1, 'the master switch is on');
+
+    const off = withSettings({ notifications: 'false' }, { prompts: [unnamed] });
+    await off.attention.refresh();
+    assert.equal(off.Notification.created.length, 0);
+  });
+
+  it('decides when the prompt is first listed, whether or not you are there to be told', async () => {
+    const settings = { notify_wrapup: 'false' };
+    const { world, attention, Notification } = withSettings(settings, { prompts: [wrapUp, away] });
+
+    // Away from the machine: the one that is on waits for you, and the one that is off is not
+    // waited for, as it is not wanted.
+    world.locked = true;
+    await attention.refresh();
+    assert.equal(Notification.created.length, 0);
+    assert.deepEqual(attention.notified(), [wrapUp.id], 'the one that is off is counted as told');
+
+    // Back, and changed your mind about wrap-ups: the one that arrived while they were off stays quiet.
+    world.locked = false;
+    settings.notify_wrapup = 'true';
+    await attention.refresh();
+    assert.deepEqual(
+      Notification.created.map((n) => n.options.title),
+      [away.title],
+    );
+  });
+
+  it('counts a prompt that is off as told where the system cannot show a notification at all', async () => {
+    const settings = { notify_idle: 'false' };
+    const { attention, Notification } = withSettings(settings, {
+      prompts: [idle, away],
+      supported: false,
+    });
+
+    await attention.refresh();
+
+    assert.equal(Notification.created.length, 0);
+    assert.deepEqual(attention.notified(), [idle.id], 'only the one that is off');
+    assert.equal(attention.pending(), 2);
+  });
+
+  it('still takes down the notification of a prompt that has been answered, whatever the settings say now', async () => {
+    const settings = {};
+    const { world, attention, Notification } = withSettings(settings, { prompts: [away] });
+    await attention.refresh();
+    assert.equal(attention.heldCount(), 1);
+
+    settings.notifications = 'false';
+    world.prompts = [];
+    await attention.refresh();
+
+    assert.equal(Notification.created[0].closed, true);
+    assert.equal(attention.heldCount(), 0);
+  });
+
+  it('is asked the kind of the prompt, and what it answers is what is done', async () => {
+    const kinds = [];
+    const { attention, Notification } = setup({
+      prompts: [away, meetingStart, idle],
+      notifyAllowed: (kind) => {
+        kinds.push(kind);
+        return kind !== 'meeting-start';
+      },
+    });
+
+    await attention.refresh();
+
+    assert.deepEqual([...new Set(kinds)].sort(), ['away', 'idle', 'meeting-start']);
+    assert.deepEqual(
+      Notification.created.map((n) => n.options.title),
+      [away.title, idle.title],
+    );
+  });
+
+  it('is open when nothing is given to ask: every kind is notified about', async () => {
+    const { attention, Notification } = setup({ prompts: [away, longBlock, wrapUp, review, idle] });
+
+    await attention.refresh();
+
+    assert.equal(Notification.created.length, 5);
+  });
+
+  it('is open, and says so in the log, when the question cannot be answered', async () => {
+    const { attention, calls, Notification } = setup({
+      prompts: [away],
+      notifyAllowed: () => {
+        throw new Error('no settings');
+      },
+    });
+
+    await assert.doesNotReject(attention.refresh());
+
+    assert.equal(Notification.created.length, 1);
+    assert.equal(calls.logs.length, 1);
+    assert.match(String(calls.logs[0][0]), /could not tell if a notification is wanted/);
+  });
+
+  it('reads only a refusal as a refusal: a gate that answers nothing in particular is open', async () => {
+    const { attention, Notification } = setup({
+      prompts: [away],
+      notifyAllowed: () => undefined,
+    });
+
+    await attention.refresh();
+
+    assert.equal(Notification.created.length, 1);
+  });
+});
+
+/* ----------------------------------------------------------------- a sample notification */
+
+describe('the sample notification', () => {
+  /** A Notification that says it showed itself, or that it failed, as the platforms do. */
+  function sayingSo(event, ...args) {
+    const Base = notificationClass();
+    return class extends Base {
+      show() {
+        super.show();
+        this.emit(event, {}, ...args);
+      }
+    };
+  }
+
+  it('says FocusDesk, and that notifications are on, and is the same one every time', () => {
+    assert.deepEqual(TEST_NOTIFICATION, {
+      title: 'FocusDesk',
+      body: 'Notifications are on. This is what they look like.',
+    });
+  });
+
+  it('is shown at once, with that title and body and nothing else, and says it was', async () => {
+    const Notification = sayingSo('show');
+
+    const answer = await showTestNotification({ Notification });
+
+    assert.deepEqual(answer, { ok: true });
+    assert.equal(Notification.created.length, 1);
+    assert.deepEqual(Notification.created[0].options, {
+      title: 'FocusDesk',
+      body: 'Notifications are on. This is what they look like.',
+    });
+    assert.equal(Notification.created[0].shown, true);
+  });
+
+  it('is shown whatever the settings say, and wherever you are: it asks nobody', async () => {
+    // It is handed nothing but the class: no settings, no idle time, no lock.
+    const Notification = sayingSo('show');
+    assert.deepEqual(await showTestNotification({ Notification }), { ok: true });
+    assert.equal(Notification.created.length, 1);
+  });
+
+  it('is taken as shown when the system says nothing within a moment: not every platform does', async () => {
+    const Notification = notificationClass();
+
+    const answer = await showTestNotification({ Notification, waitMs: 5 });
+
+    assert.deepEqual(answer, { ok: true });
+    assert.equal(Notification.created[0].shown, true);
+  });
+
+  it('says why, when the system says that it failed to show it', async () => {
+    const Notification = sayingSo('failed', 'Notifications are turned off for FocusDesk');
+
+    const answer = await showTestNotification({ Notification });
+
+    assert.deepEqual(answer, { ok: false, error: 'Notifications are turned off for FocusDesk' });
+  });
+
+  it('says something, when it failed and does not say why', async () => {
+    const Notification = sayingSo('failed');
+
+    const answer = await showTestNotification({ Notification });
+
+    assert.equal(answer.ok, false);
+    assert.match(answer.error, /did not show/);
+  });
+
+  it('is not shown, and says so, where the system cannot show a notification', async () => {
+    const Notification = notificationClass({ supported: false });
+
+    const answer = await showTestNotification({ Notification });
+
+    assert.equal(answer.ok, false);
+    assert.match(answer.error, /cannot show notifications/);
+    assert.equal(Notification.created.length, 0);
+  });
+
+  it('is not shown where the system cannot say whether it can', async () => {
+    const Notification = notificationClass();
+    Notification.isSupported = () => {
+      throw new Error('not on this platform');
+    };
+
+    const answer = await showTestNotification({ Notification });
+
+    assert.equal(answer.ok, false);
+    assert.equal(Notification.created.length, 0);
+  });
+
+  it('says what went wrong, and does not throw, when it cannot be shown', async () => {
+    const Notification = notificationClass({ failsToShow: true });
+
+    const answer = await showTestNotification({ Notification });
+
+    assert.deepEqual(answer, { ok: false, error: 'this platform cannot show it' });
+  });
+
+  it('listens for the click and the close, so that it can be let go of', async () => {
+    const Notification = sayingSo('show');
+    await showTestNotification({ Notification });
+
+    const [notification] = Notification.created;
+    assert.equal(notification.listenerCount('click'), 1);
+    assert.equal(notification.listenerCount('close'), 1);
+    assert.doesNotThrow(() => {
+      notification.emit('click', {});
+      notification.emit('close', {});
+    });
   });
 });
