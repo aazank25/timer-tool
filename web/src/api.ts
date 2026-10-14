@@ -373,7 +373,15 @@ export const api = {
     request<{ deleted: string }>('DELETE', `/calendar/sources/${id}`),
   syncCalendars: () =>
     request<{
-      results: { sourceId: string; label: string; ok: boolean; events: number; error?: string }[];
+      results: {
+        sourceId: string;
+        label: string;
+        ok: boolean;
+        events: number;
+        /** Meetings of a feed that was read that could not be: what the calendar had of them is kept. */
+        skipped?: number;
+        error?: string;
+      }[];
       syncedAt: string;
     }>('POST', '/calendar/sync'),
   calendarEvents: (params: { day?: string; from?: string; to?: string }) =>

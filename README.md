@@ -507,7 +507,8 @@ meeting of exactly the same name in the same calendar, never another's), and a s
 never changes the project of a meeting that is there already: not one you gave it, not
 one you took off. You can log a meeting as time spent, which links the block to it so
 the meeting shows what was logged and cannot be logged twice, or add it to the day's
-plan.
+plan. A meeting that moves, by up to fourteen hours, keeps all of that: the time logged
+on it, its project, and what was done about its prompts.
 
 The feed is re-read in the background, soon after start-up and then every 15
 minutes while one is connected, so the meeting prompts are working from fresh
@@ -522,12 +523,17 @@ events, none of them in the window any more (a series that has ended), has its m
 A feed is read over https. An `http://` or `webcal://` address is read over https
 all the same, and plain http is kept for a feed on this computer. A feed that has
 moved is followed at most five times, only to an address the same rule allows, and
-never to this computer from another one. A feed larger than 10 MB (counted after
-it is unpacked) is refused: the sync says so, and nothing is removed. A meeting in
-a feed that cannot be read, or that goes past a limit (a series that would take too
-long to work out, say), is set aside rather than failing the feed: the rest are
-read, what the calendar already had of that meeting is kept as it was, and the sync
-counts how many it set aside, in its result and in the log.
+never to this computer from another one: not to its own names (`localhost`) or its
+own addresses (`127.x.x.x`, `0.x.x.x`, `::1`, `::`, and those written as IPv6
+addresses for IPv4 ones, such as `::ffff:127.0.0.1`), however they are written. A
+name is taken as it is written and not looked up, so a name that some DNS points at
+this computer is not told apart from any other. A feed larger than 100 MB (counted
+after it is unpacked) is refused: the sync says so, and nothing is removed. A meeting
+in a feed that cannot be read, or that goes past a limit (a series that would take
+too long to work out, a meeting that never ends, a line far longer than any real
+one), is set aside rather than failing the feed: the rest are read, what the calendar
+already had of that meeting is kept as it was, and the sync counts how many it set
+aside, in its result, in Settings and in the log.
 
 That URL is a secret — anyone holding it can read the calendar. It is stored in
 your local database, and only its host name is ever sent back to the browser, never

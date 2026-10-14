@@ -32,11 +32,13 @@ const SYNC_WINDOW_FORWARD_DAYS = 45;
 /** A feed that has not answered by now is not going to. */
 const FEED_TIMEOUT_MS = 20_000;
 /**
- * The most of a feed that is read: years of a busy calendar come to a few megabytes. It is
- * counted as the answer arrives, once it is unpacked, so that an answer that is small on the
- * wire and unpacks to gigabytes is stopped at the same point as a large plain one.
+ * The most of a feed that is read. Google and Outlook send a calendar whole, every meeting it
+ * has ever had, each with its attendees and its conference details, and years of a busy work
+ * calendar come to tens of megabytes. It is counted as the answer arrives, once it is unpacked,
+ * so that an answer that is small on the wire and unpacks to gigabytes is stopped at the same
+ * point as a large plain one.
  */
-const MAX_FEED_BYTES = 10 * 1024 * 1024;
+const MAX_FEED_BYTES = 100 * 1024 * 1024;
 /** Redirects followed in one read of a feed: a calendar that has moved is one or two away. */
 const MAX_REDIRECTS = 5;
 
@@ -73,13 +75,63 @@ export function redact(s: CalendarSource): RedactedSource {
   return { id: s.id, label: s.label, host, enabled: s.enabled };
 }
 
-/**
- * The hosts a feed is read from over plain http as well as https: this machine, where neither
- * the address nor the calendar crosses a network on the way.
- */
-const THIS_MACHINE = new Set(['127.0.0.1', 'localhost', '[::1]']);
+/** An IPv4 address as its four numbers, or null for anything else. */
+function ipv4(host: string): number[] | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return null;
+  const parts = m.slice(1).map(Number);
+  return parts.every((n) => n <= 255) ? parts : null;
+}
 
-const onThisMachine = (url: URL) => THIS_MACHINE.has(url.hostname);
+/** An IPv6 address as its eight 16-bit groups, an IPv4 address written at its end included, or null. */
+function ipv6(host: string): number[] | null {
+  if (!host.includes(':')) return null;
+  let text = host;
+  // An IPv4 address at the end, ::ffff:127.0.0.1, is the last two groups.
+  const tail = /^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(text);
+  if (tail) {
+    const v4 = ipv4(tail[2]!);
+    if (!v4) return null;
+    text = `${tail[1]}${((v4[0]! << 8) | v4[1]!).toString(16)}:${((v4[2]! << 8) | v4[3]!).toString(16)}`;
+  }
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const groups = (part: string) => (part ? part.split(':') : []);
+  const head = groups(halves[0]!);
+  const rest = halves.length === 2 ? groups(halves[1]!) : [];
+  const missing = 8 - head.length - rest.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+  const all = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill('0'), ...rest];
+  if (!all.every((g) => /^[0-9a-f]{1,4}$/i.test(g))) return null;
+  return all.map((g) => Number.parseInt(g, 16));
+}
+
+/** Whether an IPv4 address leads to this machine: 127.0.0.0/8, loopback, and 0.0.0.0/8, which goes to it too. */
+const local4 = (v4: number[]) => v4[0] === 127 || v4[0] === 0;
+
+/**
+ * Whether an address is this machine's: its own name for itself, or an address that leads back
+ * to it, written any way (127.0.0.0/8 and 0.0.0.0/8, :: and ::1, and those IPv4 addresses written
+ * as IPv6 ones, ::ffff:127.0.0.1 or ::127.0.0.1). It is decided on the address as it is written:
+ * a name is not looked up, so one that some DNS points at this machine is not told apart from
+ * the names of other machines.
+ */
+function onThisMachine(url: URL): boolean {
+  const host = url.hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  if (host === 'localhost' || host === 'localhost.' || /\.localhost\.?$/.test(host)) return true;
+  const v4 = ipv4(host);
+  if (v4) return local4(v4);
+  const v6 = ipv6(host);
+  if (!v6) return false;
+  const zeros = (from: number, to: number) => v6.slice(from, to).every((g) => g === 0);
+  // :: and ::1.
+  if (zeros(0, 7) && v6[7]! <= 1) return true;
+  // An IPv4 address in the last two groups, mapped (::ffff:0:0/96) or the older compatible form (::/96).
+  if (zeros(0, 5) && (v6[5] === 0xffff || v6[5] === 0)) {
+    return local4([v6[6]! >> 8, v6[6]! & 0xff, v6[7]! >> 8, v6[7]! & 0xff]);
+  }
+  return false;
+}
 
 /**
  * A feed's address is a secret, and over plain http it crosses the network for anyone on the
@@ -234,8 +286,8 @@ const WANTED = new Set([
   'SEQUENCE',
   'ATTENDEE',
 ]);
-/** The first letters of those, and of BEGIN and END: a line starting otherwise is not looked at. */
-const WANTED_FIRST = 'SDLREABsdlreab';
+/** The first letters of those, and of BEGIN and END, as codes: a line starting otherwise is not looked at. */
+const WANTED_FIRST = new Set([...'SDLREABsdlreab'].map((c) => c.charCodeAt(0)));
 /** The parts of a time zone definition node-ical reads. */
 const OBSERVANCES = new Set(['STANDARD', 'DAYLIGHT']);
 const OBSERVANCE_LINES = new Set(['DTSTART', 'TZOFFSETFROM', 'TZOFFSETTO', 'TZNAME', 'RRULE', 'RDATE']);
@@ -258,15 +310,44 @@ function property(line: string): Property | null {
   return m ? { name: m[1]!, params: m[2] ?? '', value: m[3]! } : null;
 }
 
+/** Whether a character can be in the name a line starts with, as node-ical's pattern reads one. */
+const nameChar = (c: number) =>
+  (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95 || c === 45;
+
+/** The name a line starts with: letters, digits, _ and -. */
+function nameOf(line: string): string {
+  let i = 0;
+  while (i < line.length && nameChar(line.charCodeAt(i))) i++;
+  return line.slice(0, i);
+}
+
+/**
+ * The longest line of a feed that is read whole. A real one is far shorter, but for a meeting's
+ * description, of which the app keeps only the start.
+ */
+const MAX_LINE_LENGTH = 64 * 1024;
+
 /**
  * The lines of `text` from `from` to `to`, unfolded as node-ical unfolds them: a line that
  * starts with a space or a tab goes on the end of the one before, less that first character.
+ *
+ * A feed has millions of lines, and the app reads a few of each meeting's, so a line is found
+ * without being copied out of the text: its first character and its name are read where they
+ * are, and the line itself is put together only when it is asked for. Even then only its first
+ * MAX_LINE_LENGTH + 1 characters are, and `long` says it goes on: nothing that long is needed
+ * whole, and a line read whole each time it was looked at would cost as much as it is long, which
+ * is how a single meeting could hold up all the others.
  */
 class Lines {
-  line = '';
   /** Where the line starts in the text, and where the one after it starts. */
   start = 0;
   end: number;
+  /** How long the line is once it is unfolded. */
+  length = 0;
+  /** Where the first line of the text that it takes ends, before its line break, and where the next starts. */
+  private stop = 0;
+  private second = 0;
+  private built: string | null = null;
 
   constructor(
     private readonly text: string,
@@ -279,66 +360,145 @@ class Lines {
   next(): boolean {
     if (this.end >= this.to) return false;
     this.start = this.end;
-    let line = this.physical();
+    this.built = null;
+    this.stop = this.step();
+    this.second = this.end;
+    this.length = this.stop - this.start;
     while (this.end < this.to) {
       const c = this.text.charCodeAt(this.end);
       if (c !== 32 && c !== 9) break;
-      line += this.physical().slice(1);
+      const from = this.end;
+      this.length += this.step() - from - 1;
     }
-    this.line = line;
     return true;
   }
 
-  /** The line of the text that starts at `end`, without its line break, moving `end` past it. */
-  private physical(): string {
+  /** The line goes on past MAX_LINE_LENGTH, and `line` holds only its start. */
+  get long(): boolean {
+    return this.length > MAX_LINE_LENGTH;
+  }
+
+  /** The first character of the line, as a code, or NaN for an empty line. */
+  get lead(): number {
+    if (this.stop > this.start) return this.text.charCodeAt(this.start);
+    // An empty line of the text, with folded lines after it.
+    return this.length ? this.line.charCodeAt(0) : Number.NaN;
+  }
+
+  /** The line, unfolded: the whole of it, or the first MAX_LINE_LENGTH + 1 characters of a long one. */
+  get line(): string {
+    this.built ??= this.build();
+    return this.built;
+  }
+
+  /** The name the line starts with, read off the text unless it goes on into a folded line. */
+  name(): string {
+    const { text, start, stop } = this;
+    for (let i = start; i < stop; i++) if (!nameChar(text.charCodeAt(i))) return text.slice(start, i);
+    return nameOf(this.line);
+  }
+
+  /** Move `end` past the line of the text that starts at it, and say where that line's text ends. */
+  private step(): number {
     const { text, to } = this;
     const from = this.end;
     const nl = text.indexOf('\n', from);
     if (nl === -1 || nl >= to) {
       this.end = to;
-      return text.slice(from, to);
+      return to;
     }
     this.end = nl + 1;
-    return text.slice(from, nl > from && text.charCodeAt(nl - 1) === 13 ? nl - 1 : nl);
+    return nl > from && text.charCodeAt(nl - 1) === 13 ? nl - 1 : nl;
+  }
+
+  private build(): string {
+    const { text } = this;
+    const most = MAX_LINE_LENGTH + 1;
+    let line = text.slice(this.start, Math.min(this.stop, this.start + most));
+    // Each folded line after the first, less the space or tab it starts with, as far as the mark.
+    for (let at = this.second; at < this.end && line.length < most; ) {
+      const nl = text.indexOf('\n', at);
+      const next = nl === -1 || nl >= this.end ? this.end : nl + 1;
+      const stop = nl === -1 || nl >= this.end ? this.end : nl > at && text.charCodeAt(nl - 1) === 13 ? nl - 1 : nl;
+      line += text.slice(at + 1, Math.min(stop, at + 1 + most - line.length));
+      at = next;
+    }
+    return line;
   }
 }
 
 /**
- * The components open at a line of a feed, outermost first, and how many of each are open, so
- * that an END for one that is not open is passed over at once rather than searched for.
+ * A component's name as a BEGIN or an END gives it. Names are the same in any case (RFC 5545),
+ * and a space or a tab some program left after one does not make it another.
+ */
+const componentName = (value: string) => value.trim().toUpperCase();
+
+/**
+ * The components open at a line of a feed, outermost first, and how many of each are open. An
+ * END closes the component it names and whatever was opened inside it and never closed. One that
+ * names no open component closes the innermost all the same, as node-ical's END does, but never
+ * one of the outermost `kept`: a stray END in a calendar does not end the calendar.
  */
 class Nesting {
   readonly open: string[] = [];
   private readonly counts = new Map<string, number>();
 
-  begin(name: string): void {
+  constructor(private readonly kept = 0) {}
+
+  begin(value: string): void {
+    const name = componentName(value);
     this.open.push(name);
     this.counts.set(name, (this.counts.get(name) ?? 0) + 1);
   }
 
   /**
-   * Close `name`, and whatever was opened inside it and never closed, telling `closed` of each,
-   * innermost first, with how many are open once it is. Nothing is closed when it is not open.
+   * End what `value` names, telling `closed` of each component that closes, innermost first, with
+   * how many are open once it has, and whether it is the one the END was for. A component closed
+   * only because an END for one outside it came first was never ended.
    */
-  end(name: string, closed: (name: string, depth: number) => void = () => {}): void {
-    if (!this.counts.get(name)) return;
+  end(value: string, closed: (name: string, depth: number, ended: boolean) => void = () => {}): void {
+    const name = componentName(value);
+    if (!this.counts.get(name)) {
+      if (this.open.length > this.kept) closed(this.pop(), this.open.length, true);
+      return;
+    }
     for (;;) {
-      const last = this.open.pop()!;
-      this.counts.set(last, this.counts.get(last)! - 1);
-      closed(last, this.open.length);
+      const last = this.pop();
+      closed(last, this.open.length, last === name);
       if (last === name) return;
     }
+  }
+
+  /** Close whatever is open inside the outermost `depth`, as never ended. */
+  unwind(depth: number): void {
+    while (this.open.length > depth) this.pop();
+  }
+
+  private pop(): string {
+    const last = this.open.pop()!;
+    this.counts.set(last, this.counts.get(last)! - 1);
+    return last;
   }
 }
 
 /** The day a date is written on, in days since 1970, or null when it does not start as a date. */
 function dayOf(value: string): number | null {
-  const m = /^(\d{4})(\d{2})(\d{2})/.exec(value);
-  return m ? Math.floor(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 86_400_000) : null;
+  if (value.length < 8) return null;
+  let digits = 0;
+  for (let i = 0; i < 8; i++) {
+    const c = value.charCodeAt(i) - 48;
+    if (c < 0 || c > 9) return null;
+    digits = digits * 10 + c;
+  }
+  const year = Math.floor(digits / 10_000);
+  const month = Math.floor(digits / 100) % 100;
+  return Math.floor(Date.UTC(year, month - 1, digits % 100) / 86_400_000);
 }
 
 /** A text value with its escapes undone, as node-ical undoes them. */
 function unescaped(value: string): string {
+  // Most have nothing to undo, and a feed has as many as it has entries.
+  if (!value.includes('\\') && value.charCodeAt(0) !== 34) return value;
   return value
     .replaceAll('\\,', ',')
     .replaceAll('\\;', ';')
@@ -351,11 +511,13 @@ function unescaped(value: string): string {
 function dated(p: Property): { zone: string | null; kind: string | null; value: string } {
   let zone: string | null = null;
   let kind: string | null = null;
+  if (!p.params) return { zone, kind, value: p.value };
   for (const param of p.params.split(';')) {
     const eq = param.indexOf('=');
     if (eq < 1) continue;
     const name = param.slice(0, eq).toUpperCase();
-    const value = param.slice(eq + 1).replace(/^"(.*)"$/u, '$1');
+    const quoted = param.charCodeAt(eq + 1) === 34;
+    const value = quoted ? param.slice(eq + 1).replace(/^"(.*)"$/u, '$1') : param.slice(eq + 1);
     if (name === 'TZID') zone = value;
     else if (name === 'VALUE') kind = value.toUpperCase();
   }
@@ -395,20 +557,38 @@ interface Entry {
   /** The days its start and end are written on. */
   start: number | null;
   end: number | null;
-  /** Its text does not say when it ends: it has a DURATION, or a date that is not one. */
+  /**
+   * Its start is a time in a zone, so that its series is worked out in that zone: one it names,
+   * or, for a time with no zone, perhaps one the feed defines. Not a date, or a time in UTC.
+   */
+  zoned: boolean;
+  /** Its start is a time of day, in a zone or in UTC, and not a date. */
+  timed: boolean;
+  /**
+   * Its text does not say when it ends: it has a DURATION, or a date that is not one, or a line
+   * that says when it is was too long to be read.
+   */
   open: boolean;
+  /**
+   * It cannot be read as it is written: it never ended (its END never came before another entry,
+   * or the calendar, began or ended), or a line of it that the app reads whole is longer than
+   * any real one. Its meeting is set aside.
+   */
+  broken: boolean;
 }
 
 /** What a recurrence rule says of how often, and for how long, a series goes on. */
 interface Rule {
+  /** DAILY, WEEKLY and so on, or what else the rule says. */
+  freq: string;
   /** The length of one period of it in days, or null for a frequency there is no such thing as. */
   periodDays: number | null;
   interval: number;
   count: number | null;
   /** The day of its UNTIL. */
   until: number | null;
-  /** How many dates a period has to be looked at for: its BY lists multiplied out. */
-  candidates: number;
+  /** Its BY lists, BYDAY and the rest, each as the values it gives. */
+  by: Map<string, string[]>;
   /**
    * It is of the kind calendars make: daily, weekly, monthly or yearly, on a handful of days,
    * and not at set hours, minutes or seconds.
@@ -425,7 +605,7 @@ const PERIOD_DAYS: Record<string, number> = {
   MONTHLY: 30,
   YEARLY: 365,
 };
-const BY_LISTS = ['BYMONTH', 'BYWEEKNO', 'BYYEARDAY', 'BYMONTHDAY', 'BYDAY', 'BYHOUR', 'BYMINUTE', 'BYSECOND'];
+const BY_LISTS = ['BYMONTH', 'BYWEEKNO', 'BYYEARDAY', 'BYMONTHDAY', 'BYDAY', 'BYHOUR', 'BYMINUTE', 'BYSECOND', 'BYSETPOS'];
 
 function ruleOf(text: string): Rule {
   const parts = new Map<string, string>();
@@ -436,78 +616,519 @@ function ruleOf(text: string): Rule {
   const freq = parts.get('FREQ') ?? '';
   const until = parts.get('UNTIL');
   const count = parts.has('COUNT') ? Number(parts.get('COUNT')) : null;
-  let candidates = 1;
+  const by = new Map<string, string[]>();
   let plain = freq === 'DAILY' || freq === 'WEEKLY' || freq === 'MONTHLY' || freq === 'YEARLY';
-  for (const by of BY_LISTS) {
-    const list = parts.get(by);
+  for (const name of BY_LISTS) {
+    const list = parts.get(name);
     if (list === undefined) continue;
-    const length = list.split(',').length;
-    candidates *= length;
-    if (by === 'BYHOUR' || by === 'BYMINUTE' || by === 'BYSECOND' || length > 12) plain = false;
+    const values = list.split(',').map((v) => v.trim());
+    by.set(name, values);
+    if (name === 'BYHOUR' || name === 'BYMINUTE' || name === 'BYSECOND' || values.length > 12) plain = false;
   }
   return {
+    freq,
     periodDays: PERIOD_DAYS[freq] ?? null,
     interval: Math.max(1, Math.floor(Number(parts.get('INTERVAL'))) || 1),
     count: count !== null && Number.isFinite(count) ? count : null,
     until: until ? dayOf(until) : null,
-    candidates,
+    by,
     plain,
   };
 }
 
+/** A BYDAY value as its place in the month or year (0 for every one) and its day of the week, or null. */
+function weekday(value: string): { ordinal: number; day: string } | null {
+  const m = /^([+-]?\d{1,2})?(MO|TU|WE|TH|FR|SA|SU)$/.exec(value);
+  return m ? { ordinal: m[1] ? Number(m[1]) : 0, day: m[2]! } : null;
+}
+
+/** Whether every value of a BY list is a whole number from `least` to `most`, or, where `signed`, from -`most` to -`least`. */
+function within(values: string[], least: number, most: number, signed = false): boolean {
+  return values.every((v) => {
+    if (!/^[+-]?\d{1,2}$/.test(v)) return false;
+    const n = Number(v);
+    return (n >= least && n <= most) || (signed && n <= -least && n >= -most);
+  });
+}
+
+const DAY_MS = 86_400_000;
+
 /**
- * The day a series ends by, where its rule says: its UNTIL, or, for one that counts its dates
- * and has a single date in each period, the day its last is due at the latest. A monthly one
- * on the 31st passes over the months that have no 31st, and a yearly one on 29 February over
- * all but the leap years, so for those the periods are counted over again.
+ * At most how many periods of a series go by from one of its dates to the next, where its rule
+ * makes sure of it: 1 where every period has a date; 2 where a month can lack the day (no two
+ * months in a row lack the 29th, 30th or 31st), 12 where the months are taken a few at a time
+ * and so can lack it longer, and 8 for a yearly one, which can be on 29 February. Null where it
+ * cannot be said: a month's fifth Friday, a Friday the 13th, the days of only some months in a
+ * series that runs daily, weekly or monthly, a place in a set (BYSETPOS), a week or a day of the
+ * year by its number. Times of day only add dates to a day that has one, so long as they are
+ * real times; under a day, a BY list leaves periods out.
  */
-function endOf(rule: Rule, start: number | null): number | null {
-  if (rule.until !== null) return rule.until;
-  if (rule.count === null || rule.candidates !== 1 || rule.periodDays === null || start === null) return null;
-  const stretch = rule.periodDays === 30 ? 2 : rule.periodDays === 365 ? 8 : 1;
-  return start + Math.max(0, rule.count - 1) * rule.interval * rule.periodDays * stretch;
+function periodsPerDate(rule: Rule, start: number): number | null {
+  const { by } = rule;
+  if (by.has('BYSETPOS') || by.has('BYWEEKNO') || by.has('BYYEARDAY')) return null;
+  const times = [['BYHOUR', 23], ['BYMINUTE', 59], ['BYSECOND', 60]] as const;
+  if (times.some(([name, most]) => by.has(name) && !within(by.get(name)!, 0, most))) return null;
+  const days = by.get('BYDAY')?.map(weekday);
+  if (days?.some((d) => d === null)) return null;
+  const monthDays = by.get('BYMONTHDAY');
+  if (monthDays && !within(monthDays, 1, 31, true)) return null;
+  /** Some value of BYDAY falls in every period: every Friday, or a first to `most`th one. */
+  const everyPeriodHasDay = (most: number) => days!.some((d) => d!.ordinal === 0 || Math.abs(d!.ordinal) <= most);
+  switch (rule.freq) {
+    case 'SECONDLY':
+    case 'MINUTELY':
+    case 'HOURLY':
+      return by.size ? null : 1;
+    case 'DAILY':
+      return by.has('BYDAY') || monthDays || by.has('BYMONTH') ? null : 1;
+    case 'WEEKLY':
+      return monthDays || by.has('BYMONTH') || (days && !days.every((d) => d!.ordinal === 0)) ? null : 1;
+    case 'MONTHLY': {
+      if (by.has('BYMONTH') || (days && monthDays)) return null;
+      if (days) return everyPeriodHasDay(4) ? 2 : null;
+      const dates = monthDays ? monthDays.map(Number) : [new Date(start * DAY_MS).getUTCDate()];
+      return rule.interval === 1 || dates.some((d) => Math.abs(d) <= 28) ? 2 : 12;
+    }
+    case 'YEARLY':
+      if (days && monthDays) return null;
+      if (days && !everyPeriodHasDay(by.has('BYMONTH') ? 4 : 52)) return null;
+      return 8;
+    default:
+      return null;
+  }
 }
 
 /**
- * Most periods a rule is worked out over, and how many dates it can be made to look at, before
- * a meeting with it is set aside rather than worked out. node-ical's rule engine skips ahead
- * to the window for a rule that does not count its dates, but one with a COUNT has to be
- * counted from its first period, and every period costs as many dates as its BY lists multiply
- * out to: a few such rules, written to, would hold the server's thread for many seconds, and
- * one call to the engine cannot be stopped part way through.
+ * The day a series ends by, where its rule says: its UNTIL, or, for one that counts its dates,
+ * the day its last is due at the latest, where its rule makes sure how often its dates come
+ * (see periodsPerDate). Where it does not, a count says nothing of when the series ends, and
+ * it is read to find out: a count taken as a date in every period would end a series of fifth
+ * Fridays years before its last one.
  */
+function endOf(rule: Rule, start: number | null): number | null {
+  if (rule.until !== null) return rule.until;
+  if (rule.count === null || rule.periodDays === null || start === null) return null;
+  const stretch = periodsPerDate(rule, start);
+  if (stretch === null) return null;
+  // The first date can be late in its period, and the last late in the one it falls in.
+  return start + (Math.max(0, rule.count - 1) * stretch + 1) * rule.interval * rule.periodDays;
+}
+
+/*
+ * What working out a series costs. node-ical's rule engine (rrule-temporal) works a series out
+ * for the window in one call, which cannot be stopped part way through, on the server's one
+ * thread, which in the desktop app is the window's as well. So a series that would take long to
+ * work out is set aside instead, and the rest of the feed is read as usual. What a rule costs was
+ * measured against the engine, rule by rule, from those calendars make to those written to
+ * hold a server up, and is estimated here from what the rule says. The estimate is never less
+ * than what the engine was measured to take, and is no more than a few times it for a rule
+ * that is quick to work out, so that those calendars make are always read. It adds up:
+ *
+ * - The periods of the window. The engine skips ahead to the window for a series that does not
+ *   count its dates, and then looks at every date of a period that a BY list gives (a yearly
+ *   one on every Monday looks at the whole year) at every time of day the rule gives.
+ * - The periods before the window, for a series that counts its dates (COUNT). The engine counts
+ *   most of those by arithmetic, where for a monthly or yearly series it first works out the
+ *   periods ahead until it has counted every date, up to 400 years of them; but where a BY list
+ *   leaves whole periods out (in October only, say) it looks at every period from the first, as
+ *   it does for a series at a time of day whose last date is more than 200 years on.
+ * - Time zones. For a series in a zone, the engine works out the zone's offsets for each year it
+ *   looks at, about a millisecond a year the first time. To find where a counted series stands
+ *   in the window it looks as far as its last date: five hundred years, for a yearly series
+ *   counted five hundred times.
+ */
+
+/** The most milliseconds a series is worth: one that would take longer to work out is set aside. */
+const MAX_SERIES_MS = 100;
+/**
+ * The most times of day a date of a series can come at (its BYHOUR, BYMINUTE and BYSECOND lists
+ * multiplied out). Calendars give a series one time of day, and a few is as many as anything
+ * gives; with many, the engine's costs go up in ways an estimate could not keep up with.
+ */
+const MAX_TIMES_OF_DAY = 4;
+/** Past this many periods the engine gives up on a series in any case, having spent the time. */
 const MAX_PERIODS = 10_000;
-const MAX_RULE_WORK = 50_000;
-const MAX_COUNTED_RULE_WORK = 6_000;
 /**
  * A series that counts its dates from before 1970 is set aside: dates that early are many
  * times slower to work out, and no meeting goes back that far.
  */
 const EARLIEST_COUNTED_START = 0;
+/** Microseconds the engine takes over a period it goes through one by one, by frequency. */
+const PERIOD_US: Record<string, number> = { SECONDLY: 3, MINUTELY: 3, HOURLY: 3, DAILY: 80, WEEKLY: 120, MONTHLY: 400, YEARLY: 1_000 };
+/** Microseconds for each date and time of day it looks at, and for each date it gives back. */
+const DATE_US = 5;
+/** Microseconds for each date it counts going through the periods, past the first of each. */
+const COUNTED_US = 60;
+/**
+ * The most periods the engine works out ahead for a monthly or yearly series it counts by
+ * arithmetic: those after which the calendar repeats itself.
+ */
+const AHEAD_PERIODS: Record<string, number> = { MONTHLY: 4_800, YEARLY: 400 };
+/** Microseconds it takes over each such period, each month of a year, and each date and time of day. */
+const AHEAD_PERIOD_US: Record<string, number> = { MONTHLY: 4, YEARLY: 10 };
+const AHEAD_MONTH_US = 5;
+const AHEAD_DATE_US = 0.6;
+/**
+ * How far from its first date, in days, the last date of a series at a time of day can be for the
+ * engine to count it by arithmetic; and microseconds for each date it counts going through the
+ * periods instead, in UTC, where it does so faster than in a zone.
+ */
+const ARITHMETIC_DAYS = 200 * 366;
+const COUNTED_IN_UTC_US: Record<string, number> = { SECONDLY: 5, MINUTELY: 5, HOURLY: 5, DAILY: 5, WEEKLY: 5, MONTHLY: 50, YEARLY: 100 };
+/** Milliseconds to work out a zone's offsets for a year, and for a year it only passes through. */
+const ZONE_YEAR_MS = 1;
+const ZONE_PAST_YEAR_MS = 0.1;
+const YEAR_DAYS = 365.25;
 
-/** Whether working a rule out for the window, from first to last, is more than a sync can do. */
-function tooCostly(rule: Rule, start: number | null, first: number, last: number): boolean {
-  if (rule.periodDays === null) return false;
-  const length = rule.periodDays * rule.interval;
-  if (rule.count === null) {
-    // Skipped ahead to the window, it has the window's periods to work out, and past
-    // MAX_PERIODS of them the engine gives up in any case.
-    const periods = Math.max(0, (last - Math.max(first, start ?? first)) / length);
-    return periods > MAX_PERIODS || periods * rule.candidates > MAX_RULE_WORK;
+/** How many times of day each date of a series comes at: its BY lists of hours, minutes and seconds. */
+function timesOfDay(rule: Rule): number {
+  const n = (name: string) => rule.by.get(name)?.length ?? 1;
+  switch (rule.freq) {
+    case 'SECONDLY':
+      return 1;
+    case 'MINUTELY':
+      return n('BYSECOND');
+    case 'HOURLY':
+      return n('BYMINUTE') * n('BYSECOND');
+    default:
+      return n('BYHOUR') * n('BYMINUTE') * n('BYSECOND');
   }
-  if (start === null || start < EARLIEST_COUNTED_START) return true;
-  const periods = Math.min(Math.max(0, (last - start) / length), MAX_PERIODS);
-  return periods * rule.candidates > MAX_COUNTED_RULE_WORK;
 }
 
+/** How many dates of a period the engine looks at, to find those that are the series'. */
+function datesLookedAt(rule: Rule): number {
+  const has = (name: string) => rule.by.has(name);
+  const days = has('BYDAY') || has('BYMONTHDAY') || has('BYYEARDAY') || has('BYWEEKNO');
+  switch (rule.freq) {
+    case 'WEEKLY':
+      return has('BYDAY') ? 7 : 1;
+    case 'MONTHLY':
+      return days ? 31 : 1;
+    case 'YEARLY':
+      return days ? 366 : (rule.by.get('BYMONTH')?.length ?? 1);
+    default:
+      return 1;
+  }
+}
+
+/** The days of the week of a BYDAY list, each once, and how many dates of a month or a year it gives at most. */
+function weekdaysOf(rule: Rule): { distinct: number; inMonth: number; inYear: number } {
+  const days = (rule.by.get('BYDAY') ?? []).map(weekday);
+  return {
+    distinct: new Set(days.map((d) => d?.day)).size,
+    // Each value is one date where it has a place (2TU), and every such day otherwise.
+    inMonth: days.reduce((sum, d) => sum + (d?.ordinal ? 1 : 5), 0),
+    inYear: days.reduce((sum, d) => sum + (d?.ordinal ? 1 : 53), 0),
+  };
+}
+
+/**
+ * At most how many dates one period of a series has, at all its times of day, before a place in
+ * a set (BYSETPOS) picks some of them out.
+ */
+function datesOfPeriod(rule: Rule): number {
+  const n = (name: string) => rule.by.get(name)?.length ?? 0;
+  const week = weekdaysOf(rule);
+  const months = n('BYMONTH');
+  let dates = 1;
+  if (rule.freq === 'WEEKLY') {
+    dates = n('BYDAY') || 1;
+  } else if (rule.freq === 'MONTHLY') {
+    // A day of the week falls on one in seven of the days of the month that a list gives.
+    const both = Math.ceil((week.distinct * n('BYMONTHDAY')) / 7);
+    if (n('BYDAY') && n('BYMONTHDAY')) dates = Math.min(week.inMonth, n('BYMONTHDAY'), both);
+    else dates = n('BYDAY') ? week.inMonth : n('BYMONTHDAY') || 1;
+  } else if (rule.freq === 'YEARLY') {
+    const inMonths = months || 12;
+    if (n('BYYEARDAY')) dates = n('BYYEARDAY');
+    else if (n('BYWEEKNO')) dates = n('BYWEEKNO') * (n('BYDAY') || 1);
+    else if (n('BYDAY') && n('BYMONTHDAY')) dates = Math.min(week.inYear, inMonths * n('BYMONTHDAY'));
+    else if (n('BYDAY')) dates = months ? months * week.inMonth : week.inYear;
+    else if (n('BYMONTHDAY')) dates = inMonths * n('BYMONTHDAY');
+    else dates = months || 1;
+  }
+  return Math.min(dates, 366) * timesOfDay(rule);
+}
+
+/** At most how many dates one period of a series has. */
+function mostDates(rule: Rule): number {
+  const places = rule.by.get('BYSETPOS')?.length;
+  return places ? Math.min(datesOfPeriod(rule), places) : datesOfPeriod(rule);
+}
+
+/**
+ * The fewest dates, at all its times of day, that every period of a series is sure to have, or 0
+ * where a period can have none. Every Monday is four dates of any month or more, the 13th one, and
+ * the second Tuesday one; but the 31st, a fifth Friday or 29 February is none in some periods, and
+ * a list of months leaves the others out of a daily, weekly or monthly series.
+ */
+function leastDates(rule: Rule, start: number): number {
+  const { by } = rule;
+  const days = (by.get('BYDAY') ?? []).map(weekday);
+  const monthDays = (by.get('BYMONTHDAY') ?? []).map(Number);
+  const months = by.get('BYMONTH');
+  if (by.has('BYWEEKNO') || by.has('BYYEARDAY') || days.some((d) => d === null)) return 0;
+  if (!within(by.get('BYMONTHDAY') ?? [], 1, 31, true) || !within(months ?? [], 1, 12)) return 0;
+  const times = [['BYHOUR', 23], ['BYMINUTE', 59], ['BYSECOND', 59]] as const;
+  if (times.some(([name, most]) => by.has(name) && !within(by.get(name)!, 0, most))) return 0;
+  /**
+   * How many of a list of days of the month, or of places in a set, every period has, where it has
+   * at least `most`: those from the start or those from the end, whichever are more, as the 1st
+   * and the 28th from the end can be one day.
+   */
+  const sure = (values: number[], most: number) =>
+    Math.max(new Set(values.filter((v) => v >= 1 && v <= most)).size, new Set(values.filter((v) => v <= -1 && v >= -most)).size);
+  /** The dates of the BYDAY list sure to be in a run of `weeks` whole weeks: every Monday is one a week, and a second Tuesday one in all. */
+  const onWeekdays = (weeks: number) => {
+    const every = new Set(days.filter((d) => d!.ordinal === 0).map((d) => d!.day));
+    const placed = days.filter((d) => d!.ordinal !== 0 && Math.abs(d!.ordinal) <= weeks && !every.has(d!.day));
+    return every.size * weeks + new Set(placed.map((d) => d!.day)).size;
+  };
+  const startDate = new Date(start * DAY_MS);
+  // Every day of the week, with days of the month, is those days of the month.
+  if (monthDays.length && new Set(days.filter((d) => d!.ordinal === 0).map((d) => d!.day)).size === 7) days.length = 0;
+  let dates = 0;
+  switch (rule.freq) {
+    case 'SECONDLY':
+    case 'MINUTELY':
+    case 'HOURLY':
+      // Under a day, any BY list leaves periods out.
+      return by.size ? 0 : 1;
+    case 'DAILY':
+      dates = days.length || monthDays.length || months ? 0 : 1;
+      break;
+    case 'WEEKLY':
+      if (monthDays.length || months || days.some((d) => d!.ordinal !== 0)) return 0;
+      dates = days.length ? onWeekdays(1) : 1;
+      break;
+    case 'MONTHLY':
+      if (months || (days.length && monthDays.length)) return 0;
+      if (days.length) dates = onWeekdays(4);
+      else if (monthDays.length) dates = sure(monthDays, 28);
+      else dates = startDate.getUTCDate() <= 28 ? 1 : 0;
+      break;
+    case 'YEARLY': {
+      const inMonths = months ? new Set(months.map(Number)).size : 12;
+      if (days.length && monthDays.length) return 0;
+      if (days.length) dates = months ? onWeekdays(4) * inMonths : onWeekdays(52);
+      else if (monthDays.length) dates = sure(monthDays, 28) * inMonths;
+      else if (startDate.getUTCDate() <= 28) dates = months ? inMonths : 1;
+      break;
+    }
+    default:
+      return 0;
+  }
+  const distinct = (name: string) => (by.has(name) ? new Set(by.get(name)!.map(Number)).size : 1);
+  dates *= distinct('BYHOUR') * distinct('BYMINUTE') * distinct('BYSECOND');
+  const places = by.get('BYSETPOS');
+  return places ? sure(places.map(Number), dates) : dates;
+}
+
+/**
+ * At most how many periods go by, over a run of them, from one date of a series to the next:
+ * 1 for a series with a date in every period, more where a BY list leaves periods out (12 for
+ * a daily series in one month of the year, about 3 for a month's fifth Friday, 4 for a yearly
+ * one on 29 February). Unlike periodsPerDate, it is an average and not a promise.
+ */
+function periodsApart(rule: Rule, start: number): number {
+  const { by } = rule;
+  const n = (name: string) => by.get(name)?.length ?? 0;
+  const days = (by.get('BYDAY') ?? []).map(weekday);
+  const monthDays = (by.get('BYMONTHDAY') ?? []).map(Number);
+  const startDate = new Date(start * DAY_MS);
+  const months = Math.min(12, n('BYMONTH'));
+  const distinct = weekdaysOf(rule).distinct;
+  /** A day of the week on given days of the month: the 13th is a Friday one month in seven. */
+  const onDates = (inMonths: number) => Math.min(14, Math.max(1, 7 / (distinct * monthDays.length * inMonths)));
+  let apart = 1;
+  switch (rule.freq) {
+    case 'DAILY':
+      if (months) apart *= 12 / months;
+      if (days.length) apart *= 7 / Math.min(7, distinct);
+      if (monthDays.length) apart *= (monthDays.every((d) => Math.abs(d) > 28) ? 62 : 31) / Math.min(31, monthDays.length);
+      break;
+    case 'WEEKLY':
+      if (months) apart *= 12 / months;
+      if (monthDays.length) apart *= 31 / Math.min(31, monthDays.length);
+      break;
+    case 'MONTHLY': {
+      const late = (dates: number[]) => dates.every((d) => Math.abs(d) > 28);
+      if (months) apart *= 12 / months;
+      if (days.length && monthDays.length) apart *= onDates(1);
+      else if (days.length && !days.some((d) => d && (d.ordinal === 0 || Math.abs(d.ordinal) <= 4))) apart *= 3;
+      else if (!days.length && late(monthDays.length ? monthDays : [startDate.getUTCDate()])) apart *= rule.interval > 1 ? 12 : 2;
+      if (n('BYSETPOS')) apart *= 2;
+      break;
+    }
+    case 'YEARLY': {
+      const leapDay =
+        (by.get('BYMONTH')?.join() === '2' && monthDays.length > 0 && monthDays.every((d) => d === 29)) ||
+        (!by.size && startDate.getUTCMonth() === 1 && startDate.getUTCDate() === 29);
+      if (leapDay) apart *= 4;
+      if (by.get('BYWEEKNO')?.every((w) => Math.abs(Number(w)) === 53)) apart *= 6;
+      if (by.get('BYYEARDAY')?.every((d) => Math.abs(Number(d)) === 366)) apart *= 4;
+      if (days.length && days.every((d) => d && Math.abs(d.ordinal) >= 53)) apart *= 6;
+      if (days.length && monthDays.length) apart *= onDates(months || 12);
+      if (n('BYSETPOS')) apart *= 2;
+      break;
+    }
+    default:
+      // Under a day, a BY list leaves periods out: every hour of a day that is one in a week, say.
+      if (by.size) apart *= 24 * 7;
+  }
+  return apart;
+}
+
+/**
+ * Whether the engine counts the dates of a counted series by arithmetic, rather than one period
+ * at a time: the rules its own shortcut takes, as it decides them. It takes none with a time of
+ * day given twice, nor a monthly one with a place in its set given twice, nor one every hour in a
+ * zone (whose clocks can go back an hour).
+ */
+function countedByArithmetic(rule: Rule, entry: Entry): boolean {
+  const has = (name: string) => rule.by.has(name);
+  const leavesPeriodsOut = has('BYMONTH') || has('BYMONTHDAY') || has('BYYEARDAY') || has('BYWEEKNO') || has('BYSETPOS');
+  const days = (rule.by.get('BYDAY') ?? []).map(weekday);
+  const placed = days.some((d) => d?.ordinal);
+  const oneTime = timesOfDay(rule) === 1;
+  const twice = (name: string) => {
+    const values = rule.by.get(name) ?? [];
+    return new Set(values.map(Number)).size !== values.length;
+  };
+  if (twice('BYHOUR') || twice('BYMINUTE') || twice('BYSECOND')) return false;
+  switch (rule.freq) {
+    case 'SECONDLY':
+    case 'MINUTELY':
+      return rule.by.size === 0;
+    case 'HOURLY':
+      return rule.by.size === 0 && !(entry.zoned && rule.interval === 1);
+    case 'DAILY':
+    case 'WEEKLY':
+      return !leavesPeriodsOut && !placed;
+    case 'MONTHLY':
+      return !has('BYYEARDAY') && !has('BYWEEKNO') && (has('BYDAY') || has('BYMONTHDAY')) && !twice('BYSETPOS');
+    case 'YEARLY': {
+      if (has('BYYEARDAY') || has('BYWEEKNO')) return false;
+      const dayLists = has('BYDAY') || has('BYMONTHDAY');
+      // With no list of days, only a series at one time of day; nor a place in a set by month.
+      if (!dayLists && (!oneTime || (has('BYMONTH') && has('BYSETPOS')))) return false;
+      // Nor the second Monday of the year and the like together with every Monday, or with dates.
+      return !(placed && !has('BYMONTH') && (has('BYMONTHDAY') || days.some((d) => d?.ordinal === 0)));
+    }
+    default:
+      return false;
+  }
+}
+
+const gcd = (a: number, b: number): number => (b ? gcd(b, a % b) : a);
+
+/** Microseconds the engine takes over a period of a counted series that it works out ahead (see costOf). */
+function aheadCost(rule: Rule): number {
+  const dates = datesOfPeriod(rule);
+  if (rule.freq === 'MONTHLY') return AHEAD_PERIOD_US.MONTHLY! + dates * AHEAD_DATE_US;
+  // A year is worked out twice over, a month at a time: those of its list, or all twelve for a list of days.
+  const months = rule.by.get('BYMONTH')?.length ?? (rule.by.has('BYDAY') || rule.by.has('BYMONTHDAY') ? 12 : 1);
+  return 2 * (AHEAD_PERIOD_US.YEARLY! + months * AHEAD_MONTH_US + dates * AHEAD_DATE_US);
+}
+
+/** An estimate, never too low, of the milliseconds the engine takes to work a series out for the window [first, last]. */
+function costOf(rule: Rule, entry: Entry, first: number, last: number): number {
+  const start = entry.start;
+  if (rule.periodDays === null || start === null) return 0;
+  if (timesOfDay(rule) > MAX_TIMES_OF_DAY) return Infinity;
+  const length = rule.periodDays * rule.interval;
+  const looked = datesLookedAt(rule) * timesOfDay(rule);
+  // The periods a counted series takes to give all its dates: that many at most where every
+  // period has a few, and about that many where some have none.
+  const least = leastDates(rule, start);
+  const toCount = rule.count === null ? Infinity : least > 0 ? Math.ceil(rule.count / least) + 1 : rule.count * periodsApart(rule, start);
+  // The day of its last date at the latest, and so the last day the engine can need to reach.
+  const reach = rule.count === null ? Infinity : start + Math.min(toCount * length, 1e8);
+  const end = Math.min(last, rule.until ?? Infinity, reach);
+  const fromDay = Math.max(first, start);
+  // The periods of the window, and one either side of it that the engine works out to find its edges.
+  const inWindow = end < fromDay ? 0 : (end - fromDay) / length + 2;
+  const given = Math.min(rule.count ?? Infinity, inWindow * mostDates(rule));
+  let us = given * DATE_US;
+  const zoneYears = (to: number) => (entry.zoned ? Math.max(0, to - start) / YEAR_DAYS : 0);
+  if (rule.count === null) {
+    if (inWindow > MAX_PERIODS) return Infinity;
+    us += inWindow * (PERIOD_US[rule.freq]! + looked * DATE_US);
+    if (entry.zoned) us += (Math.max(0, first - start) / YEAR_DAYS) * ZONE_PAST_YEAR_MS * 1000;
+    return us / 1000;
+  }
+  const before = Math.max(0, Math.min(last, reach) - start) / length;
+  if (start < EARLIEST_COUNTED_START || before > MAX_PERIODS) return Infinity;
+  // The dates up to the window, which it counts where it goes through the periods.
+  const counted = Math.min(rule.count, (before + 1) * mostDates(rule));
+  if (countedByArithmetic(rule, entry)) {
+    const repeat = AHEAD_PERIODS[rule.freq];
+    if (repeat) us += Math.min(repeat / gcd(rule.interval, repeat), toCount + 1) * aheadCost(rule);
+    us += zoneYears(reach) * ZONE_YEAR_MS * 1000;
+    // For a time of day, in UTC as in a zone, the engine gives the arithmetic up where the last
+    // date can be too far on, and goes through every period from the first after all.
+    if (!entry.timed || reach - start <= ARITHMETIC_DAYS) return us / 1000;
+    if (!entry.zoned) return (us + counted * COUNTED_IN_UTC_US[rule.freq]!) / 1000;
+  }
+  us += (before + 1) * (PERIOD_US[rule.freq]! + looked * DATE_US);
+  us += Math.max(0, counted - (before + 1)) * COUNTED_US;
+  us += zoneYears(end) * ZONE_YEAR_MS * 1000;
+  return us / 1000;
+}
+
+/** Whether working a series out for the window, from first to last, is more than a sync can do. */
+function tooCostly(rule: Rule, entry: Entry, first: number, last: number): boolean {
+  return costOf(rule, entry, first, last) > MAX_SERIES_MS;
+}
+
+/** The first and last days a read for [from, to] looks at, as days since 1970. */
+const windowDays = (from: Date, to: Date) => ({
+  first: Math.floor(from.getTime() / DAY_MS) - MARGIN_DAYS,
+  last: Math.floor(to.getTime() / DAY_MS) + MARGIN_DAYS,
+});
+
+/**
+ * What a read for [from, to] takes working out a series that starts at `dtstart` (its DTSTART
+ * line) by the rule `rule` to cost, in milliseconds, and whether it sets the series aside for it.
+ * For the tests, which hold the estimate to what the engine was measured to take.
+ */
+export function seriesCost(dtstart: string, rule: string, from: Date, to: Date): { ms: number; setAside: boolean } {
+  const text = ['BEGIN:VCALENDAR', 'BEGIN:VEVENT', 'UID:cost', dtstart, `RRULE:${rule}`, 'END:VEVENT', 'END:VCALENDAR'];
+  const [entry] = scan(text.join('\r\n'), Number.POSITIVE_INFINITY).entries;
+  if (!entry?.rule) return { ms: 0, setAside: false };
+  const { first, last } = windowDays(from, to);
+  return { ms: costOf(entry.rule, entry, first, last), setAside: tooCostly(entry.rule, entry, first, last) };
+}
+
+/**
+ * The lines of an entry that the app needs whole: what it is, when, and how it repeats. One
+ * longer than MAX_LINE_LENGTH is no real calendar's, and its meeting is set aside. The text of a
+ * title, a place or a description is only ever kept in part, and is cut instead.
+ */
+const READ_WHOLE = new Set(['UID', 'DTSTART', 'DTEND', 'DURATION', 'RRULE', 'EXDATE', 'RECURRENCE-ID', 'SEQUENCE']);
+
+/** The lines of an entry that say when it is, which are read as the feed is cut into entries. */
+const NOTED = new Set(['UID', 'RRULE', 'DURATION', 'DTSTART', 'DTEND', 'RECURRENCE-ID']);
+
+/** The first letters of those two sets' names, in capitals and in small letters, as codes. */
+const NOTED_FIRST = new Set([...'UuRrDdEeSs'].map((c) => c.charCodeAt(0)));
+
 /** Take what a line of an entry's own says of when the entry is. */
-function note(entry: Entry, line: string): void {
-  // Only these lines say anything of it, and the rest are passed over unread.
-  const lead = line.charAt(0);
-  if (!lead || !'UuRrDd'.includes(lead)) return;
-  const p = property(line);
+function note(entry: Entry, lines: Lines): void {
+  // Only lines named so say anything of it, and the rest are passed over unread.
+  if (!NOTED_FIRST.has(lines.lead)) return;
+  const upper = lines.name().toUpperCase();
+  if (lines.long) {
+    if (READ_WHOLE.has(upper)) {
+      // What it said cannot be known, so the entry cannot be judged to be outside the window.
+      entry.broken = true;
+      entry.open = true;
+    }
+    return;
+  }
+  if (!NOTED.has(upper)) return;
+  const p = property(lines.line);
   if (!p) return;
-  const upper = p.name.toUpperCase();
   if (upper === 'UID') {
     if (entry.uid === null && p.value) entry.uid = unescaped(p.value);
   } else if (upper === 'RRULE') {
@@ -518,13 +1139,18 @@ function note(entry: Entry, line: string): void {
     entry.open = true;
   } else if (p.name === 'DTSTART' || p.name === 'DTEND' || p.name === 'RECURRENCE-ID') {
     // In node-ical's way, only these exact names are dates: dtstart in small letters is text.
-    const day = dayOf(dated(p).value);
+    const d = dated(p);
+    const day = dayOf(d.value);
     if (p.name === 'RECURRENCE-ID') {
       entry.instanceOf = true;
       entry.instance ??= day;
     } else if (day === null) {
       entry.open = true;
     } else if (p.name === 'DTSTART') {
+      if (entry.start === null) {
+        entry.zoned = zonedTime(d);
+        entry.timed = !dateOnly(d);
+      }
       entry.start ??= day;
     } else {
       entry.end ??= day;
@@ -532,39 +1158,82 @@ function note(entry: Entry, line: string): void {
   }
 }
 
+/** Zone names that are UTC by another name, in which a series is worked out as it is in UTC. */
+const UTC_NAMES = new Set(['UTC', 'ETC/UTC', 'GMT', 'ETC/GMT', 'Z', 'ZULU', 'UNIVERSAL', 'ETC/UNIVERSAL']);
+
+/**
+ * Whether a date line's value is a time in a zone: one it names, or for one with no zone and no
+ * Z, perhaps one the feed defines. A date with no time is not, and nor is a time in UTC.
+ */
+function zonedTime(d: { zone: string | null; kind: string | null; value: string }): boolean {
+  if (dateOnly(d) || d.value.endsWith('Z')) return false;
+  return d.zone === null || !UTC_NAMES.has(d.zone.toUpperCase());
+}
+
+/** Whether a date line's value is a date with no time of day. */
+const dateOnly = (d: { kind: string | null; value: string }) => d.kind === 'DATE' || /^\d{8}$/.test(d.value);
+
+/** What cutting a feed into its entries came to. */
+interface Scan {
+  entries: Entry[];
+  zones: [number, number][];
+  /** The whole of the text was looked at: false when the time to read the feed ran out first. */
+  complete: boolean;
+}
+
+/** How many lines are looked at between two looks at the clock, which costs more than a line. */
+const LINES_BETWEEN_CLOCKS = 1024;
+
 /**
  * Find the entries and the time zone definitions of a feed: the VEVENTs and VTIMEZONEs directly
  * inside a VCALENDAR, each as the stretch of text it takes. Whatever else the feed has, to-dos,
- * journals or components of its own invention, is passed over.
+ * journals or components of its own invention, is passed over. A VEVENT can hold no other, so
+ * one that has not ended when the next begins never will: it is set aside, and cannot take the
+ * meetings after it with it. Stops at `deadline`, and then says the text was not all looked at.
  */
-function scan(text: string): { entries: Entry[]; zones: [number, number][] } {
+function scan(text: string, deadline: number): Scan {
   const entries: Entry[] = [];
   const zones: [number, number][] = [];
-  const nesting = new Nesting();
+  // The calendar itself is never closed by an END for something else.
+  const nesting = new Nesting(1);
   let entry: Entry | null = null;
   let zone = -1;
   const lines = new Lines(text, 0, text.length);
-  while (lines.next()) {
-    const line = lines.line;
-    const begins = line.startsWith('BEGIN');
-    if (begins || line.startsWith('END')) {
-      const p = property(line);
-      if (p && p.name === (begins ? 'BEGIN' : 'END')) {
-        if (!begins) {
-          nesting.end(p.value, (_closed, depth) => {
-            if (depth !== 1 || nesting.open[0] !== 'VCALENDAR') return;
-            if (entry) {
-              entry.to = lines.end;
-              entries.push(entry);
-              entry = null;
-            } else if (zone >= 0) {
-              zones.push([zone, lines.end]);
-              zone = -1;
-            }
-          });
-        } else {
+  /** The entry or the zone that is open is over at `to`, by its own END or not. */
+  const over = (to: number, ended: boolean) => {
+    if (entry) {
+      entry.to = to;
+      if (!ended) entry.broken = true;
+      entries.push(entry);
+      entry = null;
+    } else if (zone >= 0) {
+      zones.push([zone, to]);
+      zone = -1;
+    }
+  };
+  for (let n = 1; lines.next(); n++) {
+    if (n % LINES_BETWEEN_CLOCKS === 0 && performance.now() > deadline) return { entries, zones, complete: false };
+    const lead = lines.lead;
+    // B and E, of BEGIN and END: node-ical knows them only in capitals.
+    if (lead === 66 || lead === 69) {
+      const named = lines.name();
+      const begins = named === 'BEGIN';
+      if (begins || named === 'END') {
+        const p = property(lines.line);
+        if (p && p.name === named) {
+          const name = componentName(p.value);
+          if (!begins) {
+            nesting.end(name, (_closed, depth, ended) => {
+              if (depth === 1 && nesting.open[0] === 'VCALENDAR') over(lines.end, ended);
+            });
+            continue;
+          }
+          if ((name === 'VEVENT' || name === 'VTIMEZONE') && (entry || zone >= 0)) {
+            nesting.unwind(1);
+            over(lines.start, false);
+          }
           if (nesting.open.length === 1 && nesting.open[0] === 'VCALENDAR') {
-            if (p.value === 'VEVENT') {
+            if (name === 'VEVENT') {
               entry = {
                 from: lines.start,
                 to: lines.start,
@@ -574,20 +1243,25 @@ function scan(text: string): { entries: Entry[]; zones: [number, number][] } {
                 instance: null,
                 start: null,
                 end: null,
+                zoned: false,
+                timed: false,
                 open: false,
+                broken: false,
               };
-            } else if (p.value === 'VTIMEZONE') {
+            } else if (name === 'VTIMEZONE') {
               zone = lines.start;
             }
           }
-          nesting.begin(p.value);
+          nesting.begin(name);
+          continue;
         }
-        continue;
       }
     }
-    if (entry && nesting.open.length === 2) note(entry, line);
+    if (entry && nesting.open.length === 2) note(entry, lines);
   }
-  return { entries, zones };
+  // The text ended with an entry still open.
+  over(text.length, false);
+  return { entries, zones, complete: true };
 }
 
 /**
@@ -604,11 +1278,14 @@ function cleanZone(text: string, from: number, to: number): string[] | null {
     if (depth === 1 && OBSERVANCES.has(name)) out.push(`END:${name}`);
   };
   while (lines.next()) {
+    // A line of a zone that long is no zone's: the zone is not read.
+    if (lines.long) return null;
     const p = property(lines.line);
     if (!p) continue;
     if (p.name === 'BEGIN') {
-      nesting.begin(p.value);
-      if (nesting.open.length === 2 && OBSERVANCES.has(p.value)) out.push(`BEGIN:${p.value}`);
+      const part = componentName(p.value);
+      nesting.begin(part);
+      if (nesting.open.length === 2 && OBSERVANCES.has(part)) out.push(`BEGIN:${part}`);
       continue;
     }
     if (p.name === 'END') {
@@ -706,14 +1383,19 @@ interface Cleaned {
   borrows: boolean;
   /** It has something no real calendar has, such as a rule or a zone name far too long. */
   unreadable: boolean;
+  /** The time to read the feed ran out before it was all looked at. */
+  late: boolean;
 }
+
+/** The lines whose text the app keeps only the start of, and so can cut: see READ_WHOLE. */
+const CUT_TO_FIT = new Set(['SUMMARY', 'DESCRIPTION', 'LOCATION']);
 
 /**
  * The text node-ical is handed for a meeting: each of its entries under the meeting's key, with
  * only the lines the app reads (no alarms, nothing of the feed's own invention), and with only
  * the cancelled instances that fall in the window. And what that takes of the feed's limits.
  */
-function cleaned(text: string, m: Meeting, first: number, last: number): Cleaned {
+function cleaned(text: string, m: Meeting, first: number, last: number, deadline: number): Cleaned {
   const out: Cleaned = {
     lines: [],
     cancellations: 0,
@@ -721,6 +1403,7 @@ function cleaned(text: string, m: Meeting, first: number, last: number): Cleaned
     searches: new Set(),
     borrows: false,
     unreadable: false,
+    late: false,
   };
   const placed = (zone: string | null, value: string, kind: string | null) => {
     if (zone !== null) {
@@ -743,29 +1426,49 @@ function cleaned(text: string, m: Meeting, first: number, last: number): Cleaned
     nesting.begin('VEVENT');
     let kept = 0;
     let attendees = 0;
-    while (lines.next()) {
-      const line = lines.line;
-      const lead = line.charAt(0);
-      if (!lead || !WANTED_FIRST.includes(lead)) continue;
-      const p = property(line);
-      if (!p) continue;
-      if (p.name === 'BEGIN') {
-        nesting.begin(p.value);
-        continue;
+    for (let n = 1; lines.next(); n++) {
+      if (n % LINES_BETWEEN_CLOCKS === 0 && performance.now() > deadline) {
+        out.late = true;
+        return out;
       }
-      if (p.name === 'END') {
+      if (!WANTED_FIRST.has(lines.lead)) continue;
+      const named = lines.name();
+      if (named === 'BEGIN' || named === 'END') {
+        const p = property(lines.line);
+        if (!p) continue;
+        if (named === 'BEGIN') {
+          nesting.begin(p.value);
+          continue;
+        }
         nesting.end(p.value);
         if (!nesting.open.length) break;
         continue;
       }
       // Inside an alarm, or another component of the entry's: none of it is read.
       if (nesting.open.length > 1) continue;
-      const name = p.name.toUpperCase();
+      const name = named.toUpperCase();
       if (!WANTED.has(name)) continue;
+      if (name === 'ATTENDEE' && ++attendees > MAX_ATTENDEE_LINES) continue;
+      if (lines.long && !CUT_TO_FIT.has(name)) {
+        // A guest's line that long is no guest's, and is passed over. Every other line read whole
+        // has set the meeting aside already, as the feed was cut into entries.
+        if (name === 'ATTENDEE') continue;
+        out.unreadable = true;
+        break;
+      }
+      // Of a line that long, its start: the parameters and as much of the text as is kept anyway.
+      const line = lines.line;
+      const p = property(line);
+      if (!p) {
+        // Its parameters go on past the start, and what it says cannot be known.
+        if (lines.long) {
+          out.unreadable = true;
+          break;
+        }
+        continue;
+      }
       let keep = line;
-      if (name === 'ATTENDEE') {
-        if (++attendees > MAX_ATTENDEE_LINES) continue;
-      } else if (name === 'RRULE') {
+      if (name === 'RRULE') {
         if (p.value.length > MAX_RULE_LENGTH) out.unreadable = true;
       } else if (p.name === 'EXDATE') {
         const d = dated(p);
@@ -929,32 +1632,45 @@ function instancesOf(
 }
 
 /** What reading a feed came to. */
-interface Reading {
+export interface Reading {
   /** The meetings it puts in the window. */
   events: ParsedEvent[];
   /** How many of its meetings were set aside: they could not be read, or went past a limit. */
   skipped: number;
   /** The UIDs of those meetings: what the calendar has of them already is kept as it is. */
   keep: Set<string>;
+  /**
+   * The time to read the feed ran out before it had even been cut into its meetings, so it is not
+   * known which they are: what the calendar has of every one of them is kept as it is.
+   */
+  keepAll: boolean;
+}
+
+/**
+ * Whether the text has a calendar in it, from a BEGIN:VCALENDAR to an END:VCALENDAR, found by
+ * position alone, which takes the same time however the text is made, and without a copy of it.
+ */
+function wholeCalendar(text: string): boolean {
+  const begins = text.search(/BEGIN:VCALENDAR/i);
+  if (begins < 0) return false;
+  // A calendar ends the feed it is in, so the end of the text is looked at first.
+  const ends = /END:VCALENDAR/gi;
+  ends.lastIndex = Math.max(begins, text.length - 1024);
+  if (ends.test(text)) return true;
+  ends.lastIndex = begins;
+  return ends.test(text);
 }
 
 /**
  * Read a feed into the meetings it puts in [from, to], setting aside any that cannot be read
- * or that go past a limit, and saying which.
+ * or that go past a limit, and saying which. All of it, cutting the text into meetings included,
+ * is done in READ_BUDGET_MS, and what is left when that runs out is set aside.
  */
-function readFeed(icsText: string, from: Date, to: Date): Reading {
-  // A calendar from its BEGIN:VCALENDAR to its END:VCALENDAR, found by position alone, which
-  // takes the same time however the text is made.
-  const upper = icsText.toUpperCase();
-  const begins = upper.indexOf('BEGIN:VCALENDAR');
-  if (begins < 0 || upper.lastIndexOf('END:VCALENDAR') < begins) {
-    throw new Error('The feed did not contain a complete calendar');
-  }
+export function readFeed(icsText: string, from: Date, to: Date): Reading {
   const deadline = performance.now() + READ_BUDGET_MS;
-  const first = Math.floor(from.getTime() / 86_400_000) - MARGIN_DAYS;
-  const last = Math.floor(to.getTime() / 86_400_000) + MARGIN_DAYS;
-  const found = scan(icsText);
-  const zones = zoneDefinitions(icsText, found.zones);
+  if (!wholeCalendar(icsText)) throw new Error('The feed did not contain a complete calendar');
+  const { first, last } = windowDays(from, to);
+  const found = scan(icsText, deadline);
 
   // Meetings in the order the feed first gives them. An entry with no UID is a meeting of its own.
   const meetings: Meeting[] = [];
@@ -970,7 +1686,15 @@ function readFeed(icsText: string, from: Date, to: Date): Reading {
     if (entry.uid !== null) byUid.set(entry.uid, meeting);
   }
 
-  const reading: Reading = { events: [], skipped: 0, keep: new Set() };
+  const reading: Reading = { events: [], skipped: 0, keep: new Set(), keepAll: false };
+  if (!found.complete) {
+    // Which meetings the rest of the text holds is not known: none of the feed is read, and the
+    // count is of those it was seen to have, at the least one.
+    reading.keepAll = true;
+    reading.skipped = Math.max(1, meetings.length);
+    return reading;
+  }
+  const zones = zoneDefinitions(icsText, found.zones);
   const setAside = (m: Meeting) => {
     reading.skipped++;
     if (m.uid !== null) reading.keep.add(m.uid);
@@ -994,19 +1718,22 @@ function readFeed(icsText: string, from: Date, to: Date): Reading {
   const searches = new Set<string>();
   for (const m of wanted) {
     if (
+      performance.now() > deadline ||
+      m.entries.some((e) => e.broken) ||
       m.entries.length > MAX_ENTRIES_PER_MEETING ||
       entries + m.entries.length > MAX_ENTRIES ||
-      m.entries.some((e) => e.rule && tooCostly(e.rule, e.start, first, last))
+      m.entries.some((e) => e.rule && tooCostly(e.rule, e, first, last))
     ) {
       setAside(m);
       continue;
     }
     m.key = `e${read.length}`;
-    const c = cleaned(icsText, m, first, last);
+    const c = cleaned(icsText, m, first, last, deadline);
     const names = [...c.zones].filter((z) => !zoneNames.has(z));
     // A search costs something only where the feed has a definition of its own to search with.
     const looks = zones.length ? [...c.searches].filter((s) => !searches.has(s)) : [];
     if (
+      c.late ||
       c.unreadable ||
       cancellations + c.cancellations > MAX_CANCELLATIONS ||
       zoneNames.size + names.length > MAX_ZONE_NAMES ||
@@ -1075,6 +1802,7 @@ function readFeed(icsText: string, from: Date, to: Date): Reading {
  * and so stays as it is: a meeting that could not be read this time has not been cancelled.
  */
 function keptAsIs(reading: Reading, provider: string, id: string): boolean {
+  if (reading.keepAll) return true;
   if (!reading.keep.size) return false;
   // An id is the feed, the UID and the start, which is 24 characters.
   return reading.keep.has(id.slice(provider.length + 1, -25));
@@ -1345,6 +2073,103 @@ class Precedents {
   }
 }
 
+/** A meeting the window held when a sync began. */
+interface StoredMeeting {
+  id: string;
+  starts_at: string;
+  project_id: number | null;
+}
+
+/**
+ * How far a meeting can move and still be taken for the same meeting. A meeting's id is its
+ * feed, its UID and its start, so a meeting that moves goes from the calendar and comes back
+ * under another id, and what was linked to the old one would be lost: the time logged on it,
+ * the project given to it. Within this of each other, a meeting that goes and one of the same
+ * series (the same UID in the same feed) that arrives are the same meeting. It is as far as a
+ * meeting is moved within its day, and as far as an earlier version of the app stored the
+ * meetings of a series from their right times on a computer outside UTC: by the computer's
+ * offset from UTC, which is fourteen hours at the most.
+ */
+const SAME_MEETING_MS = 14 * 60 * 60_000;
+
+/**
+ * The meetings that go that are the same meetings as ones that arrive, by the id each arrives
+ * under. Each one that goes is paired with the one of its series that arrives nearest to it, and
+ * no meeting is paired twice; where two pairs are as near, the earlier meetings are paired first.
+ */
+function sameMeetings(
+  provider: string,
+  leaving: StoredMeeting[],
+  arriving: { id: string; startIso: string }[],
+): Map<string, StoredMeeting> {
+  // An id is the feed, the UID and the start, which is 24 characters.
+  const uidOf = (id: string) => id.slice(provider.length + 1, -25);
+  const series = new Map<string, { gone: { at: number; row: StoredMeeting }[]; come: { at: number; id: string }[] }>();
+  const of = (uid: string) => {
+    let found = series.get(uid);
+    if (!found) series.set(uid, (found = { gone: [], come: [] }));
+    return found;
+  };
+  for (const row of leaving) of(uidOf(row.id)).gone.push({ at: Date.parse(row.starts_at), row });
+  for (const { id, startIso } of arriving) {
+    const found = series.get(uidOf(id));
+    if (found) found.come.push({ at: Date.parse(startIso), id });
+  }
+  const pairs = new Map<string, StoredMeeting>();
+  for (const { gone, come } of series.values()) {
+    if (!gone.length || !come.length) continue;
+    gone.sort((a, b) => a.at - b.at);
+    come.sort((a, b) => a.at - b.at);
+    const near: [number, number, number][] = [];
+    for (let i = 0, from = 0; i < gone.length; i++) {
+      const at = gone[i]!.at;
+      while (from < come.length && come[from]!.at < at - SAME_MEETING_MS) from++;
+      for (let j = from; j < come.length && come[j]!.at <= at + SAME_MEETING_MS; j++) {
+        near.push([Math.abs(come[j]!.at - at), i, j]);
+      }
+    }
+    near.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+    const wentWith = new Set<number>();
+    const cameWith = new Set<number>();
+    for (const [, i, j] of near) {
+      if (wentWith.has(i) || cameWith.has(j)) continue;
+      wentWith.add(i);
+      cameWith.add(j);
+      pairs.set(come[j]!.id, gone[i]!.row);
+    }
+  }
+  return pairs;
+}
+
+/**
+ * Move what is about a meeting to it under its new id: the blocks logged on it, the plan items
+ * made of it, and what was done about its prompts, so that its time stays logged, it cannot be
+ * logged twice, and a prompt answered for it is not asked again.
+ */
+function moveLinks(moved: Map<string, StoredMeeting>): void {
+  if (!moved.size) return;
+  const to = new Map<string, string>();
+  for (const [id, was] of moved) to.set(was.id, id);
+  for (const table of ['sessions', 'plan_items']) {
+    const linked = db
+      .prepare(`SELECT DISTINCT calendar_event_id AS id FROM ${table} WHERE calendar_event_id IS NOT NULL`)
+      .all() as { id: string }[];
+    const move = db.prepare(`UPDATE ${table} SET calendar_event_id = ? WHERE calendar_event_id = ?`);
+    for (const { id } of linked) {
+      const now = to.get(id);
+      if (now) move.run(now, id);
+    }
+  }
+  // meeting-start:<id> and meeting-end:<id>, as the meeting prompts write them down.
+  const notes = db.prepare("SELECT key FROM prompt_state WHERE key LIKE 'meeting-%:%'").all() as { key: string }[];
+  const rename = db.prepare('UPDATE OR IGNORE prompt_state SET key = ? WHERE key = ?');
+  for (const { key } of notes) {
+    const colon = key.indexOf(':');
+    const now = to.get(key.slice(colon + 1));
+    if (now) rename.run(`${key.slice(0, colon + 1)}${now}`, key);
+  }
+}
+
 /**
  * Syncs run one at a time, whoever asks: the timer in the background, a click on Sync now,
  * or both at once. Two at a time would read the same feed twice and race to write the same
@@ -1430,8 +2255,13 @@ async function syncOnce(signal: AbortSignal): Promise<SyncResult[]> {
         // writes, in the same transaction, so nothing can change between the two.
         if (signal.aborted || !stillSyncs(source)) return false;
         const stamp = nowIso();
-        const current = new Set<string>();
-        const precedents = new Precedents(provider);
+        // What the window held before this sync: what of it the feed no longer has goes.
+        const before = db
+          .prepare(
+            'SELECT id, starts_at, project_id FROM calendar_events WHERE provider = ? AND starts_at >= ? AND starts_at <= ?',
+          )
+          .all(provider, from.toISOString(), to.toISOString()) as StoredMeeting[];
+        const writes: { e: ParsedEvent; id: string; startIso: string; isNew: boolean }[] = [];
         let tooLong = 0;
         for (const e of events) {
           const startIso = e.start.toISOString();
@@ -1443,9 +2273,34 @@ async function syncOnce(signal: AbortSignal): Promise<SyncResult[]> {
             tooLong++;
             continue;
           }
-          current.add(id);
-          const isNew = !known.get(id);
-          const projectId = isNew ? precedents.forNew(e.uid, e.title) : null;
+          writes.push({ e, id, startIso, isNew: !known.get(id) });
+        }
+        if (tooLong) {
+          console.warn(
+            `[calendar] "${source.label}" has ${tooLong} event(s) whose id is too long to keep; they are left out`,
+          );
+        }
+        const current = new Set(writes.map((w) => w.id));
+        // A calendar with no events in it at all, where it had meetings a moment ago, is more
+        // likely something wrong at the other end than every one of them cancelled, so what it
+        // had is kept.
+        const keepAll = noEventsAtAll && before.length > 0;
+        if (keepAll) {
+          console.warn(
+            `[calendar] "${source.label}" came back with no meetings at all, so the ${before.length} it had are kept`,
+          );
+        }
+        const leaving = keepAll
+          ? []
+          : before.filter((r) => !current.has(r.id) && !keptAsIs(reading, provider, r.id));
+        // A meeting that goes where one of its series arrives near it is that one, moved.
+        const moved = sameMeetings(provider, leaving, writes.filter((w) => w.isNew));
+        const precedents = new Precedents(provider);
+        for (const { e, id, startIso, isNew } of writes) {
+          // A meeting that was moved keeps the project it had, none included, as one that stayed
+          // does; only one that is new to the calendar takes one from the meetings like it.
+          const was = isNew ? moved.get(id) : undefined;
+          const projectId = !isNew ? null : was ? was.project_id : precedents.forNew(e.uid, e.title);
           upsert.run(
             id,
             provider,
@@ -1463,34 +2318,14 @@ async function syncOnce(signal: AbortSignal): Promise<SyncResult[]> {
           );
           precedents.wrote(id, e.title, startIso, projectId, isNew);
         }
+        moveLinks(moved);
         // Only now remove what the feed no longer has, so a meeting that was cancelled or
         // moved disappears while one that is still there keeps the project it was given by
         // hand. Clearing the whole window first used to wipe that on every sync. It comes
-        // after the writes above so that a moved instance can still inherit its project
-        // from the row it replaces.
-        const stale = db
-          .prepare(
-            'SELECT id FROM calendar_events WHERE provider = ? AND starts_at >= ? AND starts_at <= ?',
-          )
-          .all(provider, from.toISOString(), to.toISOString()) as { id: string }[];
-        if (tooLong) {
-          console.warn(
-            `[calendar] "${source.label}" has ${tooLong} event(s) whose id is too long to keep; they are left out`,
-          );
-        }
-        if (noEventsAtAll && stale.length) {
-          // A calendar with no events in it at all, where it had meetings a moment ago, is more
-          // likely something wrong at the other end than every one of them cancelled, so what it
-          // had is kept.
-          console.warn(
-            `[calendar] "${source.label}" came back with no meetings at all, so the ${stale.length} it had are kept`,
-          );
-          return true;
-        }
+        // after the writes above so that a new instance can still inherit its project from a
+        // meeting of its series that goes.
         const remove = db.prepare('DELETE FROM calendar_events WHERE id = ?');
-        for (const { id } of stale) {
-          if (!current.has(id) && !keptAsIs(reading, provider, id)) remove.run(id);
-        }
+        for (const { id } of leaving) remove.run(id);
         return true;
       })();
       if (wrote) {

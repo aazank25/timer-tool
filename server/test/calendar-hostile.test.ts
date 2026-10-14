@@ -279,6 +279,76 @@ describe('where a feed is read from', () => {
     }
   });
 
+  /** Where a feed on another machine that redirects to `location` is read from: the addresses asked, in turn. */
+  async function redirectedTo(location: string) {
+    const asked: string[] = [];
+    const answering = mock.method(globalThis, 'fetch', async (input: string | URL | Request) => {
+      asked.push(String(input instanceof Request ? input.url : input));
+      if (asked.length === 1) return new Response(null, { status: 302, headers: { location } });
+      return new Response(calendar(TOMORROW), { status: 200, headers: { 'content-type': 'text/calendar' } });
+    });
+    try {
+      await noFeeds();
+      (await calendarMod()).addSource('Work', 'https://calendar.example.com/private/SECRETTOKEN/basic.ics');
+      const [result] = await sync();
+      return { result, asked };
+    } finally {
+      answering.mock.restore();
+    }
+  }
+
+  it("refuses a redirect from another machine to this one however this machine's address is written", async () => {
+    for (const location of [
+      'https://127.0.0.2:9/',
+      'https://127.255.255.254/feed.ics',
+      'http://127.1:9/',
+      'https://0x7f000001:9/',
+      'https://2130706433/',
+      'https://0.0.0.0:9/',
+      'http://0.0.0.0:9/',
+      'https://0.1.2.3/',
+      'https://localhost:9/',
+      'https://LOCALHOST./',
+      'https://feed.localhost/',
+      'https://[::]:9/',
+      'https://[::1]:9/',
+      'http://[0:0:0:0:0:0:0:1]:9/',
+      'https://[::ffff:127.0.0.1]:9/',
+      'https://[::ffff:7f00:1]:9/',
+      'https://[::FFFF:7F00:0001]/',
+      'https://[0:0:0:0:0:ffff:127.0.0.2]/',
+      'https://[::ffff:0.0.0.0]/',
+      'https://[::127.0.0.1]/',
+      'https://[::7f00:1]/',
+      // Not bracketed, it is not an address at all.
+      'https://::1/',
+      'https://::ffff:127.0.0.1/',
+      '//127.0.0.2:9/feed.ics',
+    ]) {
+      const { result, asked } = await redirectedTo(location);
+
+      assert.equal(result?.ok, false, location);
+      assert.match(result?.error ?? '', /redirected to an address it cannot be read from/, location);
+      assert.equal(asked.length, 1, location);
+    }
+  });
+
+  it('follows a redirect from another machine to others, the owner\'s own network among them', async () => {
+    for (const location of [
+      'https://calendar.example.net/feed.ics',
+      'https://128.0.0.1/feed.ics',
+      'https://10.0.0.7/feed.ics',
+      'https://[::ffff:8.8.8.8]/feed.ics',
+      'https://[2001:db8::1]/feed.ics',
+      'https://localhost.example.com/feed.ics',
+    ]) {
+      const { result, asked } = await redirectedTo(location);
+
+      assert.deepEqual([result?.ok, result?.events], [true, 1], location);
+      assert.equal(asked.length, 2, location);
+    }
+  });
+
   it('follows five redirects in a row, and gives up at the sixth', async () => {
     // /hop/N redirects to /hop/N-1, and /hop/0 is the calendar.
     const feeds = await host((req, res) => {
@@ -322,10 +392,10 @@ describe('how much of a feed is read', () => {
   });
   afterEach(() => mock.timers.reset());
 
-  it('stops reading a feed larger than 10 MB, and keeps what the calendar had', async () => {
+  it('stops reading a feed larger than 100 MB, and keeps what the calendar had', async () => {
     let flood = false;
     const feeds = await host((_req, res) => {
-      if (flood) return pour(res, 11 * MB);
+      if (flood) return pour(res, 101 * MB);
       res.writeHead(200, { 'content-type': 'text/calendar' });
       res.end(calendar(TOMORROW));
     });
@@ -337,7 +407,7 @@ describe('how much of a feed is read', () => {
       const results = await sync();
 
       assert.equal(results[0]?.ok, false);
-      assert.match(results[0]?.error ?? '', /larger than 10 MB/);
+      assert.match(results[0]?.error ?? '', /larger than 100 MB/);
       assert.deepEqual(await titles(), ['Design crit']);
 
       // Nothing is the worse for it: the feed is read as usual once it is a calendar again.
@@ -351,9 +421,49 @@ describe('how much of a feed is read', () => {
     }
   });
 
-  it('does not start reading a feed that says it is larger than 10 MB', async () => {
+  it('reads a work calendar exported whole, years of meetings with their guests, past ten megabytes', async () => {
+    // What Google sends for every meeting: guests, the conference details and a reminder.
+    const guests = Array.from({ length: 6 }, (_, k) =>
+      `ATTENDEE;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;CN=person${k}@example.com;X-NUM-GUESTS=0:mailto:person${k}@example.com`);
+    const details = (i: number) => [
+      'ORGANIZER;CN=organizer@example.com:mailto:organizer@example.com',
+      ...guests,
+      `DESCRIPTION:Join with Google Meet: https://meet.google.com/abc-${i}-xyz\\nOr dial: (US) +1 555-0100 PIN: 123456789#\\n${'Agenda. '.repeat(100)}`,
+      'BEGIN:VALARM',
+      'ACTION:DISPLAY',
+      'TRIGGER:-P0DT0H10M0S',
+      'END:VALARM',
+    ];
+    const lines: string[] = [];
+    for (let i = 0; i < 8_000; i++) {
+      const day = new Date(Date.UTC(2020, 0, 6) + (i % 2_000) * 86_400_000).toISOString().slice(0, 10).replaceAll('-', '');
+      lines.push(...meeting(`past${i}@test`, `Past ${i}`, `${day}T090000Z`, `${day}T093000Z`, details(i)));
+    }
+    for (let i = 0; i < 20; i++) {
+      const day = new Date(Date.UTC(2026, 9, 13) + i * 86_400_000).toISOString().slice(0, 10).replaceAll('-', '');
+      lines.push(...on(`soon${i}@test`, `Soon ${i}`, day, 9, details(i)));
+    }
+    const text = calendar(lines);
     const feeds = await host((_req, res) => {
-      res.writeHead(200, { 'content-type': 'text/calendar', 'content-length': String(11 * MB) });
+      res.writeHead(200, { 'content-type': 'text/calendar' });
+      res.end(text);
+    });
+    try {
+      (await calendarMod()).addSource('Work', `${feeds.base}/feed.ics`);
+      assert.ok(Buffer.byteLength(text) > 12 * MB, `${Buffer.byteLength(text)} bytes`);
+
+      const [result] = await sync();
+
+      assert.deepEqual([result?.ok, result?.events, result?.skipped], [true, 20, 0]);
+      assert.equal((await titles()).length, 20);
+    } finally {
+      await feeds.close();
+    }
+  });
+
+  it('does not start reading a feed that says it is larger than 100 MB', async () => {
+    const feeds = await host((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/calendar', 'content-length': String(101 * MB) });
       // A start, and then nothing more: a reader that waited for the rest would wait out the timeout.
       res.write('BEGIN:VCALENDAR\r\n');
     });
@@ -365,27 +475,29 @@ describe('how much of a feed is read', () => {
 
       assert.ok(performance.now() - started < 2_000);
       assert.equal(results[0]?.ok, false);
-      assert.match(results[0]?.error ?? '', /larger than 10 MB/);
+      assert.match(results[0]?.error ?? '', /larger than 100 MB/);
     } finally {
       await feeds.close();
     }
   });
 
   it('counts a compressed feed as it is once unpacked', async () => {
-    // Twelve megabytes that compress to a few kilobytes on the wire.
-    const packed = zlib.gzipSync(calendar([`X-PAD:${'A'.repeat(12 * MB)}`]));
+    // A hundred and one megabytes that compress to a tenth of one on the wire.
+    const packed = zlib.gzipSync(
+      Buffer.concat([Buffer.from('BEGIN:VCALENDAR\r\nX-PAD:'), Buffer.alloc(101 * MB, 'A'), Buffer.from('\r\nEND:VCALENDAR\r\n')]),
+    );
     const feeds = await host((_req, res) => {
       res.writeHead(200, { 'content-type': 'text/calendar', 'content-encoding': 'gzip' });
       res.end(packed);
     });
     try {
       (await calendarMod()).addSource('Work', `${feeds.base}/feed.ics`);
-      assert.ok(packed.length < 100 * 1024);
+      assert.ok(packed.length < 200 * 1024);
 
       const results = await sync();
 
       assert.equal(results[0]?.ok, false);
-      assert.match(results[0]?.error ?? '', /larger than 10 MB/);
+      assert.match(results[0]?.error ?? '', /larger than 100 MB/);
     } finally {
       await feeds.close();
     }
@@ -417,7 +529,7 @@ describe('what a sync says when a feed fails', () => {
           res.writeHead(302, { location: req.url });
           return res.end();
         case 'flood':
-          return pour(res, 11 * MB);
+          return pour(res, 101 * MB);
         default:
           res.writeHead(200, { 'content-type': 'text/html' });
           return res.end('<html>Sign in again: SECRETTOKEN</html>');
@@ -437,7 +549,7 @@ describe('what a sync says when a feed fails', () => {
         'feed responded 500',
         'The feed redirected to an address it cannot be read from',
         'The feed redirected too many times',
-        'The feed is larger than 10 MB, more than a calendar is',
+        'The feed is larger than 100 MB, more than a calendar is',
         'The feed did not contain a complete calendar',
       ]);
       const said = errors.join('\n') + warned.mock.calls.map((c) => c.arguments.map(String).join(' ')).join('\n');
@@ -697,7 +809,7 @@ describe('a feed written to do harm', () => {
     const window = [new Date('2026-09-21T00:00:00Z'), new Date('2026-11-26T00:00:00Z')] as const;
     for (const [repeats, limitMs] of [
       [12_000, 200], // 200 KB
-      [600_000, 1_000], // 10 MB, as much as is read of a feed
+      [6_000_000, 1_000], // 100 MB, as much as is read of a feed
     ] as const) {
       const text = 'BEGIN:VCALENDAR\r\n'.repeat(repeats);
       const started = performance.now();
@@ -854,6 +966,152 @@ describe('a feed with something wrong in it', () => {
 
       assert.equal(long?.title.length, 300);
       assert.deepEqual(JSON.parse(long?.attendees ?? '[]'), ['N'.repeat(200)]);
+    } finally {
+      await close();
+    }
+  });
+
+  it('ends a meeting at an END with a space after it or in small letters, and reads the meetings after it', async () => {
+    const { close } = await feedOf(
+      calendar([
+        'BEGIN:VEVENT',
+        'UID:a@test',
+        'SUMMARY:First',
+        'DTSTART:20261013T090000Z',
+        'DTEND:20261013T100000Z',
+        'END:VEVENT ',
+        'BEGIN:VEVENT\t',
+        'UID:b@test',
+        'SUMMARY:Second',
+        'DTSTART:20261014T090000Z',
+        'DTEND:20261014T100000Z',
+        'RRULE:FREQ=WEEKLY;COUNT=2',
+        'BEGIN:VALARM ',
+        'ACTION:DISPLAY',
+        'TRIGGER:-PT10M',
+        'END:valarm',
+        'END:vevent',
+        'BEGIN:vevent',
+        'UID:c@test',
+        'SUMMARY:Third',
+        'DTSTART:20261015T090000Z',
+        'DTEND:20261015T100000Z',
+        'END:Vevent\t ',
+        ...on('d@test', 'Fourth', '20261016'),
+      ]),
+    );
+    try {
+      const [result] = await sync();
+
+      assert.deepEqual([result?.ok, result?.events, result?.skipped], [true, 5, 0]);
+      assert.deepEqual(
+        (await stored()).map((e) => [e.title, e.starts_at]),
+        [
+          ['First', '2026-10-13T09:00:00.000Z'],
+          ['Second', '2026-10-14T09:00:00.000Z'],
+          ['Third', '2026-10-15T09:00:00.000Z'],
+          ['Fourth', '2026-10-16T14:00:00.000Z'],
+          ['Second', '2026-10-21T09:00:00.000Z'],
+        ],
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it('sets aside a meeting that never ends, keeps what the calendar had of it, and reads the meetings after it', async () => {
+    const first = on('a@test', 'First', '20261013');
+    const second = on('b@test', 'Second', '20261014');
+    const third = on('c@test', 'Third', '20261015');
+    const { feed, close } = await feedOf(calendar([...first, ...second, ...third]));
+    try {
+      await sync();
+
+      // Second's END is lost, so Third begins while it is still open.
+      feed.text = calendar([...first, ...second.slice(0, -1), ...third]);
+      const [result] = await sync();
+      assert.deepEqual([result?.ok, result?.events, result?.skipped], [true, 2, 1]);
+      assert.deepEqual(
+        (await stored()).map((e) => e.title),
+        ['First', 'Second', 'Third'],
+      );
+
+      // Third's END is lost, so the calendar ends while it is still open.
+      feed.text = calendar([...first, ...second, ...third.slice(0, -1)]);
+      const [last] = await sync();
+      assert.deepEqual([last?.ok, last?.events, last?.skipped], [true, 2, 1]);
+      assert.deepEqual(
+        (await stored()).map((e) => e.title),
+        ['First', 'Second', 'Third'],
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it('sets aside, before reading it, a meeting with a line longer than any real one, and reads the rest at once', async () => {
+    // One line of eight megabytes, of parameters that never close their quotes.
+    const huge = `DTSTART${';X="'.repeat(2_000_000)}:20261013T090000Z`;
+    const ten = Array.from({ length: 10 }, (_, i) => on(`m${i}@test`, `Meeting ${i}`, '20261015', 8 + i)).flat();
+    const { close } = await feedOf(calendar(['BEGIN:VEVENT', 'UID:huge@test', 'SUMMARY:Huge', huge, 'END:VEVENT', ...ten]));
+    try {
+      const started = performance.now();
+      const [result] = await sync();
+      const took = performance.now() - started;
+
+      assert.deepEqual([result?.ok, result?.events, result?.skipped], [true, 10, 1]);
+      assert.ok(took < 1_000, `the sync took ${took.toFixed(0)} ms`);
+      assert.equal((await stored()).length, 10);
+    } finally {
+      await close();
+    }
+  });
+
+  it('cuts a description longer than any line is read to, and reads its meeting', async () => {
+    const { close } = await feedOf(
+      calendar([
+        ...on('long@test', 'Long agenda', '20261013', 14, [`DESCRIPTION:${'Agenda\\, minutes\\n'.repeat(20_000)}`]),
+        ...on('m@test', 'Planning', '20261014'),
+      ]),
+    );
+    try {
+      const [result] = await sync();
+
+      assert.deepEqual([result?.ok, result?.events, result?.skipped], [true, 2, 0]);
+      const [long] = await stored();
+      assert.equal(long?.description, 'Agenda, minutes\n'.repeat(250));
+    } finally {
+      await close();
+    }
+  });
+
+  it('reads none of a feed, and keeps all the calendar had of it, when the time runs out before it is cut into meetings', async () => {
+    const alpha = await makeProject('Alpha');
+    const many = Array.from({ length: 300 }, (_, i) => on(`m${i}@test`, `Meeting ${i}`, '20261015', 8 + (i % 10))).flat();
+    const { feed, close } = await feedOf(calendar([...on('a@test', 'Standup', '20261013'), ...many]));
+    try {
+      await sync();
+      const standup = (await stored()).find((e) => e.title === 'Standup')!;
+      await api.call('PATCH', `/calendar/events/${encodeURIComponent(standup.id)}`, { projectId: alpha });
+
+      // Standup is gone from the feed. The clock runs on past the time a read has while the feed
+      // is being cut up, as it would on a feed far too slow to cut up.
+      feed.text = calendar(many);
+      const real = performance.now.bind(performance);
+      const clock = mock.method(performance, 'now', () => real() + (/\bat scan\b/.test(new Error().stack ?? '') ? 60_000 : 0));
+      let result: SyncResult | undefined;
+      try {
+        [result] = await sync();
+      } finally {
+        clock.mock.restore();
+      }
+
+      assert.equal(result?.ok, true);
+      assert.equal(result?.events, 0);
+      assert.ok((result?.skipped ?? 0) >= 1, JSON.stringify(result));
+      const after = await stored();
+      assert.equal(after.length, 301);
+      assert.equal(after.find((e) => e.title === 'Standup')?.project_id, alpha);
     } finally {
       await close();
     }

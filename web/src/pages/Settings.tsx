@@ -192,10 +192,14 @@ function CalendarSettings() {
       const res = await api.syncCalendars();
       const failed = res.results.filter((r) => !r.ok);
       const total = res.results.reduce((a, r) => a + r.events, 0);
+      // Meetings a feed has that could not be read stay as they were, so say how many there are:
+      // without that, one that went missing or out of date would look like one that was synced.
+      const skipped = res.results.reduce((a, r) => a + (r.skipped ?? 0), 0);
+      const aside = skipped ? `; ${skipped} meeting${skipped === 1 ? '' : 's'} could not be read` : '';
       setMessage(
         failed.length
           ? `${failed.map((f) => `${f.label}: ${f.error}`).join('; ')}`
-          : `Synced ${total} event${total === 1 ? '' : 's'}.`,
+          : `Synced ${total} event${total === 1 ? '' : 's'}${aside}.`,
       );
       if (failed.length) setError(`${failed.length} feed(s) failed`);
       await qc.invalidateQueries({ queryKey: ['calendar'] });

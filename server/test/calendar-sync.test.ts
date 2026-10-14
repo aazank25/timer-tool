@@ -230,10 +230,30 @@ describe('syncing a calendar feed', () => {
     assert.equal((await eventsOn('2026-10-13'))[0]?.projectId, alpha);
   });
 
+  it('keeps the time logged on a meeting ahead of it through a sync', async () => {
+    await sync();
+    const [crit] = await eventsOn('2026-10-13');
+    // Logged the day before it, from its start, as Today's "Log as time spent" logs it.
+    const logged = await api.call('POST', '/sessions/manual', {
+      title: 'Design crit',
+      startedAt: crit!.startsAt,
+      minutes: 60,
+      calendarEventId: crit!.id,
+    });
+    assert.equal(logged.status, 201);
+
+    await sync();
+
+    const [after] = await eventsOn('2026-10-13');
+    assert.equal(after?.id, crit!.id);
+    assert.equal(after?.loggedSeconds, 3600);
+    assert.equal(logged.body.calendarEventId, after?.id);
+  });
+
   it('keeps the time logged on a meeting through a sync', async () => {
     await sync();
     const [crit] = await eventsOn('2026-10-13');
-    // Logged once it is over: time still to come cannot be logged.
+    // Logged once it is over, as the prompt at its end logs it.
     goTo(DESIGN_CRIT.end);
     const logged = await api.call('POST', '/sessions/manual', {
       title: 'Design crit',
@@ -535,6 +555,32 @@ describe('syncing a calendar feed', () => {
       ['2026-10-15', null],
       ['2026-10-20', alpha],
     ]);
+  });
+
+  it('counts a meeting renamed by a sync for its new title, and no longer its old one, for the meetings after it', async () => {
+    // A meeting on its own, given a project and then renamed: no other meeting of its series
+    // brings either title with it.
+    const once = (uid: string, summary: string, day: string): FeedEvent => ({
+      uid,
+      summary,
+      start: `${day}T09:00:00.000Z`,
+      end: `${day}T09:30:00.000Z`,
+    });
+    feeds.feed.set([once('x-1', 'Old name', '2026-10-13')]);
+    await sync();
+    await assign((await eventsOn('2026-10-13'))[0]!.id, alpha);
+
+    feeds.feed.set([once('x-1', 'New name', '2026-10-13'), once('y-1', 'New name', '2026-10-15'), once('z-1', 'Old name', '2026-10-16')]);
+    await sync();
+
+    assert.deepEqual(
+      (await eventsOn('2026-10-13', '2026-10-16')).map((e) => [e.title, e.projectId]),
+      [
+        ['New name', alpha],
+        ['New name', alpha],
+        ['Old name', null],
+      ],
+    );
   });
 
   it('does not give a new meeting the project of a meeting of the same title in another calendar', async () => {
