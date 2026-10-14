@@ -1,8 +1,9 @@
 /**
  * electron-builder's `afterPack` hook (`build.afterPack` in package.json). On a macOS build with
  * no signing identity in play it signs the app "ad hoc", so that a copy somebody else downloads
- * can be opened. It is .cjs because the package is `"type": "module"`, and electron-builder would
- * load a .js hook as a module; a .cjs file it simply requires.
+ * can be opened. Before that, on every platform, it sets Electron's fuses (see Fuses, below). It
+ * is .cjs because the package is `"type": "module"`, and electron-builder would load a .js hook
+ * as a module; a .cjs file it simply requires.
  *
  * Why. Packaging changes what Electron's own signature covers (the executable is renamed,
  * Info.plist is rewritten, app.asar is added), and with no identity to sign with electron-builder
@@ -31,18 +32,148 @@
  * identity, so it does not turn this off: an app that would otherwise go out unsigned is what
  * this is for.
  *
- * Where. electron-builder 25.1.8 calls the hook in PlatformPackager.doPack, once the app is
- * assembled and before its own signing step (doSignAfterPack), and makes the disk image after
- * both: the image holds the app as signed here.
+ * Fuses. Electron has switches built into its binary, its fuses, which turn off what the app has
+ * no use for and anything else on the computer could put to use (see FUSES). They are set in every
+ * app, whoever signs it (this hook, electron-builder, or nobody), and before anything does:
+ * setting one changes the binary, and a signature made before that would no longer match it. Each
+ * is read back once it is set. The build fails if one reads otherwise, or if they cannot be set at
+ * all: an app is not handed over without the fuses it was meant to have.
  *
- * How. `codesign --force --deep --sign - <the .app>`, then
- * `codesign --verify --deep --strict --verbose=2 <the .app>`. Anything that goes wrong in either
- * throws, and that fails the build, codesign not being there included (which is what building a
- * Mac app on another system gets: codesign comes with macOS). An app that could not be signed is
- * not handed over as if it were.
+ * Where. electron-builder 25.1.8 calls the hook in PlatformPackager.doPack, once the app is
+ * assembled (app.asar, and the hash of it that Electron checks, included) and before its own
+ * signing step (doSignAfterPack), and makes the disk image after both: the image holds the app as
+ * signed here.
+ *
+ * How. The fuses with @electron/fuses, in the .app (the framework inside it), the .exe, or the
+ * Linux executable. Then, for an ad-hoc signature, `codesign --force --deep --sign - <the .app>`,
+ * then `codesign --verify --deep --strict --verbose=2 <the .app>`. Anything that goes wrong in
+ * either throws, and that fails the build, codesign not being there included (which is what
+ * building a Mac app on another system gets: codesign comes with macOS). An app that could not be
+ * signed is not handed over as if it were.
  */
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
+
+/**
+ * Electron's fuses as the app ships with them, by their names in @electron/fuses (true is on).
+ * Those not named are left as Electron has them.
+ *
+ *   RunAsNode                              off. ELECTRON_RUN_AS_NODE=1 would turn the app into a
+ *                                          plain Node.js for whoever starts it so. Nothing in the
+ *                                          app forks a child process, which is what needs it.
+ *   EnableNodeOptionsEnvironmentVariable   off. NODE_OPTIONS and NODE_EXTRA_CA_CERTS would let
+ *                                          whatever starts the app set Node's options in it.
+ *   EnableNodeCliInspectArguments          on. The smoke test (scripts/smoke.mjs) drives the
+ *                                          packaged app with Playwright, which starts it with
+ *                                          --inspect=0 and works it through the inspector.
+ *   OnlyLoadAppFromAsar                    on. The app is loaded from app.asar and nowhere else,
+ *                                          not from an app folder put beside it.
+ *   EnableEmbeddedAsarIntegrityValidation  on, where Electron can check it (see fusesFor):
+ *                                          app.asar has to match the hash electron-builder made
+ *                                          of it, or the app does not start.
+ *   GrantFileProtocolExtraPrivileges       off. The app loads nothing from file://.
+ *   EnableCookieEncryption                 off, as Electron has it. The app keeps no cookies. On a
+ *                                          Mac the key would be kept in the Keychain, for an app
+ *                                          signed ad hoc, whose signature every build changes, so
+ *                                          macOS would ask for the login password after every
+ *                                          update to let the new copy read it.
+ */
+const FUSES = Object.freeze({
+  RunAsNode: false,
+  EnableNodeOptionsEnvironmentVariable: false,
+  EnableNodeCliInspectArguments: true,
+  OnlyLoadAppFromAsar: true,
+  EnableEmbeddedAsarIntegrityValidation: true,
+  GrantFileProtocolExtraPrivileges: false,
+  EnableCookieEncryption: false,
+});
+
+/**
+ * The fuses for an app for `platform` (electron-builder's `electronPlatformName`), built on
+ * `host`: FUSES, with the check of app.asar on only where Electron makes it and finds the hash to
+ * check against. That is a Mac app, whose hash is in its Info.plist, and a Windows app built on
+ * Windows. electron-builder records a Windows app's hash under the file's path written the way the
+ * machine that builds it writes paths, and Electron looks it up as resources\app.asar, so a
+ * Windows app built on a Mac or on Linux would find none and refuse to start. Electron checks
+ * nothing on Linux.
+ *
+ * @param {string} platform
+ * @param {string} [host] The system the build runs on, as `process.platform` says it.
+ * @returns {Record<string, boolean>}
+ */
+function fusesFor(platform, host = process.platform) {
+  const checked =
+    platform === 'darwin' || platform === 'mas' || (platform === 'win32' && host === 'win32');
+  return { ...FUSES, EnableEmbeddedAsarIntegrityValidation: checked };
+}
+
+/**
+ * Where the fuses are in an app electron-builder has packed: the .app on a Mac (@electron/fuses
+ * finds Electron's framework inside it), the .exe on Windows, and the executable on Linux
+ * (build.linux.executableName).
+ */
+function electronBinary({ appOutDir, packager, electronPlatformName: platform }) {
+  const name = packager.appInfo.productFilename;
+  if (platform === 'darwin' || platform === 'mas') return path.join(appOutDir, `${name}.app`);
+  if (platform === 'win32') return path.join(appOutDir, `${name}.exe`);
+  return path.join(appOutDir, packager.executableName);
+}
+
+/**
+ * Set `fuses` (as FUSES has them) in the Electron binary at `binary`, read them back, and return
+ * what the binary then says of every fuse it has, by name: 'on', 'off' or 'removed'. Throws, and
+ * changes nothing, when a name is not a fuse, when the binary has no fuses, and when Electron has
+ * removed one of them (what it did is then fixed, and the setting is to go); and throws when one
+ * reads back other than it was set.
+ *
+ * @electron/fuses is a module, and is a devDependency of desktop/: it is loaded only here, when
+ * there is an app to set fuses in, so the tests, which run with the root install alone, never
+ * need it.
+ */
+async function setFuses(binary, fuses) {
+  let lib;
+  try {
+    lib = await import('@electron/fuses');
+  } catch (err) {
+    throw new Error(
+      `@electron/fuses could not be loaded (${err.message}). It is installed with the rest of desktop/: npm ci there.`,
+    );
+  }
+  const { flipFuses, getCurrentFuseWire, FuseState, FuseV1Options, FuseVersion } = lib;
+  const config = { version: FuseVersion.V1 };
+  for (const [name, on] of Object.entries(fuses)) {
+    if (typeof FuseV1Options[name] !== 'number') throw new Error(`There is no fuse named ${name}`);
+    config[FuseV1Options[name]] = on;
+  }
+  // @electron/fuses writes over a removed fuse with a warning, and it would then read as set.
+  const before = await getCurrentFuseWire(binary);
+  for (const name of Object.keys(fuses)) {
+    if (before[FuseV1Options[name]] === FuseState.REMOVED) {
+      throw new Error(`Electron has removed the fuse ${name} (in ${binary}): take it out of FUSES`);
+    }
+  }
+  await flipFuses(binary, config);
+
+  const wire = await getCurrentFuseWire(binary);
+  const word = {
+    [FuseState.ENABLE]: 'on',
+    [FuseState.DISABLE]: 'off',
+    [FuseState.REMOVED]: 'removed',
+  };
+  const states = {};
+  for (let i = 0; i in wire; i++) {
+    states[FuseV1Options[i] ?? `fuse ${i}`] = word[wire[i]] ?? `unknown (${wire[i]})`;
+  }
+  for (const [name, on] of Object.entries(fuses)) {
+    const wanted = on ? 'on' : 'off';
+    if (states[name] !== wanted) {
+      throw new Error(
+        `The fuse ${name} reads ${states[name] ?? 'missing'} in ${binary}, after it was set ${wanted}`,
+      );
+    }
+  }
+  return states;
+}
 
 /** A setting that is there and not blank: electron-builder reads a blank CSC_NAME as not set, too. */
 const given = (value) => typeof value === 'string' && value.trim() !== '';
@@ -123,13 +254,25 @@ function codesign(args) {
 
 /**
  * The hook. electron-builder passes the context of one packed app and nothing else; the second
- * argument is for the tests, which cannot run codesign and must not read the environment of
- * whoever runs them.
+ * argument is for the tests, which cannot run codesign or change an Electron binary, and must not
+ * read the environment of whoever runs them.
  */
 async function afterPack(
   context,
-  { env = process.env, run = codesign, clear = clearDetritus, log = console.log } = {},
+  {
+    env = process.env,
+    run = codesign,
+    clear = clearDetritus,
+    fuse = setFuses,
+    log = console.log,
+  } = {},
 ) {
+  // First, on every platform: a signature, here or electron-builder's, has to be made after them.
+  const binary = electronBinary(context);
+  const states = await fuse(binary, fusesFor(context.electronPlatformName));
+  log(`  • fuses set  ${binary}`);
+  for (const [name, state] of Object.entries(states)) log(`      ${name} ${state}`);
+
   const { sign, reason } = decideAdHocSigning({
     platform: context.electronPlatformName,
     env,
@@ -153,4 +296,4 @@ async function afterPack(
   }
 }
 
-module.exports = { afterPack, decideAdHocSigning };
+module.exports = { afterPack, decideAdHocSigning, electronBinary, FUSES, fusesFor, setFuses };

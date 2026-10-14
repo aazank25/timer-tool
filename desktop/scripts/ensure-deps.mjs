@@ -55,16 +55,18 @@ export function whyInstall(desktop, wanted = wantedNote(desktop)) {
 }
 
 /**
- * The packages whose install scripts the app needs: Electron's downloads Electron itself, and
- * esbuild's checks its binary for this platform. Every other install script is skipped, and the
- * one that matters is better-sqlite3's. It carries a prebuilt binary for every platform, which is
- * what it loads (its lib/<platform>-<arch>.js), but it also ships a binding.gyp, and for that npm
- * ci compiles it from source: npm honours the package's `gypfile: false` only when it reads the
- * package.json, and ci goes by the lockfile. Compiling needs Python and a C++ compiler (Xcode's
- * tools, Visual Studio) and fails where they are missing or too new, as on GitHub's Windows
- * machines, all for a build that nothing loads.
+ * The packages whose install scripts the app needs: esbuild's, which checks its binary for this
+ * platform. Electron's package has none. It downloads Electron itself the first time it is
+ * started (`npm start` does that, and npm ci, which empties node_modules, means a download the
+ * next time), and electron-builder downloads a copy of its own to package. Every other install
+ * script is skipped, and the one that matters is better-sqlite3's. It carries a prebuilt binary
+ * for every platform, which is what it loads (its lib/<platform>-<arch>.js), but it also ships a
+ * binding.gyp, and for that npm ci compiles it from source: npm honours the package's
+ * `gypfile: false` only when it reads the package.json, and ci goes by the lockfile. Compiling
+ * needs Python and a C++ compiler (Xcode's tools, Visual Studio) and fails where they are missing
+ * or too new, as on GitHub's Windows machines, all for a build that nothing loads.
  */
-export const INSTALL_SCRIPTS_NEEDED = ['electron', 'esbuild'];
+export const INSTALL_SCRIPTS_NEEDED = ['esbuild'];
 
 /** npm in `desktop`, with its output shown. Resolves to its exit status. */
 function npm(desktop, args) {

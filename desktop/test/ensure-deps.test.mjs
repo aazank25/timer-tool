@@ -216,7 +216,7 @@ describe('the script, run from the command line', () => {
     assert.equal(done.status, 0, done.stderr);
     assert.deepEqual(
       calls().map((line) => line.split('|')[0]),
-      ['ci --ignore-scripts', 'rebuild electron esbuild'],
+      ['ci --ignore-scripts', 'rebuild esbuild'],
     );
     for (const line of calls()) {
       assert.equal(fs.realpathSync(line.split('|')[1]), fs.realpathSync(folder));

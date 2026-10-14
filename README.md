@@ -28,7 +28,7 @@ npm ci
 npm run desktop:mac      # or desktop:win / desktop:linux
 ```
 
-Needs **Node 22 or newer** (`node -v`). Nothing gets compiled: SQLite arrives as
+Needs **Node 22.12 or newer** (`node -v`). Nothing gets compiled: SQLite arrives as
 a prebuilt Node-API binary, which is why no Xcode, Python or build toolchain is
 required and why the same binary works under both Node and Electron. `npm ci`
 installs exactly what the lockfiles say and never rewrites them, which is why it
@@ -137,8 +137,8 @@ The installer is not signed, so the first time it runs Windows may say it
 protected your PC: **More info → Run anyway**. A company-managed PC may not
 allow unsigned apps at all; signing the installer is the way past that.
 
-**Notifications.** The first time FocusDesk has something to say, macOS may ask
-whether it may; if you said no, or never saw the question, switch it on in System
+**Notifications.** The first time FocusDesk starts, macOS may ask whether it may
+show notifications; if you said no, or never saw the question, switch it on in System
 Settings → Notifications → FocusDesk. A notification has no buttons of its own,
 whether the build is signed or not: it says that something is waiting, and
 clicking it opens the app, where the answers are. It is the same list as the
@@ -166,7 +166,8 @@ neither to make them. Which file to pick:
 | Windows | `FocusDesk-<version>-windows-x64-setup.exe` |
 
 Not sure which Mac it is? Apple menu → About This Mac: "Chip: Apple M…" is Apple
-silicon, "Processor: Intel" is Intel.
+silicon, "Processor: Intel" is Intel. The Mac app needs macOS 13 (Ventura) or
+later, and the Windows one Windows 10 or later.
 
 **The first time they open it**
 
