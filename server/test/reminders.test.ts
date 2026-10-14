@@ -283,7 +283,11 @@ describe('the end-of-day reminder', () => {
     await logged(at('11:00'), 30);
     await logged(at('13:00'), 25);
     await logged(on('2026-10-11', '10:00'), 120);
+    // The next day's is logged once it has happened, as a block logged by hand has to be, and
+    // the clock goes back to this evening.
+    freeze(on('2026-10-13', '12:00'));
     await logged(on('2026-10-13', '10:00'), 120);
+    freeze(at('18:00'));
 
     assert.equal(
       (await wrapUps())[0]?.body,
@@ -413,6 +417,7 @@ describe('the end-of-day reminder', () => {
     }
     goTo(on('2026-10-13', '04:00'));
     assert.deepEqual(await wrapUps(), [], 'the next day has nothing on it yet');
+    goTo(on('2026-10-13', '04:05'));
     await logged(on('2026-10-13', '04:05'), 30);
     goTo(on('2026-10-13', '12:00'));
     assert.deepEqual(await wrapUps(), [], 'and its own 04:00 is a whole day away');
@@ -587,6 +592,7 @@ describe('the review-of-last-week reminder', () => {
     freeze(on('2026-10-08', '10:00'));
     const thrownAway = await startBlock('Mistake');
     stopSession(thrownAway.id, 'abandoned');
+    goTo(on('2026-10-08', '11:30'));
     await logged(on('2026-10-08', '11:00'), 30, { kind: 'break' });
     goTo(at('10:00'));
     assert.deepEqual(await reviews(), [], 'a break and a discarded block');
@@ -646,6 +652,7 @@ describe('the review-of-last-week reminder', () => {
   it('stays until the week is over, and then it is the next week that is asked about', async () => {
     freeze(at('10:00'));
     await lastWeekBlock();
+    goTo(on('2026-10-14', '13:00'));
     await logged(on('2026-10-14', '10:00'), 180);
 
     goTo(on('2026-10-18', '23:00'));
@@ -1266,6 +1273,7 @@ describe('the reminders together', () => {
     // Last week had a block (the review is due at 09:00), and so does this morning,
     // which ended at 10:30 and so put the nudge off until 10:45.
     await logged(on('2026-10-07', '10:00'), 60);
+    goTo(at('10:30'));
     await logged(at('09:30'), 60);
     goTo(at('17:45'));
 
@@ -1282,6 +1290,7 @@ describe('the reminders together', () => {
   it('are each left out when they do not apply, and the others stay', async () => {
     const { listPrompts } = await promptsMod();
     freeze(at('08:00'));
+    goTo(at('10:30'));
     await logged(at('09:30'), 60);
     goTo(at('18:30'));
 

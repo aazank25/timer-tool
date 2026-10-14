@@ -29,6 +29,12 @@ import { focusDay, nowIso } from '../lib/time.js';
 export const sessionsRouter = Router();
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * How many blocks to list, from 1 to 2000. Anything else is refused: a word or a fraction is
+ * not a number of rows SQLite can be given, and a negative one is no limit there at all, so
+ * -1 would list every block there is.
+ */
+const listLimit = z.coerce.number().int().min(1).max(2000);
 const rating = z.number().int().min(1).max(5);
 /** A guess, not a plan: it is shown next to the actual and never counted. */
 const estimate = z.number().int().min(1).max(8 * 60).nullish();
@@ -116,7 +122,7 @@ sessionsRouter.get(
       to: q.to,
       projectId: q.projectId ? Number(q.projectId) : undefined,
       kind: q.kind === 'break' || q.kind === 'focus' ? q.kind : undefined,
-      limit: q.limit ? Math.min(2000, Number(q.limit)) : undefined,
+      limit: q.limit ? parse(listLimit, q.limit) : undefined,
     });
   }),
 );
@@ -283,7 +289,7 @@ sessionsRouter.post(
   '/:id/reschedule',
   handler((req) => {
     const id = intParam(req.params.id, 'session id');
-    const { startedAt } = parse(
+    const body = parse(
       z.object({ startedAt: z.string().datetime({ offset: true }) }),
       req.body,
     );
@@ -291,6 +297,9 @@ sessionsRouter.post(
     if (row.status !== 'completed' && row.status !== 'abandoned') {
       throw badRequest('Only finished blocks can be rescheduled');
     }
+    // Stored as the instant it names, in UTC to the millisecond, as a block logged by hand is,
+    // so that it sorts by when it was and not by the digits it was given in.
+    const startedAt = new Date(Date.parse(body.startedAt)).toISOString();
     const endedAt = new Date(Date.parse(startedAt) + row.active_seconds * 1000).toISOString();
     db.transaction(() => {
       const now = nowIso();

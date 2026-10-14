@@ -311,6 +311,9 @@ export function stopSession(
   }
   const now = nowIso();
   return db.transaction(() => {
+    // Ahead of the first write, so a project that is not there (deleted from another window,
+    // say) is the caller's 400 and not the foreign key's 500, and the block is left as it was.
+    if (input.projectId != null) requireProject(input.projectId);
     flush(id, now);
     if (input.activeSeconds != null) {
       overwriteActiveSeconds(id, input.activeSeconds, now);
@@ -478,10 +481,17 @@ export function switchSession(input: SwitchInput): {
 }
 
 /**
+ * How far ahead of this clock a block logged by hand may start: the allowance an away report
+ * has for its end, as two clocks are never exactly alike.
+ */
+const SKEW_MS = 5_000;
+
+/**
  * Log a block that happened away from the timer. Given a calendar event it is the time
  * spent on that meeting: the block is linked to it, so the meeting shows what was logged
  * on it, and a meeting that has time logged on it already (by a block that was not thrown
- * away) is refused with a 409 rather than logged a second time.
+ * away) is refused with a 409 rather than logged a second time. A block that has not begun
+ * has not happened, and is refused.
  */
 export function logManualSession(input: {
   projectId?: number | null;
@@ -494,9 +504,23 @@ export function logManualSession(input: {
   calendarEventId?: string | null;
 }): SessionView {
   const now = nowIso();
+  const at = Date.parse(input.startedAt);
+  // Time still to come cannot have been spent: a start ahead of the clock is a slip, the year
+  // typed wrong, say, and would sit in the history as the latest block until it was found.
+  if (at > Date.parse(now) + SKEW_MS) {
+    throw badRequest('A block cannot be logged before it starts');
+  }
+  // Stored as the instant it names, written as every other time is, in UTC to the millisecond.
+  // Kept as typed, a start given with an offset sorts by its digits and not by when it was, so
+  // a block at 19:00+10:00 (09:00 UTC) would list ahead of one at 10:00 UTC and count as the
+  // last time a project was worked on.
+  const startedAt = new Date(at).toISOString();
   const seconds = Math.round(input.minutes * 60);
-  const endedAt = new Date(Date.parse(input.startedAt) + seconds * 1000).toISOString();
+  const endedAt = new Date(at + seconds * 1000).toISOString();
   return db.transaction(() => {
+    // Ahead of the first write, as when a block is started, so a project that is not there is
+    // the caller's 400 and not the foreign key's 500.
+    if (input.projectId != null) requireProject(input.projectId);
     if (input.calendarEventId != null) {
       // Nothing enforces the link, so a meeting that is not there is refused here, ahead of
       // the write, rather than left pointing at nothing.
@@ -527,9 +551,9 @@ export function logManualSession(input: {
         input.title,
         input.kind ?? 'focus',
         Math.max(1, Math.round(input.minutes)),
-        input.startedAt,
+        startedAt,
         endedAt,
-        focusDay(input.startedAt, tz(), dayStartHour()),
+        focusDay(startedAt, tz(), dayStartHour()),
         seconds,
         input.focusRating ?? null,
         input.notes ?? null,
@@ -540,7 +564,7 @@ export function logManualSession(input: {
     const id = Number(info.lastInsertRowid);
     db.prepare(
       'INSERT INTO session_segments (session_id, started_at, ended_at) VALUES (?, ?, ?)',
-    ).run(id, input.startedAt, endedAt);
+    ).run(id, startedAt, endedAt);
     return toView(getSessionRow(id));
   })();
 }

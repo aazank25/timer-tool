@@ -15,6 +15,7 @@ import {
   at,
   type Api,
   freeze,
+  goTo,
   makeProject,
   MINUTE,
   reset,
@@ -232,6 +233,8 @@ describe('syncing a calendar feed', () => {
   it('keeps the time logged on a meeting through a sync', async () => {
     await sync();
     const [crit] = await eventsOn('2026-10-13');
+    // Logged once it is over: time still to come cannot be logged.
+    goTo(DESIGN_CRIT.end);
     const logged = await api.call('POST', '/sessions/manual', {
       title: 'Design crit',
       startedAt: crit!.startsAt,

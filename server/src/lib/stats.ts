@@ -82,23 +82,29 @@ function rollupHours(sessionIds: number[], zone: string): { hour: number; second
   const buckets = new Array<number>(24).fill(0);
   if (!sessionIds.length) return buckets.map((seconds, hour) => ({ hour, seconds }));
 
-  const placeholders = sessionIds.map(() => '?').join(',');
-  const segments = db
-    .prepare(
-      `SELECT started_at, ended_at FROM session_segments
-       WHERE session_id IN (${placeholders}) AND ended_at IS NOT NULL`,
-    )
-    .all(...sessionIds) as { started_at: string; ended_at: string }[];
+  const segments: { started_at: string; ended_at: string }[] = [];
+  // Few enough at a time to stay inside what one statement can be given: a long range can
+  // hold more blocks than SQLite takes variables in one, and the whole request would fail.
+  for (let at = 0; at < sessionIds.length; at += 500) {
+    const chunk = sessionIds.slice(at, at + 500);
+    const rows = db
+      .prepare(
+        `SELECT started_at, ended_at FROM session_segments
+         WHERE session_id IN (${chunk.map(() => '?').join(',')}) AND ended_at IS NOT NULL`,
+      )
+      .all(...chunk) as { started_at: string; ended_at: string }[];
+    for (const row of rows) segments.push(row);
+  }
 
   for (const seg of segments) {
     let cursor = Date.parse(seg.started_at);
     const end = Date.parse(seg.ended_at);
     while (cursor < end) {
-      const hour = localHour(new Date(cursor).toISOString(), zone);
+      const hour = localHour(cursor, zone);
       // Walk to the next wall-clock hour boundary a minute at a time rather
       // than assuming 60 minutes, so DST shifts and half-hour zones hold up.
       let boundary = Math.floor(cursor / 60_000) * 60_000 + 60_000;
-      while (boundary < end && localHour(new Date(boundary).toISOString(), zone) === hour) {
+      while (boundary < end && localHour(boundary, zone) === hour) {
         boundary += 60_000;
       }
       const sliceEnd = Math.min(end, boundary);

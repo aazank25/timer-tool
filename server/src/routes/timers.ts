@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { db } from '../db.js';
 import { handler, intParam, notFound, parse } from '../lib/http.js';
 import type { TimerMode } from '../lib/sessions.js';
+import { requireProject } from '../lib/tasks.js';
 import { nowIso } from '../lib/time.js';
 
 export const timersRouter = Router();
@@ -123,10 +124,16 @@ function listTimers(limit: number): TimerView[] {
   return out;
 }
 
+/**
+ * How many to list, from 1 to 60. Anything else is refused: a word or a fraction is not a
+ * number of rows SQLite can be given, and its error would be a 500.
+ */
+const listLimit = z.coerce.number().int().min(1).max(60);
+
 timersRouter.get(
   '/',
   handler((req) => {
-    const limit = req.query.limit ? Math.min(60, Math.max(1, Number(req.query.limit))) : 18;
+    const limit = req.query.limit ? parse(listLimit, req.query.limit) : 18;
     return listTimers(limit);
   }),
 );
@@ -144,6 +151,8 @@ timersRouter.post(
       }),
       req.body,
     );
+    // A project that is not there is the caller's 400, not the foreign key's 500.
+    if (body.projectId != null) requireProject(body.projectId);
     db.prepare(
       `INSERT INTO saved_timers (project_id, title, planned_minutes, mode, position, created_at)
        VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM saved_timers), ?)

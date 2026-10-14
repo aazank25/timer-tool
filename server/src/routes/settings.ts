@@ -115,7 +115,8 @@ settingsRouter.patch(
       try {
         new Intl.DateTimeFormat('en-CA', { timeZone: body.timezone }).format(new Date());
       } catch {
-        throw new Error(`Unknown timezone: ${body.timezone}`);
+        // The caller's mistake, so a 400 like every other setting that is refused.
+        throw badRequest(`Unknown timezone: ${body.timezone}`);
       }
     }
     // Each of the two is fine alone and wrong together, and a patch may name only one of

@@ -267,7 +267,13 @@ export const idleProvider: PromptProvider = {
 
     const since = Math.max(
       open,
-      latestOf('SELECT MAX(ended_at) AS at FROM sessions WHERE ended_at >= ?', iso(open)),
+      // Only blocks that have ended by now. One dated ahead (a year typed wrong, say) has not,
+      // and would otherwise hold the nudge off every day until then.
+      latestOf(
+        'SELECT MAX(ended_at) AS at FROM sessions WHERE ended_at >= ? AND ended_at <= ?',
+        iso(open),
+        iso(t),
+      ),
       latestOf(
         `SELECT MAX(updated_at) AS at FROM prompt_state
           WHERE ${IDLE_KEYS} AND status = 'dismissed' AND updated_at >= ?`,

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../db.js';
 import { badRequest, handler, intParam, notFound, parse } from '../lib/http.js';
+import { requireProject } from '../lib/tasks.js';
 import { nowIso } from '../lib/time.js';
 
 export const planRouter = Router();
@@ -77,6 +78,8 @@ planRouter.post(
   '/',
   handler((req, res) => {
     const body = parse(createSchema, req.body);
+    // A project that is not there is the caller's 400, not the foreign key's 500.
+    if (body.projectId != null) requireProject(body.projectId);
     const now = nowIso();
     const next = db
       .prepare('SELECT COALESCE(MAX(position), -1) + 1 AS pos FROM plan_items WHERE plan_day = ?')
@@ -112,6 +115,7 @@ planRouter.patch(
       req.body,
     );
     get(id);
+    if (body.projectId != null) requireProject(body.projectId);
     const map: Record<string, unknown> = {
       plan_day: body.day,
       title: body.title,
