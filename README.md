@@ -10,9 +10,13 @@ priorities list — can be what a block is for, so each shows the time really
 logged against its estimate.
 
 Everything lives in one SQLite file on your machine. The server binds to
-loopback only, and answers only the app itself: a request addressed by any
-other name, or a change sent by another website or another program's page, is
-refused. Nothing leaves the laptop unless you connect a calendar feed.
+loopback only. It refuses a request addressed by any other name, and one that
+another website's page, or a page another program serves on this computer, sends
+to the API: a read as much as a change. In the desktop app it also answers only
+the app that started it, by a key made afresh at each launch, so other programs
+on the computer, and other accounts on it, get nothing from the API. `npm start`
+and `npm run dev` have no key: while they run, any program on this computer can
+use the API. Nothing leaves the laptop unless you connect a calendar feed.
 
 ## Install it as a real app
 
@@ -213,7 +217,13 @@ For development, with hot reload on both halves:
 npm run dev        # api on :4317, UI on http://localhost:5173
 ```
 
-Other scripts: `npm test` (the server's suite, then the desktop app's, then the page's shortcut recorder), `npm run typecheck`.
+The dev server hands out only the web app's folder and the repo's installed
+packages, not the rest of the repo: not `data/`, where the database is while you
+run from the repo. With CORS off, it lets no page from another origin, another
+port on localhost included, read what it serves.
+
+Other scripts: `npm test` (the server's suite, then the desktop app's, then the
+page's shortcut recorder and the dev server's rules), `npm run typecheck`.
 
 Requires Node 22+. `better-sqlite3` ships prebuilt Node-API binaries for every
 platform, and those are what it loads. `npm ci` still tries to compile it from
@@ -249,6 +259,12 @@ The menu-bar item's **Reveal data folder** opens it. Override the location with
 `FOCUSDESK_DATA_DIR`, and the browser port with `FOCUSDESK_PORT`. The calendar
 feeds are re-read in the background every 15 minutes; `FOCUSDESK_CALENDAR_SYNC_MS`
 changes that, and `0` switches it off.
+
+On macOS and Linux the data folder, wherever it is, is readable only by your
+account, and so are the database and the backups the app takes beside it: the
+calendar address is in them. A copy you make yourself, the snapshot above
+included, gets the default mode of a file, which on most systems lets other
+accounts read it, so keep it where only you can.
 
 Because the app keeps its data in Application Support, rebuilding or
 reinstalling it never touches your history.
@@ -503,11 +519,21 @@ removed. A calendar with no events in it at all keeps the meetings it had, as th
 least as often trouble at the other end as a calendar that was emptied; one that still has
 events, none of them in the window any more (a series that has ended), has its meetings removed.
 
+A feed is read over https. An `http://` or `webcal://` address is read over https
+all the same, and plain http is kept for a feed on this computer. A feed that has
+moved is followed at most five times, only to an address the same rule allows, and
+never to this computer from another one. A feed larger than 10 MB (counted after
+it is unpacked) is refused: the sync says so, and nothing is removed. A meeting in
+a feed that cannot be read, or that goes past a limit (a series that would take too
+long to work out, say), is set aside rather than failing the feed: the rest are
+read, what the calendar already had of that meeting is kept as it was, and the sync
+counts how many it set aside, in its result and in the log.
+
 That URL is a secret — anyone holding it can read the calendar. It is stored in
-your local database and never sent back to the browser, and it is never put in an
-error message or the log (a feed is named by its label). An address with a user name
-or password in it is refused: the private addresses Google and Outlook give out need
-neither.
+your local database, and only its host name is ever sent back to the browser, never
+the address. It is never put in an error message or the log (a feed is named by its
+label). An address with a user name or password in it is refused: the private
+addresses Google and Outlook give out need neither.
 
 Note that a published ICS feed can lag the real calendar by hours; see
 [docs/PLAN.md](docs/PLAN.md) for the API-based alternative.

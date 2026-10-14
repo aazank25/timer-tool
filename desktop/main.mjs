@@ -117,6 +117,12 @@ function createWindow() {
       preload: path.join(here, 'preload.cjs'),
     },
   });
+  // WebRTC sends what it does where the request filter (see keepToServer) cannot see it, and the
+  // app has no use for it, so it may use UDP only through a proxy. That stops it asking a STUN
+  // server for the computer's address, but not a connection over TCP to a TURN relay. Either takes
+  // a script running in the page, which the server's Content Security Policy keeps out; this is
+  // for the day one gets in all the same.
+  win.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
 
   win.loadURL(`${server.url}/?desktop=1`);
   win.once('ready-to-show', () => win.show());

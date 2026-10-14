@@ -32,14 +32,16 @@ const MAX_RANGE_DAYS = 370;
 
 /**
  * How far back from `to` a window without a `from` goes: 7 days unless asked, at least one, and
- * no more than the most /range answers for.
+ * no more than the most /range answers for. 0 is not asking, and is the 7 it has always been.
  */
 function requireDays(value: unknown): number {
   if (value === undefined || value === '') return 7;
   if (typeof value !== 'string' || !/^\d+$/.test(value)) {
     throw badRequest('days must be a whole number');
   }
-  return Math.min(MAX_RANGE_DAYS, Math.max(1, Number(value)));
+  const days = Number(value);
+  if (days === 0) return 7;
+  return Math.min(MAX_RANGE_DAYS, Math.max(1, days));
 }
 
 statsRouter.get(

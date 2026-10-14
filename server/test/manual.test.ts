@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, before, beforeEach, describe, it, mock } from 'node:test';
-import { type Api, freeze, makeProject, reset, serve } from './prompt-helpers.js';
+import { addEvent, type Api, freeze, makeProject, reset, serve } from './prompt-helpers.js';
 
 const dbMod = () => import('../src/db.js');
 
@@ -111,25 +111,31 @@ describe('a block moved to another start', () => {
 });
 
 describe('a block logged by hand that starts ahead of the clock', () => {
-  it('is refused past the few seconds two clocks can differ by, and nothing is logged', async () => {
-    for (const startedAt of [
-      '2026-10-12T14:00:05.001Z',
-      // Two hours ahead of UTC, 16:00:06 is six seconds after 14:00 UTC.
-      '2026-10-12T16:00:06+02:00',
-      // The year typed wrong.
-      '2062-10-12T10:00:00Z',
-    ]) {
-      const res = await manual(startedAt);
-      assert.equal(res.status, 400, startedAt);
-      assert.equal(res.body.error, 'A block cannot be logged before it starts');
-    }
-    assert.equal(await blockCount(), 0);
+  it('is logged: Today logs a meeting as time spent from its start, before it has begun', async () => {
+    // The clock is at 14:00, and the meeting is at 16:00.
+    const meeting = await addEvent({
+      title: 'Planning',
+      start: '2026-10-12T16:00:00.000Z',
+      end: '2026-10-12T16:30:00.000Z',
+    });
+    const res = await manual('2026-10-12T16:00:00.000Z', {
+      title: 'Planning',
+      calendarEventId: meeting,
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.startedAt, '2026-10-12T16:00:00.000Z');
+    assert.equal(res.body.endedAt, '2026-10-12T16:30:00.000Z');
+    assert.equal(res.body.calendarEventId, meeting);
+    // It is logged on the meeting, which is not logged a second time.
+    assert.equal((await manual('2026-10-12T16:00:00.000Z', { calendarEventId: meeting })).status, 409);
 
-    // Up to five seconds ahead is two clocks that differ, and is logged.
-    assert.equal((await manual('2026-10-12T14:00:05.000Z')).status, 201);
+    // However far ahead, and stored as the instant it names, like any other start.
+    const far = await manual('2062-10-12T19:00:00+02:00');
+    assert.equal(far.status, 201);
+    assert.equal(far.body.startedAt, '2062-10-12T17:00:00.000Z');
     // And a block that began before now may run on past it.
     assert.equal((await manual('2026-10-12T13:50:00Z', { minutes: 30 })).status, 201);
-    assert.equal(await blockCount(), 2);
+    assert.equal(await blockCount(), 3);
   });
 });
 
@@ -139,7 +145,7 @@ describe('the nothing-on-the-clock nudge, with a block dated ahead of the clock'
       .filter((p) => p.kind === 'idle')
       .map((p) => p.id);
 
-  it('is still asked: a block that has not ended by now does not put it off', async () => {
+  it('is still asked: a block that has not begun by now does not put it off', async () => {
     // A server that has been up all day, so the quiet runs from when work started.
     (await import('../src/lib/reminders.js')).setServerStartedAt(0);
     assert.deepEqual(await nudges(), ['idle:2026-10-12T09:00:00.000Z']);
@@ -148,13 +154,20 @@ describe('the nothing-on-the-clock nudge, with a block dated ahead of the clock'
     assert.equal((await manual('2026-10-12T12:00:00Z')).status, 201);
     assert.deepEqual(await nudges(), ['idle:2026-10-12T12:30:00.000Z']);
 
-    // Another moved decades on by the year typed wrong. It has not ended, so the quiet still
-    // runs from 12:30, and the nudge is not put off until then.
+    // A meeting this afternoon logged ahead of it, a block logged decades on by the year typed
+    // wrong, and another moved there. None of them has begun, so the quiet still runs from
+    // 12:30, and the nudge is not put off until they end.
+    assert.equal((await manual('2026-10-12T16:00:00Z')).status, 201);
+    assert.equal((await manual('2062-10-12T10:00:00Z')).status, 201);
     const slip = await manual('2026-10-12T10:00:00Z');
     const moved = await api.call('POST', `/sessions/${slip.body.id}/reschedule`, {
       startedAt: '2062-10-12T10:00:00Z',
     });
     assert.equal(moved.status, 200);
     assert.deepEqual(await nudges(), ['idle:2026-10-12T12:30:00.000Z']);
+
+    // One that is going on now holds it off, as a block on the clock would.
+    assert.equal((await manual('2026-10-12T13:50:00Z')).status, 201);
+    assert.deepEqual(await nudges(), []);
   });
 });

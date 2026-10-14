@@ -68,6 +68,10 @@ export function createPalette({ serverUrl, backgroundColor, onClose = () => {} }
         preload: path.join(here, 'preload.cjs'),
       },
     });
+    // WebRTC may use UDP only through a proxy here too (see createWindow in main.mjs): that stops
+    // a STUN lookup and not a connection over TCP to a TURN relay, and either takes a script
+    // running in the page, which the server's Content Security Policy keeps out.
+    win.webContents.setWebRTCIPHandlingPolicy('disable_non_proxied_udp');
     // Above ordinary windows, and above full-screen ones, on whichever Space is showing.
     // skipTransformProcessType, so that doing so does not make the Dock icon flicker.
     win.setAlwaysOnTop(true, 'floating');

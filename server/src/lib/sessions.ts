@@ -481,17 +481,12 @@ export function switchSession(input: SwitchInput): {
 }
 
 /**
- * How far ahead of this clock a block logged by hand may start: the allowance an away report
- * has for its end, as two clocks are never exactly alike.
- */
-const SKEW_MS = 5_000;
-
-/**
  * Log a block that happened away from the timer. Given a calendar event it is the time
  * spent on that meeting: the block is linked to it, so the meeting shows what was logged
  * on it, and a meeting that has time logged on it already (by a block that was not thrown
- * away) is refused with a 409 rather than logged a second time. A block that has not begun
- * has not happened, and is refused.
+ * away) is refused with a 409 rather than logged a second time. It may start after now:
+ * Today logs a meeting as time spent from the meeting's start, and the meeting may not have
+ * begun yet. The nothing-on-the-clock nudge counts only the blocks that have (reminders.ts).
  */
 export function logManualSession(input: {
   projectId?: number | null;
@@ -505,11 +500,6 @@ export function logManualSession(input: {
 }): SessionView {
   const now = nowIso();
   const at = Date.parse(input.startedAt);
-  // Time still to come cannot have been spent: a start ahead of the clock is a slip, the year
-  // typed wrong, say, and would sit in the history as the latest block until it was found.
-  if (at > Date.parse(now) + SKEW_MS) {
-    throw badRequest('A block cannot be logged before it starts');
-  }
   // Stored as the instant it names, written as every other time is, in UTC to the millisecond.
   // Kept as typed, a start given with an offset sorts by its digits and not by when it was, so
   // a block at 19:00+10:00 (09:00 UTC) would list ahead of one at 10:00 UTC and count as the

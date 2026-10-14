@@ -102,12 +102,19 @@ describe('the window /api/stats/range answers for', () => {
       to: '2026-10-12',
       days: 30,
     });
-    // As before: an empty days is no days at all, and more than 370 is 370.
+    // As before: an empty days, or 0, is no days at all and so the 7, and more than 370 is 370.
     assert.equal((await window('?to=2026-10-12&days=')).days, 7);
+    assert.deepEqual(await window('?to=2026-10-12&days=0'), {
+      from: '2026-10-06',
+      to: '2026-10-12',
+      days: 7,
+    });
+    assert.equal((await window('?to=2026-10-12&days=000')).days, 7);
+    assert.deepEqual(await window('?days=0'), await window(''));
+    assert.equal((await window('?to=2026-10-12&days=1')).days, 1);
     assert.equal((await window('?to=2026-10-12&days=370')).days, 370);
     assert.equal((await window('?to=2026-10-12&days=371')).days, 370);
     assert.equal((await window('?to=2026-10-12&days=99999999999999999999')).days, 370);
-    assert.equal((await window('?to=2026-10-12&days=0')).days, 1);
   });
 
   it('is refused with a 400, never a 500, when a day or a number of days is not one', async () => {

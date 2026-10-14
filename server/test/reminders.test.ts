@@ -283,11 +283,7 @@ describe('the end-of-day reminder', () => {
     await logged(at('11:00'), 30);
     await logged(at('13:00'), 25);
     await logged(on('2026-10-11', '10:00'), 120);
-    // The next day's is logged once it has happened, as a block logged by hand has to be, and
-    // the clock goes back to this evening.
-    freeze(on('2026-10-13', '12:00'));
     await logged(on('2026-10-13', '10:00'), 120);
-    freeze(at('18:00'));
 
     assert.equal(
       (await wrapUps())[0]?.body,
@@ -417,7 +413,6 @@ describe('the end-of-day reminder', () => {
     }
     goTo(on('2026-10-13', '04:00'));
     assert.deepEqual(await wrapUps(), [], 'the next day has nothing on it yet');
-    goTo(on('2026-10-13', '04:05'));
     await logged(on('2026-10-13', '04:05'), 30);
     goTo(on('2026-10-13', '12:00'));
     assert.deepEqual(await wrapUps(), [], 'and its own 04:00 is a whole day away');
@@ -592,7 +587,6 @@ describe('the review-of-last-week reminder', () => {
     freeze(on('2026-10-08', '10:00'));
     const thrownAway = await startBlock('Mistake');
     stopSession(thrownAway.id, 'abandoned');
-    goTo(on('2026-10-08', '11:30'));
     await logged(on('2026-10-08', '11:00'), 30, { kind: 'break' });
     goTo(at('10:00'));
     assert.deepEqual(await reviews(), [], 'a break and a discarded block');
@@ -652,7 +646,6 @@ describe('the review-of-last-week reminder', () => {
   it('stays until the week is over, and then it is the next week that is asked about', async () => {
     freeze(at('10:00'));
     await lastWeekBlock();
-    goTo(on('2026-10-14', '13:00'));
     await logged(on('2026-10-14', '10:00'), 180);
 
     goTo(on('2026-10-18', '23:00'));
@@ -933,6 +926,57 @@ describe('the nothing-on-the-clock nudge', () => {
     await logged(on('2026-10-12', '03:00'), 60);
 
     assert.equal((await nudges())[0]?.id, `idle:${at('09:00')}`);
+  });
+
+  it('is not put off by a block that has not begun, however far ahead it is dated', async () => {
+    freeze(at('10:15'));
+    // A meeting this afternoon logged as time spent ahead of it, and a block whose year was
+    // typed wrong. Neither has begun, so the quiet still runs from work starting.
+    await logged(at('15:00'), 60);
+    await logged(on('2062-10-12', '10:00'), 60);
+    assert.deepEqual(
+      (await nudges()).map((p) => [p.id, p.createdAt]),
+      [[`idle:${at('09:00')}`, at('09:15')]],
+    );
+
+    // The afternoon's counts once it has begun, and the quiet runs from its end.
+    goTo(at('16:15'));
+    assert.deepEqual(
+      (await nudges()).map((p) => [p.id, p.createdAt]),
+      [[`idle:${at('16:00')}`, at('16:15')]],
+    );
+    // The one decades on counts on no day before then.
+    freeze(on('2026-10-13', '10:00'));
+    assert.equal((await nudges())[0]?.id, `idle:${on('2026-10-13', '09:00')}`);
+  });
+
+  it('is held off while a block that was logged is going on, and counts the quiet from its end', async () => {
+    freeze(at('10:00'));
+    // 09:30 to 11:00, logged by hand while it is going on, as a meeting can be.
+    await logged(at('09:30'), 90);
+    assert.deepEqual(await nudges(), [], 'it is going on');
+    goTo(at('10:59:59'));
+    assert.deepEqual(await nudges(), [], 'its last second');
+    goTo(at('11:14:59'));
+    assert.deepEqual(await nudges(), [], 'not until nudge_minutes after it ends');
+    goTo(at('11:15'));
+    assert.deepEqual(
+      (await nudges()).map((p) => [p.id, p.createdAt]),
+      [[`idle:${at('11:00')}`, at('11:15')]],
+    );
+  });
+
+  it('counts the quiet from the block that ended last, of those that are over, whichever began last', async () => {
+    freeze(at('12:00'));
+    // Logged after they happened, in no order. The latest end is 11:00, of the one that began
+    // first, before work did.
+    await logged(at('10:30'), 15);
+    await logged(at('08:30'), 150);
+    await logged(at('10:50'), 5, { kind: 'break' });
+    assert.deepEqual(
+      (await nudges()).map((p) => [p.id, p.createdAt]),
+      [[`idle:${at('11:00')}`, at('11:15')]],
+    );
   });
 
   it('counts the quiet from the last time it was dismissed, and is another prompt then', async () => {
@@ -1273,7 +1317,6 @@ describe('the reminders together', () => {
     // Last week had a block (the review is due at 09:00), and so does this morning,
     // which ended at 10:30 and so put the nudge off until 10:45.
     await logged(on('2026-10-07', '10:00'), 60);
-    goTo(at('10:30'));
     await logged(at('09:30'), 60);
     goTo(at('17:45'));
 
@@ -1290,7 +1333,6 @@ describe('the reminders together', () => {
   it('are each left out when they do not apply, and the others stay', async () => {
     const { listPrompts } = await promptsMod();
     freeze(at('08:00'));
-    goTo(at('10:30'));
     await logged(at('09:30'), 60);
     goTo(at('18:30'));
 

@@ -1469,15 +1469,15 @@ describe('meeting prompts', () => {
       it('counts a block that was logged by hand with a time that carries an offset', async () => {
         freeze(at('13:30'));
         const event = await addEvent({ title: 'Review', start: at('14:00'), end: at('14:30') });
-        goTo(at('14:31'));
         // 16:00 to 16:30 in a zone two hours ahead is 14:00 to 14:30, the meeting exactly,
-        // logged once it is over.
+        // logged before it begins.
         const logged = await api.call('POST', '/sessions/manual', {
           title: 'Taking notes',
           startedAt: '2026-10-12T16:00:00+02:00',
           minutes: 30,
         });
         assert.equal(logged.status, 201);
+        goTo(at('14:31'));
 
         // All of it is on that block, so there is nothing to log.
         assert.deepEqual(await get(), []);

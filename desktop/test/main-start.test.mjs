@@ -65,6 +65,10 @@ async function start(MAIN, SERVER_URL, packaged) {
         listeners,
         on: (event, listener) => void (listeners[event] ??= []).push(listener),
         setWindowOpenHandler: (handler) => void (this.openHandler = handler),
+        // What the page was told it may do over WebRTC, and whether that was said before it was
+        // asked to load anything.
+        setWebRTCIPHandlingPolicy: (policy) =>
+          void (this.webRTC = { policy, beforeLoad: this.url === '' }),
         getURL: () => this.url,
         isLoading: () => false,
         executeJavaScript: async () => {},
@@ -290,7 +294,11 @@ async function start(MAIN, SERVER_URL, packaged) {
     opens,
     moved,
     boxOpens,
-    windows: seen.windows.map((w) => ({ title: w.options.title, webPreferences: w.options.webPreferences })),
+    windows: seen.windows.map((w) => ({
+      title: w.options.title,
+      webPreferences: w.options.webPreferences,
+      webRTC: w.webRTC ?? null,
+    })),
     hooks: hooks && { serverUrl: hooks.serverUrl, token: hooks.token },
     rules,
     logs: seen.logs,
@@ -469,6 +477,25 @@ describe('the windows main.mjs makes', () => {
       assert.equal(webPreferences.nodeIntegration, false, title);
       assert.equal(path.basename(webPreferences.preload), 'preload.cjs', title);
     }
+  });
+
+  it('both let WebRTC use UDP only through a proxy, said before either loads its page', () => {
+    for (const [name, { windows }] of each()) {
+      assert.ok(windows.length >= 1, `${name} made no window`);
+      for (const { title, webRTC } of windows) {
+        assert.deepEqual(
+          webRTC,
+          { policy: 'disable_non_proxied_udp', beforeLoad: true },
+          `${name}: ${title}`,
+        );
+      }
+    }
+    // The quick-switch box is only made where the end-to-end hooks can open it, so this is the
+    // run that has both.
+    assert.deepEqual(
+      runs.packaged.windows.map((w) => w.title),
+      ['FocusDesk', 'FocusDesk quick switch'],
+    );
   });
 });
 

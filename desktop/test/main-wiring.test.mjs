@@ -8,7 +8,10 @@ import { describe, it } from 'node:test';
  * showing a Mac's habits on Windows in place, and in the order that matters. (Running the app is
  * what shows that they work; this is what shows they have not been taken out.)
  */
-const read = (name) => fs.readFileSync(new URL(`../${name}`, import.meta.url), 'utf8');
+// With the line endings the patterns below are written with, whatever the checkout has: git on
+// Windows gives each line a \r\n, and a pattern with \n in it would find nothing there.
+const read = (name) =>
+  fs.readFileSync(new URL(`../${name}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const main = read('main.mjs');
 const palette = read('palette.mjs');
 
@@ -428,6 +431,18 @@ describe('the pages of both windows', () => {
       assert.match(prefs[1], /\bsandbox: true,/, name);
       assert.match(prefs[1], /\bcontextIsolation: true,/, name);
       assert.match(prefs[1], /\bnodeIntegration: false,/, name);
+    }
+  });
+
+  it('may use WebRTC over UDP only through a proxy, as each window says itself, before it loads its page', () => {
+    for (const [name, source] of [
+      ['main.mjs', functionBody(main, 'createWindow')],
+      ['palette.mjs', palette],
+    ]) {
+      const says = [...source.matchAll(/\bwin\.webContents\.setWebRTCIPHandlingPolicy\(([^)]*)\);/g)];
+      assert.equal(says.length, 1, `${name} says it ${says.length} times`);
+      assert.equal(says[0][1], "'disable_non_proxied_udp'", name);
+      assert.ok(says[0].index < source.indexOf('win.loadURL('), `${name} says it after loading`);
     }
   });
 });

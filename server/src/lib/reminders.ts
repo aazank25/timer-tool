@@ -267,10 +267,13 @@ export const idleProvider: PromptProvider = {
 
     const since = Math.max(
       open,
-      // Only blocks that have ended by now. One dated ahead (a year typed wrong, say) has not,
-      // and would otherwise hold the nudge off every day until then.
+      // Only blocks that have begun by now, and each as far as now at the most. One that is
+      // still to come (a meeting logged before it starts, or a year typed wrong) would otherwise
+      // hold the nudge off until it ended; one that is going on now holds it off, as a running
+      // block does, until it ends.
       latestOf(
-        'SELECT MAX(ended_at) AS at FROM sessions WHERE ended_at >= ? AND ended_at <= ?',
+        'SELECT MAX(MIN(ended_at, ?)) AS at FROM sessions WHERE ended_at >= ? AND started_at <= ?',
+        iso(t),
         iso(open),
         iso(t),
       ),
