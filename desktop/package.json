@@ -1,7 +1,7 @@
 {
   "name": "focusdesk",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "FocusDesk as a menu-bar app",
   "type": "module",
   "main": "main.mjs",
