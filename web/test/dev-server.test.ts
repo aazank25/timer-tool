@@ -16,6 +16,14 @@ const webDir = fileURLToPath(new URL('..', import.meta.url));
 const repoRoot = path.resolve(webDir, '..');
 const server = config.server ?? {};
 
+/**
+ * A folder written as on a Mac or Linux, as this system writes it from the root, with /: Vite
+ * resolves the folders it may serve the same way, so on Windows they start with the drive.
+ */
+function onThisSystem(folder: string): string {
+  return path.resolve(folder).split(path.sep).join('/');
+}
+
 /** Whether `file` is `dir` itself or somewhere under it. */
 function isUnder(dir: string, file: string): boolean {
   const relative = path.relative(path.resolve(dir), path.resolve(file));
@@ -129,7 +137,7 @@ describe('the dev server', () => {
       '/home/me/Data/focusdesk',
       '/srv/[a]/(b)/{c}/focusdesk',
       '/home/me/my app!/@x+y/focusdesk',
-    ]) {
+    ].map(onThisSystem)) {
       const served = await servedBy({
         allow: [`${root}/web`, `${root}/node_modules`],
         deny: server.fs?.deny,
@@ -143,8 +151,9 @@ describe('the dev server', () => {
     }
 
     // And why it is not the plain pattern: that refuses the page itself, where the repo is.
-    const plain = await servedBy({ allow: ['/data/work/focusdesk/web'], deny: ['**/data/**'] });
-    assert.equal(plain('/data/work/focusdesk/web/src/main.tsx'), false);
+    const kept = onThisSystem('/data/work/focusdesk');
+    const plain = await servedBy({ allow: [`${kept}/web`], deny: ['**/data/**'] });
+    assert.equal(plain(`${kept}/web/src/main.tsx`), false);
   });
 
   it('answers no page from another origin', () => {
