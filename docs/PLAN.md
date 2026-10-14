@@ -1095,9 +1095,8 @@ assets sit in git.
   logged again (see the calendar section).
 - The estimate insights and the summary call blocks with no project "No project"; the
   wrap-up's charts call them "Unassigned".
-- A request body that is not JSON, or is over the size limit, is answered with a 500
-  rather than a 400 or a 413. Calendar sources are named by the millisecond they were
-  added, so two added in the same one would share an id.
+- Calendar sources are named by the millisecond they were added, so two added in the same
+  one would share an id.
 - `tasks.week_of` is nullable in the schema; every write sets it. A day note can be
   written for a day that has not come yet.
 - Keyboard focus falls back to the page when *Show fewer* goes because the banners

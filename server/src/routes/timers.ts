@@ -125,10 +125,14 @@ function listTimers(limit: number): TimerView[] {
 }
 
 /**
- * How many to list, from 1 to 60. Anything else is refused: a word or a fraction is not a
- * number of rows SQLite can be given, and its error would be a 500.
+ * How many to list: a whole number, held to 1 to 60 when it is outside them. A word or a fraction
+ * is refused, since it is not a number of rows SQLite can be given and its error would be a 500.
+ * A negative one is raised to 1 and never passed on: it is no limit there at all.
  */
-const listLimit = z.coerce.number().int().min(1).max(60);
+const listLimit = z.coerce
+  .number()
+  .int()
+  .transform((limit) => Math.min(60, Math.max(1, limit)));
 
 timersRouter.get(
   '/',

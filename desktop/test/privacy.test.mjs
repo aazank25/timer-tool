@@ -207,19 +207,39 @@ describe('opening a link outside the app', () => {
     return { opened, warned, deps: { shell, warn: (...args) => warned.push(args.join(' ')) } };
   }
 
-  it('hands a web page or an email address to the system, as it was read', () => {
+  it('hands a web page to the system, as it was read', () => {
     const { opened, warned, deps } = world();
     assert.equal(openOutside('https://www.notion.so/Page-123?pvs=4#top', deps), true);
     assert.equal(openOutside('http://example.com/a b', deps), true);
-    assert.equal(openOutside('mailto:someone@example.com?subject=Hi', deps), true);
     assert.equal(openOutside('HTTPS://EXAMPLE.COM/Path', deps), true);
     assert.deepEqual(opened, [
       'https://www.notion.so/Page-123?pvs=4#top',
       'http://example.com/a%20b',
-      'mailto:someone@example.com?subject=Hi',
       'https://example.com/Path',
     ]);
     assert.deepEqual(warned, []);
+  });
+
+  it('does not open an email address: the app has no such link, and the mail program acts on what follows the ?', () => {
+    const { opened, warned, deps } = world();
+    for (const url of [
+      'mailto:someone@example.com',
+      'mailto:someone@example.com?subject=Hi',
+      // What the system's mail command reads as a file to attach, on some systems.
+      'mailto:?attach=/etc/passwd',
+      'mailto:someone@example.com?attach=/Users/Shared/notes.txt&subject=Hi',
+      'MAILTO:someone@example.com',
+      ' mailto:someone@example.com',
+      'mail\tto:someone@example.com',
+    ]) {
+      assert.equal(openOutside(url, deps), false, url);
+    }
+    assert.deepEqual(opened, []);
+    // The scheme is said, and nothing of the address, and what is said is no promise to open email.
+    assert.equal(warned.length, 7);
+    for (const line of warned) {
+      assert.equal(line, '[focusdesk] did not open a mailto: link: only web links open');
+    }
   });
 
   it('hands over what was checked: the scheme of the address as the system will read it', () => {

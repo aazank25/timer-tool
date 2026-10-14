@@ -30,11 +30,15 @@ export const sessionsRouter = Router();
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 /**
- * How many blocks to list, from 1 to 2000. Anything else is refused: a word or a fraction is
- * not a number of rows SQLite can be given, and a negative one is no limit there at all, so
- * -1 would list every block there is.
+ * How many blocks to list: a whole number, held to 1 to 2000 when it is outside them. A word or a
+ * fraction is refused, since it is not a number of rows SQLite can be given. A negative one is
+ * raised to 1 and never passed on: it is no limit there at all, so -1 would list every block there
+ * is.
  */
-const listLimit = z.coerce.number().int().min(1).max(2000);
+const listLimit = z.coerce
+  .number()
+  .int()
+  .transform((limit) => Math.min(2000, Math.max(1, limit)));
 const rating = z.number().int().min(1).max(5);
 /** A guess, not a plan: it is shown next to the actual and never counted. */
 const estimate = z.number().int().min(1).max(8 * 60).nullish();

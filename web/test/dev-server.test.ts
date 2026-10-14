@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
+import { isFileLoadingAllowed, resolveConfig } from 'vite';
 import config from '../vite.config';
 
 /**
@@ -19,6 +20,24 @@ const server = config.server ?? {};
 function isUnder(dir: string, file: string): boolean {
   const relative = path.relative(path.resolve(dir), path.resolve(file));
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+/**
+ * Vite's own answer to whether the dev server may hand out a file, for these server options: what
+ * it allows and what it denies, as it is resolved and matched once the server runs, without
+ * starting one. `file` is as Vite is asked it, written with / on every system.
+ */
+async function servedBy(fs: { allow: string[]; deny?: string[] }) {
+  const resolved = await resolveConfig(
+    {
+      configFile: false,
+      root: webDir,
+      logLevel: 'silent',
+      server: { fs: { strict: true, ...fs } },
+    },
+    'serve',
+  );
+  return (file: string) => isFileLoadingAllowed(resolved, file.split(path.sep).join('/'));
 }
 
 describe('the dev server', () => {
@@ -39,6 +58,93 @@ describe('the dev server', () => {
     assert.ok(allowed.some((dir) => isUnder(dir, path.join(webDir, 'src', 'main.tsx'))));
     assert.ok(allowed.some((dir) => isUnder(dir, path.join(webDir, 'index.html'))));
     assert.ok(allowed.some((dir) => isUnder(dir, path.join(repoRoot, 'node_modules', 'react'))));
+  });
+
+  it('hands out no database, even by the link to the server, and keeps back what Vite does', async () => {
+    // The dependencies are allowed, and node_modules/@focusdesk/server in them is a link to the
+    // server's own folder, so everything in that folder is reachable by that path. The data folder
+    // can be there as well: a relative FOCUSDESK_DATA_DIR is made inside the server's folder.
+    const served = await servedBy({ allow: server.fs?.allow ?? [], deny: server.fs?.deny });
+    const file = (...parts: string[]) => path.join(repoRoot, ...parts);
+    const link = ['node_modules', '@focusdesk', 'server'];
+
+    for (const kept of [
+      // The database, what SQLite keeps beside it, and a backup of it.
+      [...link, 'data', 'focusdesk.sqlite'],
+      [...link, 'data', 'focusdesk.sqlite-wal'],
+      [...link, 'data', 'focusdesk.sqlite-shm'],
+      [...link, 'data', 'focusdesk.sqlite-journal'],
+      [...link, 'data', 'focusdesk.backup-before-8-2026-01-01T00-00-00-000Z.sqlite'],
+      // Under another name, or somewhere other than the data folder.
+      [...link, 'old.db'],
+      [...link, 'old.db-wal'],
+      [...link, 'src', 'copy.sqlite'],
+      ['server', 'data', 'focusdesk.sqlite'],
+      ['data', 'focusdesk.sqlite'],
+      // Anything at all in the server's data folder, at any depth.
+      [...link, 'data', 'notes.txt'],
+      [...link, 'data', 'exports', 'everything.json'],
+      // What Vite keeps back unless told otherwise.
+      ['web', '.env'],
+      ['web', '.env.production'],
+      ['node_modules', 'some-package', 'private.pem'],
+      ['node_modules', 'some-package', 'certificate.crt'],
+      [...link, '.git', 'config'],
+    ]) {
+      assert.equal(served(file(...kept)), false, `${kept.join('/')} is handed out`);
+    }
+
+    for (const open of [
+      // The page, and what it is made of.
+      ['web', 'src', 'main.tsx'],
+      ['web', 'index.html'],
+      ['node_modules', 'react', 'index.js'],
+      ['node_modules', '.vite', 'deps', 'react.js'],
+      ['node_modules', '@tanstack', 'react-query', 'build', 'modern', 'index.js'],
+      // Named a little like what is kept back, and not it.
+      ['web', 'src', 'data.ts'],
+      ['web', 'src', 'database.ts'],
+      ['node_modules', 'some-package', 'db.js'],
+      ['node_modules', 'some-package', 'metadata', 'index.js'],
+    ]) {
+      assert.equal(served(file(...open)), true, `${open.join('/')} is not handed out`);
+    }
+  });
+
+  it('keeps back all that Vite does by default: a list of its own replaces that one', async () => {
+    const vite = await resolveConfig(
+      { configFile: false, root: webDir, logLevel: 'silent' },
+      'serve',
+    );
+    const missing = vite.server.fs.deny.filter((pattern) => !server.fs?.deny?.includes(pattern));
+    assert.deepEqual(missing, [], 'what Vite denies by default, and this config does not');
+  });
+
+  it('is not put off by where the repo is kept: a folder called data, or odd characters', async () => {
+    // The data folder is refused by name, and Vite matches the whole path of a file, so a pattern
+    // for a folder called data that took no account of where it is would refuse every file of a
+    // repo kept inside any folder of that name.
+    for (const root of [
+      '/data/work/focusdesk',
+      '/home/me/Data/focusdesk',
+      '/srv/[a]/(b)/{c}/focusdesk',
+      '/home/me/my app!/@x+y/focusdesk',
+    ]) {
+      const served = await servedBy({
+        allow: [`${root}/web`, `${root}/node_modules`],
+        deny: server.fs?.deny,
+      });
+      assert.equal(served(`${root}/web/src/main.tsx`), true, root);
+      assert.equal(served(`${root}/node_modules/react/index.js`), true, root);
+      const link = `${root}/node_modules/@focusdesk/server`;
+      assert.equal(served(`${link}/data/focusdesk.sqlite`), false, root);
+      assert.equal(served(`${link}/data/notes.txt`), false, root);
+      assert.equal(served(`${link}/old.db`), false, root);
+    }
+
+    // And why it is not the plain pattern: that refuses the page itself, where the repo is.
+    const plain = await servedBy({ allow: ['/data/work/focusdesk/web'], deny: ['**/data/**'] });
+    assert.equal(plain('/data/work/focusdesk/web/src/main.tsx'), false);
   });
 
   it('answers no page from another origin', () => {

@@ -4,7 +4,7 @@
  * that carry a key: one made afresh at each launch, which only this process holds. The windows
  * show the server's pages and nothing else: what they may load, what their requests carry and
  * what they may be allowed are held to it here, on the session both windows use, and what they
- * may open outside the app is held to web pages and email addresses.
+ * may open outside the app is held to web pages.
  *
  * Nothing here imports Electron. What it needs of it (the session, the shell) is handed in, the
  * way attention.mjs and shortcuts.mjs are handed theirs, so every rule can be tested without a
@@ -89,18 +89,21 @@ export function permitted(permission, url, serverUrl) {
   return PAGE_PERMISSIONS.has(permission) && onServer(url, serverUrl);
 }
 
-/** What is opened outside the app, in the program the system has for it: web pages and email. */
-const OUTSIDE = new Set(['http:', 'https:', 'mailto:']);
+/**
+ * What is opened outside the app, in the browser the system has for it: web pages. Not an email
+ * address either. The app has no link to one, and the mail program reads what follows the ? in one
+ * as options of its own, which on some systems include a file on this computer to attach.
+ */
+const OUTSIDE = new Set(['http:', 'https:']);
 
 /**
- * Open `url` outside the app, in the browser or the mail program, if it is a web page or an
- * email address, and say whether it was. Any other kind of address is refused: the system hands
- * it to whichever program says it is the one for it (a file share, a remote desktop, a search of
- * another computer's files, an installed app with a scheme of its own) without asking anybody,
- * so a link the app did not write itself could start any of them. An address that does not parse
- * is refused too. The program is handed the address as it was read here, which is what was
- * checked. Of a refused one only the scheme is logged, and never the address: it can hold
- * anything.
+ * Open `url` outside the app, in the browser, if it is a web page, and say whether it was. Any
+ * other kind of address is refused: the system hands it to whichever program says it is the one
+ * for it (a file share, a remote desktop, a search of another computer's files, a mail program,
+ * an installed app with a scheme of its own) without asking anybody, so a link the app did not
+ * write itself could start any of them. An address that does not parse is refused too. The
+ * browser is handed the address as it was read here, which is what was checked. Of a refused one
+ * only the scheme is logged, and never the address: it can hold anything.
  *
  * @param {string} url
  * @param {object} deps
@@ -117,7 +120,7 @@ export function openOutside(url, { shell, warn = console.warn }) {
     return false;
   }
   if (!OUTSIDE.has(address.protocol)) {
-    warn(`[focusdesk] did not open a ${address.protocol} link: only web and email links open`);
+    warn(`[focusdesk] did not open a ${address.protocol} link: only web links open`);
     return false;
   }
   shell.openExternal(address.href).catch(() => {

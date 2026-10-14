@@ -162,8 +162,8 @@ function createWindow() {
   });
   win.webContents.on('render-process-gone', giveBackHotkeys);
 
-  // Anything not served by the local app opens in the real browser, or the mail program, and only
-  // if it is a web page or an email address (see openOutside).
+  // Anything not served by the local app opens in the real browser, and only if it is a web page
+  // (see openOutside).
   win.webContents.setWindowOpenHandler(({ url }) => {
     openOutside(url, { shell });
     return { action: 'deny' };

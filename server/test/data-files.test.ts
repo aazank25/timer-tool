@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { after, describe, it } from 'node:test';
+import { after, describe, it, mock } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 
@@ -124,5 +124,172 @@ describe('the data folder and the database', { skip }, () => {
     // A file that is not there is not made, and is no error.
     keepToOwner(path.join(dir, 'not-there.sqlite'));
     assert.ok(!fs.existsSync(path.join(dir, 'not-there.sqlite')));
+  });
+});
+
+/**
+ * Setting the modes is a safeguard, and a folder can be one this account may write in and not
+ * chmod: another account's, with the mode left open (EPERM), or a mount that has no modes at all,
+ * FAT or exFAT or a share (EPERM or ENOTSUP), or one that is read-only (EROFS), or one that will
+ * not be searched by chmod (EACCES). The data can live there, as it could before the modes were
+ * set, so that is said once and gone on from. Anything else that goes wrong still stops the start.
+ */
+describe('a data folder that will not take a mode', { skip }, () => {
+  /** What chmod comes back with when it is refused, as Node writes it. */
+  const refusal = (code: string, target: unknown) =>
+    Object.assign(new Error(`${code}: operation refused, chmod '${String(target)}'`), {
+      code,
+      syscall: 'chmod',
+      path: String(target),
+    });
+
+  /** Runs `body` with every chmod refused for `code`, and gives back what was warned meanwhile. */
+  async function refusing<T>(code: string, body: () => T | Promise<T>) {
+    const warnings: string[] = [];
+    const chmod = mock.method(fs, 'chmodSync', (target: unknown) => {
+      throw refusal(code, target);
+    });
+    const warn = mock.method(console, 'warn', (...args: unknown[]) => {
+      warnings.push(args.join(' '));
+    });
+    try {
+      return { result: await body(), warnings };
+    } finally {
+      chmod.mock.restore();
+      warn.mock.restore();
+    }
+  }
+
+  /** A folder of its own for each case, since a folder is warned about once. */
+  const folder = (name: string) => path.join(root, 'refused', name);
+
+  it('is used all the same, and says so once, for every way a mode can be refused', async () => {
+    const { ensureDataDir, keepDatabaseToOwner } = await import('../src/lib/config.js');
+    for (const code of ['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EROFS', 'EACCES']) {
+      const dir = folder(code);
+      const file = path.join(dir, 'focusdesk.sqlite');
+      const { result, warnings } = await refusing(code, () => {
+        const made = ensureDataDir(dir);
+        // The database, and what is beside it, takes the same refusals as the folder did.
+        fs.writeFileSync(`${file}-wal`, '');
+        keepDatabaseToOwner(file);
+        return made;
+      });
+      assert.equal(result, dir, code);
+      assert.ok(fs.existsSync(file), `${code}: the database is made all the same`);
+      // One warning for the folder, not one for each of the five things it was tried on.
+      assert.equal(warnings.length, 1, `${code}: ${warnings.join(' | ')}`);
+      const [warning = ''] = warnings;
+      assert.match(warning, /^\[focusdesk\] could not keep /, code);
+      assert.ok(warning.includes(dir), `${code}: it says which folder`);
+      assert.ok(warning.includes(code), `${code}: it says why`);
+      // Nothing of what is in the folder: not a file's name.
+      assert.ok(!warning.includes('focusdesk.sqlite'), `${code}: ${warning}`);
+      assert.ok(!warning.includes('-wal'), `${code}: ${warning}`);
+    }
+  });
+
+  it('is said again for another folder, and not again for the same one', async () => {
+    const { ensureDataDir, keepToOwner } = await import('../src/lib/config.js');
+    const first = folder('first-of-two');
+    const second = folder('second-of-two');
+    const { warnings } = await refusing('EPERM', () => {
+      ensureDataDir(first);
+      ensureDataDir(first);
+      fs.writeFileSync(path.join(first, 'a.sqlite'), '');
+      keepToOwner(path.join(first, 'a.sqlite'));
+      ensureDataDir(second);
+    });
+    assert.equal(warnings.length, 2, warnings.join(' | '));
+    assert.ok(warnings[0]?.includes(first));
+    assert.ok(warnings[1]?.includes(second));
+  });
+
+  it('stops the start for any other reason a mode cannot be set', async () => {
+    const { ensureDataDir, keepToOwner } = await import('../src/lib/config.js');
+    for (const code of ['EIO', 'EINVAL', 'ENOSPC', 'ENOSYS', 'EBADF', 'ELOOP']) {
+      const dir = folder(`other-${code}`);
+      const file = path.join(dir, 'focusdesk.sqlite');
+      const { warnings } = await refusing(code, () => {
+        assert.throws(() => ensureDataDir(dir), { code }, `${code} on a folder`);
+        fs.writeFileSync(file, '');
+        assert.throws(() => keepToOwner(file), { code }, `${code} on a file`);
+      });
+      assert.deepEqual(warnings, [], code);
+    }
+  });
+
+  it('still takes a file that is not there to be nothing to do, whatever chmod says of it', async () => {
+    const { keepToOwner } = await import('../src/lib/config.js');
+    const { warnings } = await refusing('ENOENT', () => {
+      keepToOwner(path.join(folder('absent'), 'focusdesk.sqlite'));
+    });
+    assert.deepEqual(warnings, []);
+  });
+
+  it('does not take a refusal to make or open something for one to set a mode', async () => {
+    // EACCES is let go of for a mode, and only there: a folder that cannot be made, or a database
+    // that cannot be created, is a start that cannot go on.
+    const { ensureDataDir, keepDatabaseToOwner } = await import('../src/lib/config.js');
+    const denied = (what: string) =>
+      Object.assign(new Error(`EACCES: permission denied, ${what}`), { code: 'EACCES' });
+
+    const mkdir = mock.method(fs, 'mkdirSync', () => {
+      throw denied('mkdir');
+    });
+    try {
+      assert.throws(() => ensureDataDir(folder('cannot-be-made')), { code: 'EACCES' });
+    } finally {
+      mkdir.mock.restore();
+    }
+
+    const dir = ensureDataDir(folder('cannot-be-opened'));
+    const open = mock.method(fs, 'openSync', () => {
+      throw denied('open');
+    });
+    try {
+      assert.throws(() => keepDatabaseToOwner(path.join(dir, 'focusdesk.sqlite')), {
+        code: 'EACCES',
+      });
+    } finally {
+      open.mock.restore();
+    }
+  });
+
+  it('starts the server all the same, with one warning, when no mode can be set at all', () => {
+    // The whole start as `npm start` makes it, in a process of its own: every chmod is refused, as
+    // it is for a folder another account owns, and the database is made and migrated all the same.
+    const dir = folder('whole-start');
+    const env: NodeJS.ProcessEnv = { ...process.env, FOCUSDESK_DATA_DIR: dir };
+    // Not a test of the test runner's, whatever it is run by.
+    delete env.NODE_TEST_CONTEXT;
+    const run = spawnSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '--eval',
+        `import fs from 'node:fs';
+         fs.chmodSync = (target) => {
+           throw Object.assign(new Error('EPERM: operation not permitted, chmod'), { code: 'EPERM' });
+         };
+         const { initDb, db } = await import('./src/db.ts');
+         initDb();
+         console.log('tables', db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table'").get().n);`,
+      ],
+      {
+        cwd: path.dirname(path.dirname(fileURLToPath(import.meta.url))),
+        env,
+        encoding: 'utf8',
+        timeout: 60_000,
+      },
+    );
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stdout, /tables \d+/);
+    assert.ok(fs.existsSync(path.join(dir, 'focusdesk.sqlite')));
+    const warnings = run.stderr.split('\n').filter((line) => line.includes('[focusdesk]'));
+    assert.equal(warnings.length, 1, run.stderr);
+    assert.ok(warnings[0]?.includes(dir), warnings[0]);
   });
 });

@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { reason, type Project } from '../api';
+import { useId, useState } from 'react';
+import { ApiError, reason, type Project } from '../api';
 import { BarsByName, Meter } from '../components/charts';
 import { Button, Card, Empty, Field, inputClass, Modal, Swatch } from '../components/ui';
 import { useProjectActions, useProjects, useRangeStats } from '../hooks';
@@ -218,6 +218,12 @@ function ProjectCard({
   );
 }
 
+/** What the server said was wrong with each field of a save it refused, by the field's name. */
+function fieldErrors(err: unknown): Record<string, string[]> {
+  if (!(err instanceof ApiError)) return {};
+  return (err.details as { fieldErrors?: Record<string, string[]> } | undefined)?.fieldErrors ?? {};
+}
+
 function ProjectDialog({
   project,
   takenColors,
@@ -236,22 +242,45 @@ function ProjectDialog({
   const [target, setTarget] = useState(project?.weeklyTargetMinutes ?? 0);
   const [notionUrl, setNotionUrl] = useState(project?.notionUrl ?? '');
   const [error, setError] = useState<string | null>(null);
+  // Why the server would not take the link, said beside the link: it is the one field that a
+  // person can be told what to type into.
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const linkErrorId = useId();
 
   async function save() {
+    const link = notionUrl.trim() || null;
     const body = {
       name: name.trim(),
       color,
       description: description.trim() || null,
       weeklyTargetMinutes: target > 0 ? target : null,
-      notionUrl: notionUrl.trim() || null,
+      // Left out when it is as it was saved. A link that is stored and is not a web address (a
+      // notion:// one, saved by a version that took any address) is refused when it is said again,
+      // and that would stop everything else in the dialog from being saved, for a link that has
+      // not changed. It is said only when it has.
+      ...(project && link === project.notionUrl ? {} : { notionUrl: link }),
     };
     if (!body.name) return;
+    setError(null);
+    setLinkError(null);
     try {
       if (project) await update.mutateAsync({ id: project.id, ...body });
       else await create.mutateAsync(body);
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save');
+      // The link's reason goes beside the link. What is left, if anything, is said below, as it is
+      // on every other form, with the first field the server named.
+      const { notionUrl: aboutLink, ...others } = fieldErrors(err);
+      setLinkError(aboutLink?.[0] ?? null);
+      if (aboutLink && Object.keys(others).length === 0) {
+        setError(null);
+        return;
+      }
+      const rest =
+        aboutLink && err instanceof ApiError
+          ? new ApiError(err.status, err.message, { fieldErrors: others })
+          : err;
+      setError(reason(rest, 'Could not save'));
     }
   }
 
@@ -315,14 +344,26 @@ function ProjectDialog({
               onChange={(e) => setTarget(Math.round((Number(e.target.value) || 0) * 60))}
             />
           </Field>
-          <Field label="Notion page (optional)">
-            <input
-              className={inputClass}
-              placeholder="https://notion.so/…"
-              value={notionUrl}
-              onChange={(e) => setNotionUrl(e.target.value)}
-            />
-          </Field>
+          <div>
+            <Field label="Notion page (optional)">
+              <input
+                className={inputClass}
+                placeholder="https://notion.so/…"
+                value={notionUrl}
+                aria-invalid={linkError ? true : undefined}
+                aria-describedby={linkError ? linkErrorId : undefined}
+                onChange={(e) => {
+                  setNotionUrl(e.target.value);
+                  setLinkError(null);
+                }}
+              />
+            </Field>
+            {linkError && (
+              <p id={linkErrorId} role="alert" className="mt-1 text-[11px] text-critical">
+                {linkError}
+              </p>
+            )}
+          </div>
         </div>
 
         {error && <p className="text-xs text-critical">{error}</p>}

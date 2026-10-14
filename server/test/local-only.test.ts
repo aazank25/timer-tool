@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import dns from 'node:dns';
 import { once } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -8,9 +9,9 @@ import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import { dirname, join } from 'node:path';
-import { after, before, beforeEach, describe, it } from 'node:test';
+import { after, before, beforeEach, describe, it, mock } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import type { AppOptions } from '../src/app.js';
+import type { AppOptions, RunningServer } from '../src/app.js';
 import { freshDb } from './setup.js';
 
 /**
@@ -1114,6 +1115,175 @@ describe('the address the server listens on', () => {
       // Taken, and then not to be had here: not refused for being somewhere else.
       const { code } = err as NodeJS.ErrnoException;
       assert.ok(code === 'EAFNOSUPPORT' || code === 'EADDRNOTAVAIL', String(err));
+    }
+  });
+
+  /**
+   * Every server made while it is on, and what each says its address is: the real one, or what
+   * `reported` makes of it. The system cannot be told to bind somewhere it should not, so it is
+   * the answer that is changed, and the server really listens on 127.0.0.1. Restoring puts the
+   * answer back, and shuts any server still listening, so that a start that was not refused does
+   * not hold the run open.
+   */
+  function watchBindings(reported: (bound: AddressInfo) => unknown = (bound) => bound) {
+    const servers: http.Server[] = [];
+    const real = net.Server.prototype.address;
+    const stub = mock.method(net.Server.prototype, 'address', function (this: http.Server) {
+      if (!servers.includes(this)) servers.push(this);
+      const bound = real.call(this);
+      return bound !== null && typeof bound === 'object' ? reported(bound) : bound;
+    });
+    return {
+      servers,
+      restore: () => {
+        stub.mock.restore();
+        for (const server of servers) {
+          if (!server.listening) continue;
+          server.close();
+          server.closeAllConnections();
+        }
+      },
+    };
+  }
+
+  /** A resolver that answers `name` with `address`, and anything else as it always did. */
+  function resolverWhere(name: string, address: string) {
+    const real = dns.lookup as (...args: unknown[]) => void;
+    return (hostname: string, ...rest: unknown[]) => {
+      if (hostname !== name) return real(hostname, ...rest);
+      // dns.lookup(hostname[, options], callback)
+      const callback = rest[rest.length - 1] as (...answer: unknown[]) => void;
+      const options = (rest.length > 1 ? rest[0] : {}) as dns.LookupOptions;
+      const family = net.isIPv6(address) ? 6 : 4;
+      process.nextTick(() =>
+        options.all ? callback(null, [{ address, family }]) : callback(null, address, family),
+      );
+    };
+  }
+
+  it('is checked once it is bound: localhost is only as good as the resolver that answers for it', async () => {
+    // A hosts file or a resolver that puts `localhost` on 0.0.0.0 has listen() take every
+    // interface, and the name is on the list of what is allowed.
+    const { startServer } = await import('../src/app.js');
+    const watching = watchBindings();
+    const resolving = mock.method(dns, 'lookup', resolverWhere('localhost', '0.0.0.0'));
+    let running: RunningServer | undefined;
+    try {
+      await assert.rejects(
+        async () => {
+          running = await startServer({ port: 0, host: 'localhost', calendarSyncMs: 0 });
+        },
+        /^Error: FocusDesk listens on loopback only: .*0\.0\.0\.0/,
+      );
+      // The server that was made is shut, not left to answer whoever finds it.
+      assert.ok(watching.servers.length > 0, 'the stub did not see the server');
+      for (const server of watching.servers) assert.equal(server.listening, false);
+    } finally {
+      resolving.mock.restore();
+      await running?.close();
+      watching.restore();
+    }
+  });
+
+  it('takes localhost when the resolver puts it on loopback', async () => {
+    const { startServer } = await import('../src/app.js');
+    for (const address of ['127.0.0.1', '127.0.0.2', '::1']) {
+      const resolving = mock.method(dns, 'lookup', resolverWhere('localhost', address));
+      try {
+        const running = await startServer({ port: 0, host: 'localhost', calendarSyncMs: 0 });
+        await running.close();
+      } catch (err) {
+        // An address of a kind this computer has none of is not one to listen on, which is not
+        // the server being kept off loopback. 127.0.0.1 is always to be had.
+        const { code } = err as NodeJS.ErrnoException;
+        assert.ok(
+          address !== '127.0.0.1' && (code === 'EAFNOSUPPORT' || code === 'EADDRNOTAVAIL'),
+          `${address}: ${err}`,
+        );
+      } finally {
+        resolving.mock.restore();
+      }
+    }
+  });
+
+  it('reads the address it was bound to: all of loopback is taken, and nothing else', async () => {
+    const { startServer } = await import('../src/app.js');
+    const loopback = [
+      '127.0.0.1',
+      '127.0.0.2',
+      '127.255.255.254',
+      '::1',
+      // An IPv4 address on a socket that is IPv6, as the system writes it.
+      '::ffff:127.0.0.1',
+      '::ffff:127.9.9.9',
+      '::ffff:7f00:1',
+    ];
+    const elsewhere = [
+      // Every address, in either family and in the mapped spelling.
+      '0.0.0.0',
+      '::',
+      '::ffff:0.0.0.0',
+      // The addresses either side of 127/8, and ones on a network.
+      '126.255.255.255',
+      '128.0.0.1',
+      '10.0.0.2',
+      '192.168.1.5',
+      '::ffff:10.0.0.2',
+      '::ffff:192.168.1.5',
+      // IPv6 that is not ::1, and the old IPv4-compatible spelling of 127.0.0.1.
+      '::2',
+      'fe80::1',
+      '2001:db8::1',
+      '::127.0.0.1',
+      // Not an address.
+      '',
+      'localhost',
+    ];
+    const cases = [
+      ...loopback.map((address) => ({ address, taken: true })),
+      ...elsewhere.map((address) => ({ address, taken: false })),
+    ];
+    for (const { address, taken } of cases) {
+      const watching = watchBindings((bound) => ({ ...bound, address }));
+      let running: RunningServer | undefined;
+      try {
+        const start = async () => {
+          running = await startServer({ port: 0, host: '127.0.0.1', calendarSyncMs: 0 });
+        };
+        if (taken) {
+          await start();
+        } else {
+          await assert.rejects(start, /^Error: FocusDesk listens on loopback only/, address);
+          for (const server of watching.servers) assert.equal(server.listening, false, address);
+        }
+      } finally {
+        await running?.close();
+        watching.restore();
+      }
+    }
+  });
+
+  it('is refused when the system gives no address to read, or one that is not a network address', async () => {
+    const { startServer } = await import('../src/app.js');
+    // A pipe's name, and nothing at all, as a server that is not listening answers.
+    for (const answer of ['/tmp/focusdesk.sock', null]) {
+      const watching = watchBindings(() => answer);
+      let running: RunningServer | undefined;
+      try {
+        await assert.rejects(
+          async () => {
+            running = await startServer({ port: 0, host: '127.0.0.1', calendarSyncMs: 0 });
+          },
+          /^Error: FocusDesk listens on loopback only/,
+          String(answer),
+        );
+        for (const server of watching.servers) {
+          assert.equal(server.listening, false, String(answer));
+        }
+      } finally {
+        await running?.close();
+        watching.restore();
+      }
     }
   });
 

@@ -153,7 +153,39 @@ describe('a timezone that does not exist', () => {
 });
 
 describe('how many to list', () => {
-  it('is a whole number of blocks from 1 to 2000, and anything else is a 400', async () => {
+  /** What a limit that is not a number of rows at all is: a word, a fraction, one too big to be. */
+  const NOT_A_NUMBER = ['abc', '1.5', '0.5', '1e400', 'Infinity', '1,5', '1 2'];
+
+  /**
+   * Completed blocks, written straight into the table: a test cannot be made to log thousands one
+   * request at a time. A minute apart, so that the order they are listed in is known.
+   */
+  async function insertBlocks(count: number, title: (i: number) => string) {
+    const { db } = await dbMod();
+    const insert = db.prepare(
+      `INSERT INTO sessions
+         (title, kind, planned_minutes, started_at, ended_at, local_day, active_seconds, status,
+          created_at, updated_at)
+       VALUES (?, 'focus', 25, ?, ?, '2026-10-12', 1500, 'completed', ?, ?)`,
+    );
+    db.transaction(() => {
+      for (let i = 0; i < count; i++) {
+        const at = new Date(Date.parse('2026-10-01T00:00:00.000Z') + i * 60_000).toISOString();
+        insert.run(title(i), at, at, NOW, NOW);
+      }
+    })();
+  }
+
+  const titles = (blocks: { title: string }[]) => blocks.map((block) => block.title);
+
+  it('is a whole number of blocks, and a word or a fraction is a 400', async () => {
+    for (const limit of NOT_A_NUMBER) {
+      const res = await api.call('GET', `/sessions?limit=${limit}`);
+      assert.equal(res.status, 400, limit);
+    }
+  });
+
+  it('is held to 1 to 2000 when it is a whole number outside them, and is never no limit at all', async () => {
     for (const hour of ['09', '10', '11']) {
       const res = await api.call('POST', '/sessions/manual', {
         title: `Block at ${hour}`,
@@ -162,32 +194,69 @@ describe('how many to list', () => {
       });
       assert.equal(res.status, 201);
     }
-    // Minus one was SQLite's "no limit", and gave every block there is.
-    for (const limit of ['abc', '1.5', '-1', '0', '2001', '1e400']) {
+    // Minus one is SQLite's "no limit", and would list every block there is. It is raised to 1
+    // with the rest, so that no whole number gets as far as SQLite as anything but a number of rows.
+    for (const limit of ['0', '-0', '-1', '-5', '-1000000']) {
       const res = await api.call('GET', `/sessions?limit=${limit}`);
-      assert.equal(res.status, 400, limit);
+      assert.equal(res.status, 200, limit);
+      assert.deepEqual(titles(res.body), ['Block at 11'], limit);
     }
-    const one = await api.call('GET', '/sessions?limit=1');
-    assert.equal(one.status, 200);
-    assert.deepEqual(
-      one.body.map((s: { title: string }) => s.title),
-      ['Block at 11'],
-    );
-    assert.equal((await api.call('GET', '/sessions?limit=2000')).body.length, 3);
+    const two = await api.call('GET', '/sessions?limit=2');
+    assert.deepEqual(titles(two.body), ['Block at 11', 'Block at 10']);
+    // Above 2000 is 2000, which is every block there is here.
+    for (const limit of ['2000', '2001', '5000']) {
+      assert.equal((await api.call('GET', `/sessions?limit=${limit}`)).body.length, 3, limit);
+    }
     assert.equal((await api.call('GET', '/sessions')).body.length, 3);
   });
 
-  it('is a whole number of timers from 1 to 60, and anything else is a 400', async () => {
-    for (const title of ['Standup', 'Review']) {
-      assert.equal((await api.call('POST', '/timers', { title })).status, 201);
+  it('is held to 2000 at the top, where there are more blocks than that', async () => {
+    await insertBlocks(2005, (i) => `Block ${i}`);
+    for (const limit of ['2000', '2001', '5000', '1e21']) {
+      const res = await api.call('GET', `/sessions?limit=${limit}`);
+      assert.equal(res.status, 200, limit);
+      assert.equal(res.body.length, 2000, limit);
     }
-    for (const limit of ['abc', '1.5', '-1', '0', '61']) {
+    // Newest first, so what is cut off is the oldest.
+    const all = await api.call('GET', '/sessions?limit=5000');
+    assert.equal(all.body[0].title, 'Block 2004');
+    assert.equal(all.body[1999].title, 'Block 5');
+    assert.equal((await api.call('GET', '/sessions?limit=3')).body.length, 3);
+    // With none said there is a smaller one of its own.
+    assert.equal((await api.call('GET', '/sessions')).body.length, 500);
+  });
+
+  it('is a whole number of timers, and a word or a fraction is a 400', async () => {
+    for (const limit of NOT_A_NUMBER) {
       const res = await api.call('GET', `/timers?limit=${limit}`);
       assert.equal(res.status, 400, limit);
     }
-    // Every pinned timer is listed whatever the limit, which caps the suggestions after them.
-    assert.equal((await api.call('GET', '/timers?limit=1')).body.length, 2);
-    assert.equal((await api.call('GET', '/timers?limit=60')).body.length, 2);
+  });
+
+  it('is held to 1 to 60 timers when it is a whole number outside them, and never none or all', async () => {
+    // What is suggested comes from what has been done: seventy different titles, once each.
+    await insertBlocks(70, (i) => `Title ${String(i).padStart(2, '0')}`);
+    const listed = async (limit: string) => {
+      const res = await api.call('GET', `/timers?limit=${limit}`);
+      assert.equal(res.status, 200, limit);
+      return res.body.length as number;
+    };
+    for (const limit of ['0', '-0', '-1', '-3', '-1000000']) assert.equal(await listed(limit), 1, limit);
+    assert.equal(await listed('1'), 1);
+    assert.equal(await listed('2'), 2);
+    assert.equal(await listed('60'), 60);
+    for (const limit of ['61', '1000', '1e21']) assert.equal(await listed(limit), 60, limit);
+    // With none said there are eighteen.
+    assert.equal((await api.call('GET', '/timers')).body.length, 18);
+  });
+
+  it('lists every pinned timer whatever the limit, which holds the suggestions after them to it', async () => {
+    for (const title of ['Standup', 'Review']) {
+      assert.equal((await api.call('POST', '/timers', { title })).status, 201);
+    }
+    for (const limit of ['-1', '0', '1', '60', '61']) {
+      assert.equal((await api.call('GET', `/timers?limit=${limit}`)).body.length, 2, limit);
+    }
     assert.equal((await api.call('GET', '/timers')).body.length, 2);
   });
 });

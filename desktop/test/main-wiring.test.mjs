@@ -408,9 +408,12 @@ describe('links out of the windows', () => {
     );
   });
 
-  it('are handed to the system in one place in the whole app, which holds them to web pages and email', () => {
+  it('are handed to the system in one place in the whole app, which holds them to web pages', () => {
     assert.equal(countInModules(/\.openExternal\(/g), 1);
     assert.match(read('privacy.mjs'), /shell\.openExternal\(address\.href\)/);
+    // The schemes that place lets through are these two and no more: not mailto, which the app
+    // never links to and which hands what follows the ? to the mail program.
+    assert.match(read('privacy.mjs'), /const OUTSIDE = new Set\(\['http:', 'https:'\]\);/);
   });
 
   it('never leave the quick-switch box: it opens no window and follows no link off the app', () => {

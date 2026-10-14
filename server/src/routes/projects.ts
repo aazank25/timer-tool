@@ -23,6 +23,16 @@ function isWebAddress(value: string): boolean {
   }
 }
 
+/** The most a link may be, as it is sent and as it is stored. */
+const MAX_LINK = 2000;
+
+/**
+ * What a refusal of the link says, under its field. The project's dialog shows it beside the link
+ * to the person who typed it, so it says what to do rather than which rule was broken.
+ */
+const NOT_A_LINK = 'Use a link that starts with https:// or http://';
+const TOO_LONG = `That link is longer than ${MAX_LINK} characters`;
+
 const upsertSchema = z.object({
   name: z.string().trim().min(1).max(120),
   color: z.string().regex(HEX, 'color must be a #rrggbb hex string').optional(),
@@ -30,9 +40,16 @@ const upsertSchema = z.object({
   weeklyTargetMinutes: z.number().int().min(0).max(100 * 60).nullish(),
   notionUrl: z
     .string()
-    .url()
-    .max(2000)
-    .refine(isWebAddress, 'notionUrl must be an http or https address')
+    .max(MAX_LINK, TOO_LONG)
+    .refine(isWebAddress, NOT_A_LINK)
+    // Kept as a browser reads it, not as it was typed. A browser puts up with a space or a line
+    // break round an address, a tab in it, capitals in the scheme, and `https:evil.example` or
+    // `https:/\evil.example` for `https://evil.example/`; the page links only what begins with
+    // http:// or https://, so an address stored as it came would be accepted here and then shown
+    // as no link. Written out in full it always begins that way. It can come out longer (a space
+    // is three characters), so the limit is asked of it again.
+    .transform((value) => new URL(value).href)
+    .pipe(z.string().max(MAX_LINK, TOO_LONG))
     .nullish(),
 });
 const patchSchema = upsertSchema.partial().extend({ archived: z.boolean().optional() });

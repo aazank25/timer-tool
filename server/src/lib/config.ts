@@ -29,25 +29,64 @@ export const config = {
 const POSIX = process.platform !== 'win32';
 
 /**
+ * What chmod says when it will not set a mode here, and which is no reason to stop. Setting one is
+ * a safeguard, and a folder that this account may write in and not chmod can hold the data all
+ * the same: another account's, left open to this one (EPERM), a mount that has no modes at all,
+ * FAT or exFAT or a share (EPERM or ENOTSUP), one that is read-only (EROFS), or one that chmod may
+ * not search (EACCES). Refusing to start over it would be worse than saying so. This is for chmod
+ * and for nothing else: a folder that cannot be made, or a database that cannot be created, is a
+ * start that cannot go on, whatever the code.
+ */
+const MODE_NOT_SETTABLE = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EROFS', 'EACCES']);
+
+/** Folders already said to be open to other accounts, so that each is said once, not per file. */
+const saidOpen = new Set<string>();
+
+/**
+ * Set a mode, as far as the folder it is in allows. A refusal that says the mode cannot be set
+ * here is said once for the folder, with the folder's path and nothing of what is in it, and gone
+ * on from; any other error is thrown.
+ */
+function setMode(target: string, mode: number, folder: string): void {
+  try {
+    fs.chmodSync(target, mode);
+  } catch (err) {
+    const { code } = err as NodeJS.ErrnoException;
+    if (code === undefined || !MODE_NOT_SETTABLE.has(code)) throw err;
+    const where = path.resolve(folder);
+    if (saidOpen.has(where)) return;
+    saidOpen.add(where);
+    console.warn(
+      `[focusdesk] could not keep ${where} to this account (${code}), so any other account that ` +
+        'can get into it may be able to read what is in it',
+    );
+  }
+}
+
+/**
  * The data folder, made if it is not there, and kept to the account it belongs to. Everything
  * the person has done is in it, and so is the address of their calendar feed, which is as good as
  * a password to the calendar, so no other account on this computer may list it or read from it.
  * The mode is set as well as asked for: asking does nothing to a folder that is already there,
- * and one made by hand, or by anything that does not ask, is open to every account.
+ * and one made by hand, or by anything that does not ask, is open to every account. Where the
+ * mode cannot be set (see MODE_NOT_SETTABLE) that is said, once, and the folder is used as it is.
  */
 export function ensureDataDir(dir: string = config.dataDir): string {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (POSIX) fs.chmodSync(dir, 0o700);
+  if (POSIX) setMode(dir, 0o700, dir);
   return dir;
 }
 
 export const dbPath = () => path.join(ensureDataDir(), 'focusdesk.sqlite');
 
-/** Read and written by its owner, and by no other account. Nothing is done if it is not there. */
+/**
+ * Read and written by its owner, and by no other account, where the folder lets the mode be set
+ * (see MODE_NOT_SETTABLE). Nothing is done if it is not there.
+ */
 export function keepToOwner(file: string): void {
   if (!POSIX) return;
   try {
-    fs.chmodSync(file, 0o600);
+    setMode(file, 0o600, path.dirname(file));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }

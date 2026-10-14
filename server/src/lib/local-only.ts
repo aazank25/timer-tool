@@ -66,9 +66,17 @@ const API = /^\/api(?:\/|$)/i;
 /**
  * Where the page may load anything from, and send anything to: this server, and nowhere else.
  * The client is a script and a stylesheet of its own, with nothing written inline, so that is
- * all it needs, and a script that got into the page some other way could neither run from an
- * inline handler or a javascript: link nor send what it read anywhere. No plugins, no <base>,
- * no form that submits, and no frame of another page around it.
+ * all it needs. A script that got into the page some other way could not run from an inline
+ * handler or a javascript: link, and could not fetch, load or post to anywhere else: not by a
+ * request, a socket, a beacon, a picture, a font or a frame. No plugins, no <base>, no form that
+ * submits, and no frame of another page around it.
+ *
+ * What a policy does not cover is moving the page itself. Such a script could still take the page
+ * to another address, with what it has read put in that address (by `location`, a link it clicks
+ * or a new window), and the site there would be asked for it. In the desktop app that goes to the
+ * system's browser, which is not held to the app's own limits (see openOutside in
+ * desktop/privacy.mjs). So the policy narrows what a script in the page can do; it does not make
+ * it safe to let one in.
  */
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",

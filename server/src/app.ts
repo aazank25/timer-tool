@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { AddressInfo } from 'node:net';
+import { BlockList, isIPv4, isIPv6 } from 'node:net';
 import express from 'express';
 import { startCalendarSync } from './lib/calendar.js';
 import { config } from './lib/config.js';
@@ -76,13 +76,30 @@ export function createApp({ token }: AppOptions = {}): express.Express {
 const LOOPBACK_HOSTS = ['127.0.0.1', '::1', 'localhost'];
 
 /**
+ * What loopback is, of an address the system says it bound: all of 127/8, and ::1. An IPv4 address
+ * on an IPv6 socket (::ffff:127.0.0.1) is read as the IPv4 address it carries, and so is not
+ * mistaken for another one.
+ */
+const LOOPBACK_ADDRESSES = new BlockList();
+LOOPBACK_ADDRESSES.addSubnet('127.0.0.0', 8, 'ipv4');
+LOOPBACK_ADDRESSES.addAddress('::1', 'ipv6');
+
+function isLoopbackAddress(address: string): boolean {
+  if (isIPv4(address)) return LOOPBACK_ADDRESSES.check(address, 'ipv4');
+  return isIPv6(address) && LOOPBACK_ADDRESSES.check(address, 'ipv6');
+}
+
+/**
  * Boot the API and the client bundle on a loopback port.
  *
  * Pass `port: 0` to take whatever port is free — that is what the desktop app
  * does, so two copies of FocusDesk can never fight over one port.
  *
  * Throws when asked to listen anywhere but on loopback, whether by `host` or by FOCUSDESK_HOST,
- * before the database is migrated or anything listens.
+ * before the database is migrated or anything listens. A name is not an address, though, and which
+ * one `localhost` is belongs to the resolver, so once the server is bound the address it really got
+ * is looked at too. If that is not loopback the server is shut again and this throws, before the
+ * server has answered anyone or started reading a calendar.
  */
 export async function startServer(
   opts: {
@@ -109,14 +126,27 @@ export async function startServer(
     s.once('error', reject);
   });
 
+  // Nothing has been answered yet, and nothing will be until this has passed. A name is not an
+  // address: which one `localhost` is belongs to the resolver, and a hosts file that puts it on
+  // 0.0.0.0 has listen() take every interface, with the name on the list above.
+  const bound = server.address();
+  if (bound === null || typeof bound === 'string' || !isLoopbackAddress(bound.address)) {
+    const where = typeof bound === 'object' && bound !== null ? bound.address : String(bound);
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw new Error(
+      'FocusDesk listens on loopback only: ' +
+        `${JSON.stringify(host)} was bound to ${JSON.stringify(where)}, which is not loopback`,
+    );
+  }
+
   // Meeting prompts read the synced events, which would otherwise only move when Sync now
   // is pressed. It only fetches while a feed is switched on.
   const stopCalendarSync = startCalendarSync({ everyMs: opts.calendarSyncMs ?? calendarSyncMs() });
 
-  const actual = (server.address() as AddressInfo).port;
   return {
-    port: actual,
-    url: `http://${host}:${actual}`,
+    port: bound.port,
+    url: `http://${host}:${bound.port}`,
     dataDir: config.dataDir,
     hasWebBuild: fs.existsSync(path.join(config.webDist, 'index.html')),
     close: async () => {
