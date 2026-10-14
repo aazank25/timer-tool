@@ -13,13 +13,6 @@ export const statsRouter = Router();
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
-function requireDay(value: unknown, fallback: string): string {
-  if (value === undefined) return fallback;
-  const s = String(value);
-  if (!DAY.test(s)) throw badRequest('day must be YYYY-MM-DD');
-  return s;
-}
-
 statsRouter.get(
   '/today',
   handler(() => ({ today: today(), timezone: tz(), dayStartHour: dayStartHour() })),
@@ -27,19 +20,43 @@ statsRouter.get(
 
 statsRouter.get(
   '/day',
-  handler((req) => dayStats(requireDay(req.query.day, today()))),
+  handler((req) => dayStats(requireRealDay('day', req.query.day, today()))),
 );
+
+/**
+ * The most days /range answers for at once: a year, and a few days over so that a year back from
+ * any day fits. Every day of a window is worked out one by one, on the one thread the server
+ * has, so a window of centuries would hold up every other request for as long as it took.
+ */
+const MAX_RANGE_DAYS = 370;
+
+/**
+ * How far back from `to` a window without a `from` goes: 7 days unless asked, at least one, and
+ * no more than the most /range answers for.
+ */
+function requireDays(value: unknown): number {
+  if (value === undefined || value === '') return 7;
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) {
+    throw badRequest('days must be a whole number');
+  }
+  return Math.min(MAX_RANGE_DAYS, Math.max(1, Number(value)));
+}
 
 statsRouter.get(
   '/range',
   handler((req) => {
-    const to = requireDay(req.query.to, today());
-    const days = req.query.days ? Number(req.query.days) : undefined;
+    const to = requireRealDay('to', req.query.to, today());
+    const days = requireDays(req.query.days);
     const from =
       req.query.from !== undefined
-        ? requireDay(req.query.from, to)
-        : trailing(to, Number.isFinite(days) && days ? Math.min(370, Math.max(1, days)) : 7).from;
+        ? requireRealDay('from', req.query.from, to)
+        : trailing(to, days).from;
+    if (!DAY.test(from)) throw badRequest('That window starts before the year 0000');
     if (from > to) throw badRequest('from must not be after to');
+    // Counted from the two dates, before any day of the window is looked at.
+    const span =
+      (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000 + 1;
+    if (span > MAX_RANGE_DAYS) throw badRequest(`Ask for at most ${MAX_RANGE_DAYS} days at once`);
     return rangeStats(from, to);
   }),
 );

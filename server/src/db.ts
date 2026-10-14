@@ -1,9 +1,12 @@
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { dbPath } from './lib/config.js';
+import { dbPath, keepDatabaseToOwner, keepToOwner } from './lib/config.js';
 import { hostTimeZone } from './lib/time.js';
 
-export const db = new Database(dbPath());
+const dbFile = dbPath();
+// No other account on this computer may read it (the folder is kept the same way).
+keepDatabaseToOwner(dbFile);
+export const db = new Database(dbFile);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 5000');
@@ -422,6 +425,9 @@ export function backupBeforeMigrating(
     `focusdesk.backup-before-${firstPendingId}-${stamp}.sqlite`,
   );
   conn.prepare('VACUUM INTO ?').run(backup);
+  // A copy of everything, so it is its owner's alone like the database. SQLite makes it with the
+  // mode every new file gets.
+  keepToOwner(backup);
   return backup;
 }
 

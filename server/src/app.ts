@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
-import cors from 'cors';
 import express from 'express';
 import { startCalendarSync } from './lib/calendar.js';
 import { config } from './lib/config.js';
@@ -35,18 +34,26 @@ export function calendarSyncMs(): number {
   return Number.isFinite(ms) && ms >= 0 ? Math.round(ms) : DEFAULT_CALENDAR_SYNC_MS;
 }
 
-export function createApp(): express.Express {
+export interface AppOptions {
+  /**
+   * What every request for the API must carry in its x-focusdesk-token header, so that only
+   * whoever started the server can use it: the desktop app makes a new one at every launch.
+   * Left out, or empty, the API asks for none, as under `npm start` and `npm run dev`.
+   */
+  token?: string;
+}
+
+export function createApp({ token }: AppOptions = {}): express.Express {
   const app = express();
   app.disable('x-powered-by');
-  // First of all, ahead of the body parser, CORS, the API and the client bundle: nothing below
-  // is reached by a request that did not come from the app itself.
-  app.use(localOnly);
+  // First of all, ahead of the body parser, the API and the client bundle: nothing below is
+  // reached by a request that did not come from the app itself.
+  app.use(localOnly(token));
   app.use(express.json({ limit: '2mb' }));
 
-  // The Vite dev server runs on a different port; in production — and inside
-  // the desktop app — the client is served from this origin and needs no CORS.
-  if (!config.isProd) app.use(cors({ origin: config.devOrigins }));
-
+  // No CORS, in development either: the client is served from this origin, or from the Vite dev
+  // server, which proxies /api so that the page asks its own origin. Allowing another origin to
+  // read the API would let any page that origin serves read all of it.
   app.use('/api', apiRouter);
 
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {
@@ -62,10 +69,20 @@ export function createApp(): express.Express {
 }
 
 /**
+ * The addresses the server may listen on: loopback, by the names it goes by. Anything else, a
+ * network address or 0.0.0.0 for all of them, would put the API in reach of other computers,
+ * and the Host check in local-only.ts does not keep out a client that is not a browser.
+ */
+const LOOPBACK_HOSTS = ['127.0.0.1', '::1', 'localhost'];
+
+/**
  * Boot the API and the client bundle on a loopback port.
  *
  * Pass `port: 0` to take whatever port is free — that is what the desktop app
  * does, so two copies of FocusDesk can never fight over one port.
+ *
+ * Throws when asked to listen anywhere but on loopback, whether by `host` or by FOCUSDESK_HOST,
+ * before the database is migrated or anything listens.
  */
 export async function startServer(
   opts: {
@@ -73,11 +90,17 @@ export async function startServer(
     host?: string;
     /** Milliseconds between background calendar syncs; 0 for none. Defaults to FOCUSDESK_CALENDAR_SYNC_MS, then 15 minutes. */
     calendarSyncMs?: number;
-  } = {},
+  } & AppOptions = {},
 ): Promise<RunningServer> {
-  initDb();
-  const app = createApp();
   const host = opts.host ?? config.host;
+  if (!LOOPBACK_HOSTS.includes(host)) {
+    throw new Error(
+      'FocusDesk listens on loopback only: the host must be 127.0.0.1, ::1 or localhost, ' +
+        `not ${JSON.stringify(host)}`,
+    );
+  }
+  initDb();
+  const app = createApp({ token: opts.token });
   const port = opts.port ?? config.port;
 
   const server = await new Promise<import('node:http').Server>((resolve, reject) => {

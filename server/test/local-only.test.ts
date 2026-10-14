@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { after, before, beforeEach, describe, it } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import type { AppOptions } from '../src/app.js';
 import { freshDb } from './setup.js';
 
 /**
@@ -108,9 +112,9 @@ function raw(port: number, lines: string[]): Promise<Reply> {
 }
 
 /** The API and the client bundle on a loopback port of its own, as every other test serves it. */
-async function serve() {
+async function serve(options?: AppOptions) {
   const { createApp } = await import('../src/app.js');
-  const server = createApp().listen(0, '127.0.0.1');
+  const server = createApp(options).listen(0, '127.0.0.1');
   await once(server, 'listening');
   const { port } = server.address() as AddressInfo;
   return {
@@ -301,7 +305,7 @@ describe('the Host a request is addressed to', () => {
     assert.deepEqual((await api.send({ path: '/api/projects' })).body, []);
   });
 
-  it('refuses before the body is read and before CORS answers', async () => {
+  it('refuses before the body is read', async () => {
     // Not JSON: were the body parser first, it would answer, with an error of its own.
     const parsed = await api.send({
       method: 'POST',
@@ -310,15 +314,10 @@ describe('the Host a request is addressed to', () => {
       body: '{not json',
     });
     assertRefused(parsed, 'a body that is not JSON');
-
-    // A dev origin that CORS would have named in its answer, and does not in the refusal.
-    const cors = await api.send({ headers: { host: 'evil.com', origin: 'http://localhost:5173' } });
-    assertRefused(cors, 'a dev origin');
-    assert.equal(cors.headers['access-control-allow-origin'], undefined);
   });
 });
 
-describe('framing', () => {
+describe('what every answer says about itself', () => {
   let api: Api;
 
   before(async () => {
@@ -328,15 +327,39 @@ describe('framing', () => {
 
   after(() => api.close());
 
-  it('is refused on every answer: the shell, the API and a refusal alike', async () => {
-    for (const sent of [
+  /** The page loads from this server only, sends to it only, and is never framed. */
+  const policy = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self'",
+    "img-src 'self' data:",
+    "font-src 'self'",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+
+  it('is on the shell, a file of the bundle, the API and a refusal alike', async () => {
+    const asked: Sent[] = [
       { path: '/' },
+      { path: '/projects' },
+      { path: '/assets/app.js' },
       { path: '/api/settings' },
+      { method: 'POST', path: '/api/projects', body: { name: 'Headers' } },
       { path: '/api/settings', headers: { host: 'evil.com' } },
-    ]) {
+      { path: '/api/settings', headers: { 'sec-fetch-site': 'cross-site' } },
+      { method: 'POST', path: '/api/projects', headers: { origin: 'https://evil.com' }, body: {} },
+    ];
+    for (const sent of asked) {
+      const what = JSON.stringify(sent);
       const res = await api.send(sent);
-      assert.equal(res.headers['x-frame-options'], 'DENY', JSON.stringify(sent));
-      assert.equal(res.headers['content-security-policy'], "frame-ancestors 'none'");
+      assert.equal(res.headers['content-security-policy'], policy, what);
+      // The old way of saying it is not to be framed, for whatever does not read the policy.
+      assert.equal(res.headers['x-frame-options'], 'DENY', what);
+      assert.equal(res.headers['x-content-type-options'], 'nosniff', what);
+      assert.equal(res.headers['referrer-policy'], 'no-referrer', what);
     }
   });
 });
@@ -486,7 +509,9 @@ describe('writes from other sites', () => {
     assert.deepEqual(await projectNames(), []);
   });
 
-  it('takes a write from the Vite dev server only while developing', async () => {
+  it("takes the dev server's Origin against this server's own Host only while developing", async () => {
+    // What a proxy that puts this server's address in the Host sends on (Vite's changeOrigin).
+    // The repo's dev server passes the browser's Host on instead: see the app's own requests.
     const { config } = await import('../src/lib/config.js');
     for (const [i, origin] of config.devOrigins.entries()) {
       const res = await create(`Dev ${i}`, { origin });
@@ -598,20 +623,69 @@ describe('writes from other sites', () => {
     assert.deepEqual(await projectNames(), ['Keep me']);
   });
 
-  it('does not ask a read where it came from: CORS has that, and the Host check', async () => {
-    const foreign = { origin: 'https://evil.com', 'sec-fetch-site': 'cross-site' };
+});
 
-    const get = await api.send({ headers: foreign });
-    assert.equal(get.status, 200);
-    // Not let in by CORS either, which is what stops a page from reading the answer.
-    assert.equal(get.headers['access-control-allow-origin'], undefined);
-    assert.equal((await api.send({ method: 'HEAD', headers: foreign })).status, 200);
-    const preflight = await api.send({
-      method: 'OPTIONS',
-      path: '/api/projects',
-      headers: foreign,
-    });
-    assert.notEqual(preflight.status, 403);
+describe('reads from other sites', () => {
+  let api: Api;
+
+  before(async () => {
+    await freshDb();
+    api = await serve();
+  });
+
+  after(() => api.close());
+
+  const sessions = (headers: Record<string, string>, method = 'GET', path = '/api/sessions') =>
+    api.send({ method, path, headers });
+
+  it('refuses a read of the API that the browser says another site asked for', async () => {
+    // An image, a script tag or a no-cors fetch on another site's page. The page cannot read the
+    // answer, but the server would do the work, and whether it loads tells the page the app is
+    // there.
+    for (const value of ['cross-site', 'Cross-Site', 'CROSS-SITE', 'same-origin, cross-site']) {
+      for (const method of ['GET', 'HEAD', 'OPTIONS']) {
+        const res = await sessions({ 'sec-fetch-site': value }, method);
+        // A HEAD is answered without a body, so only its status can be looked at.
+        if (method === 'HEAD') assert.equal(res.status, 403, `${method} ${value}`);
+        else assertRefused(res, `${method} ${value}`);
+      }
+    }
+    // A page on another port of this computer is same-site: another program's, not the app's.
+    for (const value of ['same-site', 'Same-Site', 'same-origin, same-site']) {
+      assertRefused(await sessions({ 'sec-fetch-site': value }), value);
+    }
+    // Express routes the API in any case, so it is refused in any case.
+    for (const path of ['/api', '/api/', '/api/health', '/API/sessions', '/Api/health']) {
+      assertRefused(await sessions({ 'sec-fetch-site': 'cross-site' }, 'GET', path), path);
+    }
+  });
+
+  it("answers a read from the app's own page, a typed address, and a client that is not a browser", async () => {
+    const ours: Record<string, string>[] = [
+      { 'sec-fetch-site': 'same-origin' },
+      { 'sec-fetch-site': 'none' },
+      {},
+    ];
+    for (const headers of ours) {
+      const res = await sessions(headers);
+      assert.equal(res.status, 200, JSON.stringify(headers));
+      assert.ok(Array.isArray(res.body), JSON.stringify(headers));
+    }
+  });
+
+  it('still opens the app from a link on another site: the shell and its files are no secret', async () => {
+    const link = { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate' };
+    for (const [path, expected] of [
+      ['/', 'FocusDesk shell'],
+      ['/projects', 'FocusDesk shell'],
+      ['/assets/app.js', 'the client bundle'],
+      // A route that only starts like the API is the app's.
+      ['/apiary', 'FocusDesk shell'],
+    ] as const) {
+      const res = await api.send({ path, headers: link });
+      assert.equal(res.status, 200, path);
+      assert.ok(res.text.includes(expected), path);
+    }
   });
 });
 
@@ -647,31 +721,53 @@ describe("the app's own requests", () => {
     assert.equal((await api.send({ path: '/api/projects', headers })).status, 200);
   });
 
+  it('are answered through the Vite dev server, which proxies /api', async () => {
+    // web/vite.config.ts proxies /api and passes on the Host the browser used, with the Origin
+    // and Sec-Fetch-Site it sent to the dev page. To the browser that page is the same origin, and
+    // here its Origin is the Host's, so it is the app's own page by the same rule as ours.
+    for (const [i, dev] of ['localhost:5173', '127.0.0.1:5173'].entries()) {
+      const headers = {
+        host: dev,
+        origin: `http://${dev}`,
+        referer: `http://${dev}/projects`,
+        'sec-fetch-site': 'same-origin',
+      };
+      const body = { name: `From dev ${i}` };
+      const created = await api.send({ method: 'POST', path: '/api/projects', headers, body });
+      assert.equal(created.status, 201, dev);
+      assert.equal((await api.send({ path: '/api/projects', headers })).status, 200, dev);
+    }
+  });
+
   it(
-    'are answered through the Vite dev server, which proxies /api',
+    "are answered through a proxy that puts this server's address in the Host, while developing",
     { skip: process.env.NODE_ENV === 'production' && 'the dev server is trusted in development' },
     async () => {
-    // web/vite.config.ts proxies /api with changeOrigin, which rewrites the Host to the API's own
-    // address. The Origin and Sec-Fetch-Site that the browser sent to the dev page go through as
-    // they were, and to the browser that page is the same origin.
-    const headers = {
-      host: `127.0.0.1:${api.port}`,
-      origin: 'http://localhost:5173',
-      referer: 'http://localhost:5173/projects',
-      'sec-fetch-site': 'same-origin',
-    };
-    const body = { name: 'From dev' };
-    const created = await api.send({ method: 'POST', path: '/api/projects', headers, body });
-    assert.equal(created.status, 201);
-    assert.equal((await api.send({ path: '/api/projects', headers })).status, 200);
+      // A proxy set to change the Host to the API's own address (Vite's changeOrigin) leaves the
+      // dev page's Origin against a Host it does not match. The dev server's origins are taken
+      // for that while developing (config.devOrigins).
+      const headers = {
+        host: `127.0.0.1:${api.port}`,
+        origin: 'http://localhost:5173',
+        referer: 'http://localhost:5173/projects',
+        'sec-fetch-site': 'same-origin',
+      };
+      const body = { name: 'From dev' };
+      const created = await api.send({ method: 'POST', path: '/api/projects', headers, body });
+      assert.equal(created.status, 201);
+      assert.equal((await api.send({ path: '/api/projects', headers })).status, 200);
     },
   );
 
-  it(
-    'are answered when the dev origin asks CORS first',
-    { skip: process.env.NODE_ENV === 'production' && 'CORS is not mounted in production' },
-    async () => {
-      const origin = 'http://localhost:5173';
+  it("need no CORS, so it lets no origin read an answer, the dev server's included", async () => {
+    // In development as in production. The dev page asks its own origin, which proxies /api, so
+    // a page on another origin that asks this server directly is not the app, whatever its port.
+    const { config } = await import('../src/lib/config.js');
+    for (const origin of [...config.devOrigins, 'http://localhost:3000', 'https://evil.com']) {
+      const read = await api.send({ path: '/api/settings', headers: { origin } });
+      assert.equal(read.status, 200, origin);
+      assert.equal(read.headers['access-control-allow-origin'], undefined, origin);
+
       const preflight = await api.send({
         method: 'OPTIONS',
         path: '/api/projects',
@@ -681,10 +777,17 @@ describe("the app's own requests", () => {
           'access-control-request-headers': 'content-type',
         },
       });
-      assert.equal(preflight.status, 204);
-      assert.equal(preflight.headers['access-control-allow-origin'], origin);
-    },
-  );
+      assert.equal(preflight.headers['access-control-allow-origin'], undefined, origin);
+      assert.equal(preflight.headers['access-control-allow-headers'], undefined, origin);
+
+      // And what a browser adds from such a page: another port is same-site, and refused.
+      const browser = await api.send({
+        path: '/api/settings',
+        headers: { origin, 'sec-fetch-site': 'same-site' },
+      });
+      assertRefused(browser, origin);
+    }
+  });
 
   it('are answered when they come from Node, as the desktop main process sends them', async () => {
     // apiJson in desktop/main.mjs: Node's fetch to the address startServer gives back. It sends
@@ -712,6 +815,333 @@ describe("the app's own requests", () => {
       assert.equal((await fetch(`${running.url}/?desktop=1`)).status, 200);
     } finally {
       await running.close();
+    }
+  });
+});
+
+describe('the token the server is started with', () => {
+  /** Made the way the desktop app makes one: new for this run, and in no file anywhere. */
+  const token = randomBytes(32).toString('base64url');
+  const carrying = (value: string) => ({ 'x-focusdesk-token': value });
+
+  let api: Api;
+  /** Every answer the server gave in this block, to look for the token in. */
+  const answers: Reply[] = [];
+
+  before(async () => {
+    await freshDb();
+    api = await serve({ token });
+  });
+
+  beforeEach(async () => {
+    await freshDb();
+  });
+
+  after(() => api.close());
+
+  async function sent(what: Sent) {
+    const res = await api.send(what);
+    answers.push(res);
+    return res;
+  }
+
+  /** The names of the projects, asked for with the token. */
+  const projectNames = async () => {
+    const { body } = await sent({ path: '/api/projects', headers: carrying(token) });
+    return (body as { name: string }[]).map((project) => project.name).sort();
+  };
+
+  it('is asked of every request for the API, whatever its method, and refused without it', async () => {
+    const wrong: Record<string, string>[] = [
+      // None at all, or one that is empty.
+      {},
+      carrying(''),
+      // As long as the token, and wrong in its last character only.
+      carrying(`${token.slice(0, -1)}${token.endsWith('A') ? 'B' : 'A'}`),
+      carrying(token.toUpperCase() === token ? token.toLowerCase() : token.toUpperCase()),
+      // Shorter and longer: the token with one character too few or too many.
+      carrying(token.slice(0, -1)),
+      carrying(`${token}A`),
+      carrying(token.slice(0, 16)),
+      // The token in another header, or in the query, is not the token in its header.
+      { authorization: `Bearer ${token}` },
+      { 'x-focusdesk-tokens': token },
+    ];
+    const paths = ['/api/health', '/api/settings', '/api/projects', '/api', '/API/health'];
+    for (const headers of wrong) {
+      for (const method of ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS']) {
+        for (const path of paths) {
+          const what = `${method} ${path} ${JSON.stringify(headers)}`;
+          const body = method === 'POST' || method === 'PATCH' ? { name: 'Taken over' } : undefined;
+          assertRefused(await sent({ method, path, headers, body }), what);
+        }
+      }
+      // A HEAD is answered without a body, so only its status can be looked at.
+      const head = await sent({ method: 'HEAD', path: '/api/health', headers });
+      assert.equal(head.status, 403, `HEAD ${JSON.stringify(headers)}`);
+    }
+    const query = await sent({ path: `/api/settings?token=${token}` });
+    assertRefused(query, 'the token in the query');
+    assert.deepEqual(await projectNames(), []);
+  });
+
+  it('is refused when it is sent twice, which comes to the server as one value', async () => {
+    const here = `Host: 127.0.0.1:${api.port}`;
+    const twice = await api.raw(
+      'GET /api/settings HTTP/1.1',
+      here,
+      `X-FocusDesk-Token: ${token}`,
+      `X-FocusDesk-Token: ${token}`,
+      'Connection: close',
+    );
+    answers.push(twice);
+    assertRefused(twice, 'the token twice');
+  });
+
+  it('answers the app, which sends it, for reads and writes alike', async () => {
+    const headers = carrying(token);
+    const settings = await sent({ path: '/api/settings', headers });
+    assert.equal(settings.status, 200);
+    assert.equal(typeof settings.body.close_behavior, 'string');
+    assert.equal((await sent({ path: '/api/health', headers })).status, 200);
+    assert.equal((await sent({ method: 'HEAD', path: '/api/health', headers })).status, 200);
+
+    const created = await sent({
+      method: 'POST',
+      path: '/api/projects',
+      headers,
+      body: { name: 'With the token' },
+    });
+    assert.equal(created.status, 201);
+    const renamed = await sent({
+      method: 'PATCH',
+      path: `/api/projects/${created.body.id}`,
+      headers,
+      body: { name: 'Still with it' },
+    });
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(await projectNames(), ['Still with it']);
+
+    // The name of a header is not case sensitive, so neither is it here.
+    const shouted = await api.raw(
+      'GET /api/health HTTP/1.1',
+      `Host: 127.0.0.1:${api.port}`,
+      `X-FOCUSDESK-TOKEN: ${token}`,
+      'Connection: close',
+    );
+    answers.push(shouted);
+    assert.equal(shouted.status, 200);
+  });
+
+  it('is asked before the body is read', async () => {
+    // Not JSON: were the body parser first, it would answer, with an error of its own.
+    const res = await sent({
+      method: 'POST',
+      path: '/api/projects',
+      headers: { 'content-type': 'application/json' },
+      body: '{not json',
+    });
+    assertRefused(res, 'a body that is not JSON');
+  });
+
+  it('does not let anything else past the other checks', async () => {
+    const headers = carrying(token);
+    // Another name, another site's page, another site's write: each is still refused.
+    assertRefused(
+      await sent({ path: '/api/settings', headers: { ...headers, host: 'evil.com' } }),
+      'Host evil.com',
+    );
+    const crossSite = { ...headers, 'sec-fetch-site': 'cross-site' };
+    assertRefused(
+      await sent({ path: '/api/sessions', headers: crossSite }),
+      'a read from another site',
+    );
+    assertRefused(
+      await sent({
+        method: 'POST',
+        path: '/api/projects',
+        headers: { ...headers, origin: 'https://evil.com' },
+        body: { name: 'Taken over' },
+      }),
+      'a write from another site',
+    );
+    assert.deepEqual(await projectNames(), []);
+  });
+
+  it('is not asked of the shell or its files, which are the same for everyone', async () => {
+    for (const [path, expected] of [
+      ['/', 'FocusDesk shell'],
+      ['/?desktop=1', 'FocusDesk shell'],
+      ['/projects', 'FocusDesk shell'],
+      ['/assets/app.js', 'the client bundle'],
+    ] as const) {
+      const res = await sent({ path });
+      assert.equal(res.status, 200, path);
+      assert.ok(res.text.includes(expected), path);
+    }
+  });
+
+  it('is never said back, in an answer or in a refusal', async () => {
+    const headers = carrying(token);
+    const asked: Sent[] = [
+      { path: '/api/settings' },
+      { path: '/api/settings', headers: carrying(token.slice(1)) },
+      { path: `/api/settings?token=${token}` },
+      { path: '/api/settings', headers },
+      { path: '/api/sessions/999999', headers },
+      { method: 'POST', path: '/api/projects', headers, body: { name: '' } },
+      { method: 'POST', path: '/api/projects', headers, body: '{not json' },
+      { path: '/api/settings', headers: { ...headers, host: 'evil.com' } },
+      { path: '/api/settings', headers: { ...headers, 'sec-fetch-site': 'cross-site' } },
+      { path: '/' },
+    ];
+    for (const what of asked) await sent(what);
+    // And everything the tests above were answered.
+    assert.ok(answers.length >= asked.length);
+    for (const res of answers) {
+      assert.ok(!res.text.includes(token), `${res.status} ${res.text.slice(0, 80)}`);
+      assert.ok(!JSON.stringify(res.headers).includes(token), JSON.stringify(res.headers));
+    }
+  });
+
+  it('asks for nothing when the server is started without one, or with an empty one', async () => {
+    for (const [i, options] of [undefined, {}, { token: undefined }, { token: '' }].entries()) {
+      const open = await serve(options);
+      try {
+        const what = `${i}: ${JSON.stringify(options)}`;
+        assert.equal((await open.send({ path: '/api/health' })).status, 200, what);
+        // Whatever a request carries is not asked about.
+        const carried = await open.send({ path: '/api/settings', headers: carrying('anything') });
+        assert.equal(carried.status, 200, what);
+        const created = await open.send({
+          method: 'POST',
+          path: '/api/projects',
+          body: { name: `Open ${i}` },
+        });
+        assert.equal(created.status, 201, what);
+      } finally {
+        await open.close();
+      }
+    }
+  });
+
+  it('will not start with a token that is not a string, rather than run with none', async () => {
+    const { createApp } = await import('../src/app.js');
+    for (const wrong of [null, 0, 42, true, ['a token'], { token }, Buffer.from(token)]) {
+      assert.throws(
+        () => createApp({ token: wrong as unknown as string }),
+        TypeError,
+        JSON.stringify(wrong),
+      );
+    }
+  });
+
+  it('is taken by startServer, as the desktop app starts the server', async () => {
+    const { startServer } = await import('../src/app.js');
+    const running = await startServer({ port: 0, host: '127.0.0.1', calendarSyncMs: 0, token });
+    try {
+      const health = (headers?: Record<string, string>) =>
+        fetch(`${running.url}/api/health`, { headers });
+      const refused = await health();
+      assert.equal(refused.status, 403);
+      assert.ok(!(await refused.text()).includes(token));
+      assert.equal((await health(carrying(token))).status, 200);
+      assert.equal((await health(carrying(`${token}A`))).status, 403);
+      const created = await fetch(`${running.url}/api/projects`, {
+        method: 'POST',
+        headers: { ...carrying(token), 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'From main' }),
+      });
+      assert.equal(created.status, 201);
+      // And the shell the window loads, without it.
+      assert.equal((await fetch(`${running.url}/?desktop=1`)).status, 200);
+    } finally {
+      await running.close();
+    }
+  });
+});
+
+describe('the address the server listens on', () => {
+  before(async () => {
+    await freshDb();
+  });
+
+  it('is loopback, and nothing else is taken', async () => {
+    const { startServer } = await import('../src/app.js');
+    for (const host of [
+      // Every address, in either family.
+      '0.0.0.0',
+      '::',
+      // An address on a network, and a name that is one.
+      '192.168.1.5',
+      '10.0.0.2',
+      'example.com',
+      // Loopback by a spelling the server does not answer to, or the rest of 127/8.
+      '127.0.0.2',
+      'LOCALHOST',
+      'localhost.',
+      '[::1]',
+      // Which Node would take as every address.
+      '',
+    ]) {
+      await assert.rejects(
+        startServer({ port: 0, host, calendarSyncMs: 0 }),
+        /^Error: FocusDesk listens on loopback only/,
+        JSON.stringify(host),
+      );
+    }
+  });
+
+  it('is 127.0.0.1 unless it is told otherwise, and may be localhost', async () => {
+    const { startServer } = await import('../src/app.js');
+    for (const host of [undefined, '127.0.0.1', 'localhost']) {
+      const running = await startServer({ port: 0, host, calendarSyncMs: 0 });
+      try {
+        if (host === undefined) assert.match(running.url, /^http:\/\/127\.0\.0\.1:\d+$/);
+        assert.equal((await fetch(`${running.url}/api/health`)).status, 200, String(host));
+      } finally {
+        await running.close();
+      }
+    }
+  });
+
+  it('may be ::1, where the computer has IPv6', async () => {
+    const { startServer } = await import('../src/app.js');
+    try {
+      const running = await startServer({ port: 0, host: '::1', calendarSyncMs: 0 });
+      await running.close();
+    } catch (err) {
+      // Taken, and then not to be had here: not refused for being somewhere else.
+      const { code } = err as NodeJS.ErrnoException;
+      assert.ok(code === 'EAFNOSUPPORT' || code === 'EADDRNOTAVAIL', String(err));
+    }
+  });
+
+  it('is not moved off loopback by FOCUSDESK_HOST either', () => {
+    // As `npm start` and `npm run dev` start the server, in a process of its own: it says why it
+    // will not start, and it never listens.
+    const dir = fs.mkdtempSync(join(os.tmpdir(), 'focusdesk-host-'));
+    try {
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        FOCUSDESK_HOST: '0.0.0.0',
+        FOCUSDESK_PORT: '0',
+        FOCUSDESK_DATA_DIR: dir,
+        FOCUSDESK_CALENDAR_SYNC_MS: '0',
+      };
+      // Not a test of the test runner's, whatever it is run by.
+      delete env.NODE_TEST_CONTEXT;
+      const run = spawnSync(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
+        cwd: dirname(dirname(fileURLToPath(import.meta.url))),
+        env,
+        encoding: 'utf8',
+        timeout: 60_000,
+      });
+      assert.notEqual(run.status, 0);
+      assert.match(run.stderr, /FocusDesk listens on loopback only/);
+      assert.doesNotMatch(run.stdout, /api ready/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

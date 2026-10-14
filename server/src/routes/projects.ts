@@ -8,12 +8,32 @@ export const projectsRouter = Router();
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
 
+/**
+ * Whether an address is a web page's. The project's link is opened with a click, so anything
+ * else would be run rather than shown: a javascript: address in the page itself, and a file:, an
+ * smb: or another app's address by whatever the computer opens it with. It is read the way a
+ * browser reads it, so a tab or a space in the scheme is no way around it.
+ */
+function isWebAddress(value: string): boolean {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === 'https:' || protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
 const upsertSchema = z.object({
   name: z.string().trim().min(1).max(120),
   color: z.string().regex(HEX, 'color must be a #rrggbb hex string').optional(),
   description: z.string().max(2000).nullish(),
   weeklyTargetMinutes: z.number().int().min(0).max(100 * 60).nullish(),
-  notionUrl: z.string().url().max(2000).nullish(),
+  notionUrl: z
+    .string()
+    .url()
+    .max(2000)
+    .refine(isWebAddress, 'notionUrl must be an http or https address')
+    .nullish(),
 });
 const patchSchema = upsertSchema.partial().extend({ archived: z.boolean().optional() });
 
