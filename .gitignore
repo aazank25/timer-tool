@@ -9,3 +9,27 @@ data/
 *.sqlite-wal
 *.sqlite-shm
 .DS_Store
+
+# Environment files for any mode (.env.production and so on). An example file may still be committed.
+.env.*
+!.env.example
+
+# A database under any name, not only the app's own focusdesk.sqlite.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+
+# Signing certificates, keys and profiles, and the file that holds their password.
+*.p12
+*.pfx
+*.pem
+*.key
+*.cer
+*.p8
+*.mobileprovision
+*.provisionprofile
+electron-builder.env
+
+# Calendar exports, which hold real meetings.
+*.ics

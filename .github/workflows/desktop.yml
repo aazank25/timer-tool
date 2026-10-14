@@ -52,9 +52,12 @@ jobs:
             installers: desktop/release/*-setup.exe
             artifact: FocusDesk-Windows
     steps:
-      - uses: actions/checkout@v4
+      # Each action is pinned to a full commit: a tag such as v4 can be moved to other code, and the
+      # release job runs actions with a token that can write to the repository. The version after the #
+      # is the release that commit belongs to, so change the two together.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -102,6 +105,17 @@ jobs:
             esac
           done
 
+      # Uploaded before Playwright is installed or run: no lockfile covers it, so this keeps anything it
+      # does from changing the files that get uploaded. A failed smoke test still fails this job, and
+      # the release job needs this job, so a build that fails it is never published.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.installers }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0 # an installer is compressed already
+
       # Playwright is only for the smoke test, so it goes in a temp folder and the lockfiles stay as they are.
       - name: Install Playwright
         run: npm install --no-save --no-package-lock --no-audit --no-fund --ignore-scripts --prefix "${{ runner.temp }}/playwright" playwright@1.64.0
@@ -112,23 +126,16 @@ jobs:
         env:
           NODE_PATH: ${{ runner.temp }}/playwright/node_modules
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.installers }}
-          if-no-files-found: error
-          retention-days: 14
-          compression-level: 0 # an installer is compressed already
-
   # Apart from build, so that the installers are still made if a unit test fails on Windows.
+  # Only publishing waits for it: the release job needs this job too.
   test-windows:
     name: Unit tests (Windows)
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -145,7 +152,9 @@ jobs:
 
   release:
     name: Publish release
-    needs: build
+    # The tests (which include the checks that keep the local API to the app's own page) and the
+    # typecheck run only in test-windows, so a red one has to stop the release.
+    needs: [build, test-windows]
     # A pushed v* tag publishes. The button publishes only when "publish" is ticked, whatever it is run on.
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish)
     runs-on: ubuntu-latest
@@ -156,11 +165,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: FocusDesk-*
           merge-multiple: true
