@@ -449,7 +449,7 @@ describe('main.mjs as it starts', () => {
 });
 
 describe('links out of the windows, as main.mjs starts them', () => {
-  it('reach the system from the main window only for a web page or an email address, and every new window is refused', () => {
+  it('reach the system from the main window only for a web page, and every new window is refused', () => {
     for (const [name, { opened, opens, moved, logs }] of each()) {
       assert.deepEqual(opens, [{ action: 'deny' }, { action: 'deny' }], name);
       // smb: and https: are both kept from moving the window off the app; the app's own page is not.
