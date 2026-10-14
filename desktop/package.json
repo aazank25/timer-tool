@@ -36,6 +36,7 @@
       "close-window.mjs",
       "attention.mjs",
       "menu-bar.mjs",
+      "privacy.mjs",
       "requests.mjs",
       "shortcuts.mjs",
       "window-route.mjs",

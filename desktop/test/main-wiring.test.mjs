@@ -291,3 +291,162 @@ describe('the notifications', () => {
     );
   });
 });
+
+/** Every module of the main process, by name: what is packed beside main.mjs and runs in it. */
+const modules = fs
+  .readdirSync(new URL('..', import.meta.url))
+  .filter((file) => file.endsWith('.mjs'))
+  .map((file) => [file, read(file)]);
+
+/** How many times `pattern` is found in all of them together. */
+const countInModules = (pattern) =>
+  modules.reduce((n, [, source]) => n + [...source.matchAll(pattern)].length, 0);
+
+describe('the key to the server', () => {
+  it('is made once, as the app starts, and the server is started with it', () => {
+    assert.match(main, /^const token = newToken\(\);$/m);
+    assert.match(main, /server = await startServer\(\{ port: 0, host: '127\.0\.0\.1', token \}\);/);
+    assert.ok(main.indexOf('const token = newToken();') < main.indexOf('app.whenReady()'));
+  });
+
+  it('goes with both of the ways the main process asks the API, and there is no third', () => {
+    const asks = [
+      ...main.matchAll(/await fetch\(`\$\{server\.url\}\/api\$\{pathname\}`, \{([\s\S]*?)\n {2}\}\);/g),
+    ];
+    assert.equal(asks.length, 2, 'api and apiJson');
+    for (const [, options] of asks) assert.match(options, /\[TOKEN_HEADER\]: token\b/);
+    assert.equal([...main.matchAll(/\bfetch\(/g)].length, 2, 'main.mjs asks the network some other way');
+    assert.match(functionBody(main, 'apiJson'), /'content-type': 'application\/json'/);
+  });
+
+  it('is handed only to the server, the session, the requests and the end-to-end tests, and is never logged', () => {
+    const uses = main
+      .split('\n')
+      .filter((line) => /\btoken\b/.test(line) && !/^\s*(\/\/|\/\*|\*)/.test(line))
+      .map((line) => line.trim());
+    assert.deepEqual(uses, [
+      'const token = newToken();',
+      'headers: { [TOKEN_HEADER]: token },',
+      '[TOKEN_HEADER]: token,',
+      "server = await startServer({ port: 0, host: '127.0.0.1', token });",
+      'keepToServer(electronSession.defaultSession, { serverUrl: server.url, token });',
+      'token,',
+    ]);
+    for (const [name, source] of modules) {
+      assert.doesNotMatch(source, /console\.\w+\([^;]*\btoken\b/, name);
+    }
+  });
+
+  it('is in the end-to-end tests’ hooks only when they run, beside the server’s address', () => {
+    const hooks = main.match(
+      /if \(process\.env\.FOCUSDESK_TEST === '1'\) \{\n[^\n]*\n {4}globalThis\.__focusdesk = \{\n([\s\S]*?)\n {4}\};/,
+    );
+    assert.ok(hooks, 'main.mjs has no test hooks');
+    assert.match(hooks[1], /^ {6}serverUrl: server\.url,\n(?: {6}\/\*\*.*\*\/\n)? {6}token,$/m);
+    assert.equal(main.match(/^ {6}token,$/gm).length, 1, 'the key is put somewhere else as well');
+  });
+
+  it('is sent by the smoke test on its own request to the API, as the hooks hand it over', () => {
+    const smoke = read('scripts/smoke.mjs');
+    assert.match(smoke, /token: globalThis\.__focusdesk\.token,/);
+    assert.match(
+      smoke,
+      /fetch\(`\$\{serverUrl\}\/api\/health`, \{\s*headers: \{ 'x-focusdesk-token': token \},/,
+    );
+  });
+});
+
+describe('the session both windows use', () => {
+  it('is held to the server once it is up, before the quick-switch box is made and before the first window', () => {
+    const call = main.indexOf(
+      'keepToServer(electronSession.defaultSession, { serverUrl: server.url, token });',
+    );
+    assert.ok(call > main.indexOf('server = await startServer('), 'before the server is up');
+    assert.ok(call < main.indexOf('palette = createPalette('), 'after the quick-switch box is made');
+    assert.ok(firstWindow > 0 && call < firstWindow, 'after the first window');
+  });
+
+  it('is given its request listeners and permission handlers in one place, since a second would replace the first', () => {
+    const privacy = read('privacy.mjs');
+    for (const call of [
+      /webRequest\.onBeforeRequest\(/g,
+      /webRequest\.onBeforeSendHeaders\(/g,
+      /\.setPermissionRequestHandler\(/g,
+      /\.setPermissionCheckHandler\(/g,
+      /\.setDevicePermissionHandler\(/g,
+    ]) {
+      assert.equal(countInModules(call), 1, String(call));
+      assert.equal([...privacy.matchAll(call)].length, 1, `${call} is not in privacy.mjs`);
+    }
+    // What the menu bar learns from the windows' requests is another event, and stays.
+    assert.equal(countInModules(/webRequest\.onCompleted\(/g), 1);
+    for (const event of [
+      'onHeadersReceived',
+      'onSendHeaders',
+      'onResponseStarted',
+      'onBeforeRedirect',
+      'onErrorOccurred',
+    ]) {
+      assert.equal(countInModules(new RegExp(`webRequest\\.${event}\\(`, 'g')), 0, event);
+    }
+  });
+});
+
+describe('links out of the windows', () => {
+  it('leave the main window only through openOutside, from a new window and from a move away from the app', () => {
+    const body = functionBody(main, 'createWindow');
+    assert.match(
+      body,
+      /win\.webContents\.setWindowOpenHandler\(\(\{ url \}\) => \{\s*openOutside\(url, \{ shell \}\);\s*return \{ action: 'deny' \};\s*\}\);/,
+    );
+    assert.match(
+      body,
+      /win\.webContents\.on\('will-navigate', \(event, url\) => \{\s*if \(!isLocal\(url, server\.url\)\) \{\s*event\.preventDefault\(\);\s*openOutside\(url, \{ shell \}\);\s*\}\s*\}\);/,
+    );
+  });
+
+  it('are handed to the system in one place in the whole app, which holds them to web pages and email', () => {
+    assert.equal(countInModules(/\.openExternal\(/g), 1);
+    assert.match(read('privacy.mjs'), /shell\.openExternal\(address\.href\)/);
+  });
+
+  it('never leave the quick-switch box: it opens no window and follows no link off the app', () => {
+    assert.doesNotMatch(palette, /openExternal|\bshell\b/);
+    assert.match(palette, /win\.webContents\.setWindowOpenHandler\(\(\) => \(\{ action: 'deny' \}\)\);/);
+    assert.match(palette, /if \(!isLocal\(url, serverUrl\)\) event\.preventDefault\(\);/);
+  });
+});
+
+describe('the pages of both windows', () => {
+  it('run sandboxed, isolated from the bridge, and without Node, as each window says itself', () => {
+    for (const [name, source] of [
+      ['main.mjs', functionBody(main, 'createWindow')],
+      ['palette.mjs', palette],
+    ]) {
+      const prefs = source.match(/webPreferences: \{([^}]*)\}/);
+      assert.ok(prefs, `${name} has no webPreferences`);
+      assert.match(prefs[1], /\bsandbox: true,/, name);
+      assert.match(prefs[1], /\bcontextIsolation: true,/, name);
+      assert.match(prefs[1], /\bnodeIntegration: false,/, name);
+    }
+  });
+});
+
+describe('the environment of a packaged app', () => {
+  it('is production, serving the pages it was packed with, whatever it was started with; a checkout may still say', () => {
+    assert.match(
+      main,
+      /if \(app\.isPackaged\) \{\n {2}process\.env\.FOCUSDESK_WEB_DIST = path\.join\(here, 'web'\);\n {2}process\.env\.NODE_ENV = 'production';\n\} else \{\n {2}process\.env\.FOCUSDESK_WEB_DIST \?\?= path\.join\(here, 'web'\);\n {2}process\.env\.NODE_ENV \?\?= 'production';\n\}/,
+    );
+    // The data folder may still be chosen: the smoke test runs the packaged app on an empty one.
+    assert.match(
+      main,
+      /^process\.env\.FOCUSDESK_DATA_DIR \?\?= path\.join\(app\.getPath\('userData'\), 'data'\);$/m,
+    );
+  });
+
+  it('is settled before the server is imported, which reads it as it loads', () => {
+    const settled = main.indexOf('if (app.isPackaged) {');
+    assert.ok(settled > 0 && settled < main.indexOf("await import('./dist/server.mjs')"));
+  });
+});

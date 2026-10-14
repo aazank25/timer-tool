@@ -99,8 +99,16 @@ async function run() {
   await page.reload(); // so that the listeners above see the page from its first script on
 
   say('GET /api/health');
-  const serverUrl = await app.evaluate(() => globalThis.__focusdesk.serverUrl);
-  const health = await fetch(`${serverUrl}/api/health`, { signal: AbortSignal.timeout(10_000) });
+  // The API answers only with the key the app made at launch, which the test hooks hand over.
+  const { serverUrl, token } = await app.evaluate(() => ({
+    serverUrl: globalThis.__focusdesk.serverUrl,
+    token: globalThis.__focusdesk.token,
+  }));
+  if (typeof token !== 'string' || !token) fail('the app did not hand over the key to its API');
+  const health = await fetch(`${serverUrl}/api/health`, {
+    headers: { 'x-focusdesk-token': token },
+    signal: AbortSignal.timeout(10_000),
+  });
   if (health.status !== 200) fail(`GET /api/health answered ${health.status}, not 200`);
 
   say('waiting for the sidebar');

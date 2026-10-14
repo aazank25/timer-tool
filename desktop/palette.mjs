@@ -63,6 +63,8 @@ export function createPalette({ serverUrl, backgroundColor, onClose = () => {} }
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
+        // What Electron does anyway with no Node in the page, said here so that it stays so.
+        sandbox: true,
         preload: path.join(here, 'preload.cjs'),
       },
     });

@@ -39,6 +39,7 @@ import {
   trayMenuWording,
 } from './menu-bar.mjs';
 import { createPalette, isLocal } from './palette.mjs';
+import { keepToServer, newToken, openOutside, TOKEN_HEADER } from './privacy.mjs';
 import { rereadAfter } from './requests.mjs';
 import {
   createHotkeys,
@@ -68,10 +69,25 @@ if (!gotLock) app.quit();
  * (%APPDATA%\FocusDesk\data on Windows)
  */
 process.env.FOCUSDESK_DATA_DIR ??= path.join(app.getPath('userData'), 'data');
-process.env.FOCUSDESK_WEB_DIST ??= path.join(here, 'web');
-process.env.NODE_ENV ??= 'production';
+// A packaged app serves the pages it was packaged with, in production, whatever the environment
+// it was started in says. Pages from a folder of somebody else's choosing would be the app in its
+// own window, with its key to the server, and anything but production has the server trust a dev
+// server's origin. Run from a checkout (npm run desktop), the environment may still say.
+if (app.isPackaged) {
+  process.env.FOCUSDESK_WEB_DIST = path.join(here, 'web');
+  process.env.NODE_ENV = 'production';
+} else {
+  process.env.FOCUSDESK_WEB_DIST ??= path.join(here, 'web');
+  process.env.NODE_ENV ??= 'production';
+}
 
 let server = null;
+/**
+ * The key the server asks of every request to its API (see privacy.mjs), made afresh at each
+ * launch and held only here: anything else on this computer can reach the port, and nothing else
+ * has this.
+ */
+const token = newToken();
 let win = null;
 let tray = null;
 let isQuitting = false;
@@ -96,6 +112,8 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      // What Electron does anyway with no Node in the page, said here so that it stays so.
+      sandbox: true,
       preload: path.join(here, 'preload.cjs'),
     },
   });
@@ -138,15 +156,16 @@ function createWindow() {
   });
   win.webContents.on('render-process-gone', giveBackHotkeys);
 
-  // Anything not served by the local app opens in the real browser.
+  // Anything not served by the local app opens in the real browser, or the mail program, and only
+  // if it is a web page or an email address (see openOutside).
   win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    openOutside(url, { shell });
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (event, url) => {
     if (!isLocal(url, server.url)) {
       event.preventDefault();
-      void shell.openExternal(url);
+      openOutside(url, { shell });
     }
   });
 }
@@ -254,8 +273,15 @@ function showWindow(route) {
 
 /* ------------------------------------------------------------------ api */
 
+/**
+ * Ask the server's API. Every request to it carries the key: these are sent with it, and the
+ * windows' requests are given it on their way out (see keepToServer).
+ */
 async function api(pathname, method = 'GET') {
-  const res = await fetch(`${server.url}/api${pathname}`, { method });
+  const res = await fetch(`${server.url}/api${pathname}`, {
+    method,
+    headers: { [TOKEN_HEADER]: token },
+  });
   if (!res.ok) throw new Error(`${method} ${pathname} failed: ${res.status}`);
   return res.status === 204 ? null : res.json();
 }
@@ -267,7 +293,10 @@ async function api(pathname, method = 'GET') {
 async function apiJson(pathname, method, body) {
   const res = await fetch(`${server.url}/api${pathname}`, {
     method,
-    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+    headers: {
+      [TOKEN_HEADER]: token,
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
@@ -905,7 +934,7 @@ app.whenReady().then(async () => {
     // database file is opened at module load.
     let startServer;
     ({ startServer, normalizeAccelerator } = await import('./dist/server.mjs'));
-    server = await startServer({ port: 0, host: '127.0.0.1' });
+    server = await startServer({ port: 0, host: '127.0.0.1', token });
     console.log(`[focusdesk] serving ${server.url} · data ${server.dataDir}`);
   } catch (err) {
     dialog.showErrorBox(
@@ -915,6 +944,11 @@ app.whenReady().then(async () => {
     app.exit(1);
     return;
   }
+
+  // Before either window exists, so that nothing a window loads goes past it: the windows may
+  // load from the server alone, their requests to it carry the key, and they are allowed nothing
+  // but notifications and writing to the clipboard (see privacy.mjs).
+  keepToServer(electronSession.defaultSession, { serverUrl: server.url, token });
 
   // The windows call these, so they are in place before either page loads. Settings asks for the
   // shortcuts to be read again after it saves one, to be let go of while it listens for a key to
@@ -938,6 +972,8 @@ app.whenReady().then(async () => {
     // What the end-to-end tests reach into the running app by, and nothing else does.
     globalThis.__focusdesk = {
       serverUrl: server.url,
+      /** The key to the server's API, for the tests' own requests to it: only when testing. */
+      token,
       showPalette: palette.showPalette,
       hidePalette: palette.hidePalette,
       get paletteWindow() {
