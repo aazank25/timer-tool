@@ -128,6 +128,12 @@ function ArchivedRow({ project, dark }: { project: Project; dark: boolean }) {
   );
 }
 
+/**
+ * The only addresses a card opens. Any other scheme (smb:, file:, javascript:, an app's own) would
+ * be handed to the system to open, and the page cannot tell which of those is safe.
+ */
+const WEB_LINK = /^https?:\/\//i;
+
 function ProjectCard({
   project,
   weekSeconds,
@@ -191,16 +197,23 @@ function ProjectCard({
         </div>
       )}
 
-      {project.notionUrl && (
-        <a
-          href={project.notionUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="mt-3 inline-block text-xs text-accent hover:underline"
-        >
-          Open in Notion →
-        </a>
-      )}
+      {project.notionUrl &&
+        (WEB_LINK.test(project.notionUrl) ? (
+          <a
+            href={project.notionUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-3 inline-block text-xs text-accent hover:underline"
+          >
+            Open in Notion →
+          </a>
+        ) : (
+          // Shown rather than left out, so a link that has gone missing from the card can be
+          // found, and changed, in the edit dialog.
+          <p className="mt-3 truncate text-xs text-muted" title={project.notionUrl}>
+            Not a web link: {project.notionUrl}
+          </p>
+        ))}
     </Card>
   );
 }

@@ -16,9 +16,14 @@ import type { InterruptionReason } from './lib/interruptions';
 export type Theme = 'system' | 'light' | 'dark';
 
 export function useTheme(): [Theme, (t: Theme) => void, boolean] {
-  const [theme, setTheme] = useState<Theme>(
-    () => (localStorage.getItem('focusdesk.theme') as Theme | null) ?? 'system',
-  );
+  const [theme, setTheme] = useState<Theme>(() => {
+    try {
+      return (localStorage.getItem('focusdesk.theme') as Theme | null) ?? 'system';
+    } catch {
+      // Storage is blocked: follow the system.
+      return 'system';
+    }
+  });
   const [systemDark, setSystemDark] = useState(
     () => window.matchMedia('(prefers-color-scheme: dark)').matches,
   );
@@ -31,7 +36,11 @@ export function useTheme(): [Theme, (t: Theme) => void, boolean] {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('focusdesk.theme', theme);
+    try {
+      localStorage.setItem('focusdesk.theme', theme);
+    } catch {
+      // Storage is blocked: the choice holds for this visit and is not kept.
+    }
     const root = document.documentElement;
     if (theme === 'system') root.removeAttribute('data-theme');
     else root.setAttribute('data-theme', theme);

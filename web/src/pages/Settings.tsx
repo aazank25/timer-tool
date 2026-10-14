@@ -275,9 +275,16 @@ function CalendarSettings() {
               value={label}
               onChange={(e) => setLabel(e.target.value)}
             />
+            {/* The address is a secret: masked on screen, and kept from spell-check, autofill and
+                autocorrect, any of which can pass on what is typed here. */}
             <input
               className={`${inputBase} min-w-56 flex-1`}
               placeholder="https://calendar.google.com/calendar/ical/…/basic.ics"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
             />
