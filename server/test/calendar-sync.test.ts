@@ -494,6 +494,49 @@ describe('syncing a calendar feed', () => {
     assert.equal((await eventsOn('2026-10-15'))[0]?.projectName, 'Beta');
   });
 
+  /** A series given a project under one name, which the feed then renames to Sync and runs on a week. */
+  async function renamedSeries(order: 'series first' | 'one-off first') {
+    const series: FeedEvent = {
+      uid: 'sync-s',
+      summary: 'Old name',
+      start: '2026-10-13T09:00:00.000Z',
+      end: '2026-10-13T09:30:00.000Z',
+      rrule: 'FREQ=WEEKLY;COUNT=1',
+    };
+    feeds.feed.set([series]);
+    await sync();
+    await assign((await eventsOn('2026-10-13'))[0]!.id, alpha);
+
+    const renamed = { ...series, summary: 'Sync', rrule: 'FREQ=WEEKLY;COUNT=2' };
+    const oneOff: FeedEvent = {
+      uid: 'one-off',
+      summary: 'Sync',
+      start: '2026-10-15T10:00:00.000Z',
+      end: '2026-10-15T10:30:00.000Z',
+    };
+    feeds.feed.set(order === 'series first' ? [renamed, oneOff] : [oneOff, renamed]);
+    await sync();
+    return projectsOf('2026-10-13', '2026-10-20');
+  }
+
+  it('gives a new meeting the project of a meeting of its title that the same sync wrote before it', async () => {
+    // The series is written first: its first meeting is renamed, and its new one takes the
+    // series' project, so by the time the one-off is written there are meetings called Sync.
+    assert.deepEqual(await renamedSeries('series first'), [
+      ['2026-10-13', alpha],
+      ['2026-10-15', alpha],
+      ['2026-10-20', alpha],
+    ]);
+  });
+
+  it('does not give a new meeting the project of a meeting of its title that the same sync writes after it', async () => {
+    assert.deepEqual(await renamedSeries('one-off first'), [
+      ['2026-10-13', alpha],
+      ['2026-10-15', null],
+      ['2026-10-20', alpha],
+    ]);
+  });
+
   it('does not give a new meeting the project of a meeting of the same title in another calendar', async () => {
     const other = await serveFeed([{ ...DESIGN_CRIT, uid: 'theirs-1', summary: 'Standup' }]);
     try {
@@ -846,15 +889,21 @@ describe('syncing a calendar feed', () => {
     advance(MINUTE);
     let closing: Promise<void> | undefined;
     // The whole answer arrives, and the server is closed in the moment between that and the write.
-    const answering = mock.method(globalThis, 'fetch', async () => ({
-      ok: true,
-      status: 200,
-      statusText: 'OK',
-      text: async () => {
-        closing = stopCalendarSyncs();
-        return ics([DESIGN_CRIT, PLANNING]);
-      },
-    }));
+    const answering = mock.method(
+      globalThis,
+      'fetch',
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              closing = stopCalendarSyncs();
+              controller.enqueue(new TextEncoder().encode(ics([DESIGN_CRIT, PLANNING])));
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/calendar' } },
+        ),
+    );
     try {
       const results = await sync();
       await closing;
@@ -1165,7 +1214,7 @@ describe('the address of a feed', () => {
       const res = await add(url);
 
       assert.equal(res.status, 400, url);
-      assert.match(res.body.error, /https, http or webcal/, url);
+      assert.match(res.body.error, /https or webcal/, url);
     }
     assert.deepEqual(await stored(), []);
   });
